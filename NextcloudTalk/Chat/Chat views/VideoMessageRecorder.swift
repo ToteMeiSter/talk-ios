@@ -6,7 +6,7 @@
 import AVFoundation
 import UIKit
 
-/// Records a short video with sound into an MP4 file (H.264 / AAC), in portrait.
+/// Records a short video with sound into an MP4 file (H.264 / AAC), in the orientation of the interface it started in.
 ///
 /// This deliberately does not use `AVCaptureMovieFileOutput`: removing the video input of the session to
 /// switch between the front and the back camera tears down the connection of that output, which ends
@@ -17,9 +17,16 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     /// A video message ends automatically after this time
     static let maxDuration: TimeInterval = 60
 
-    /// Pixel size of the recorded video: 1280x720 from the capture preset, rotated to portrait
-    private static let videoWidth = 720
-    private static let videoHeight = 1280
+    /// Pixel size of the longer and the shorter side of the video, from the 1280x720 capture preset
+    private static let videoLongSide = 1280
+    private static let videoShortSide = 720
+
+    /// Orientation of the interface when the recording started, it is fixed for the whole recording
+    let interfaceOrientation: UIInterfaceOrientation
+
+    var isLandscape: Bool {
+        return self.interfaceOrientation.isLandscape
+    }
 
     let session = AVCaptureSession()
 
@@ -60,8 +67,14 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private var previousAudioMode: AVAudioSession.Mode?
     private var previousAudioOptions: AVAudioSession.CategoryOptions?
 
-    override init() {
-        self.outputURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("video-message-recording.mp4")
+    // Set when another app took the audio device, the audio session is not ours to touch then
+    private var audioDeviceTakenByAnotherClient = false
+
+    init(interfaceOrientation: UIInterfaceOrientation) {
+        self.interfaceOrientation = interfaceOrientation
+
+        // Every recorder has a file of its own, as the file of a previous one might still be finished
+        self.outputURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("video-message-recording-\(UUID().uuidString).mp4")
 
         super.init()
 
@@ -128,7 +141,8 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 self.writer = nil
 
                 guard keepFile, writer.status == .writing else {
-                    if writer.status == .writing || writer.status == .unknown {
+                    // Cancelling is only allowed once the writer has started, which needs a first frame
+                    if writer.status == .writing {
                         writer.cancelWriting()
                     }
 
@@ -182,10 +196,10 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 self.session.addInput(oldInput)
             }
 
-            self.session.commitConfiguration()
-
             // The connection of the output is created again with the new input
             self.configureVideoConnection()
+
+            self.session.commitConfiguration()
         }
     }
 
@@ -212,6 +226,11 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
             self.session.sessionPreset = .hd1280x720
         }
 
+        // Keeps the camera available while the app is shown next to another one on an iPad
+        if self.session.isMultitaskingCameraAccessSupported {
+            self.session.isMultitaskingCameraAccessEnabled = true
+        }
+
         self.videoOutput.alwaysDiscardsLateVideoFrames = true
         self.videoOutput.setSampleBufferDelegate(self, queue: self.sampleQueue)
         self.audioOutput.setSampleBufferDelegate(self, queue: self.sampleQueue)
@@ -229,25 +248,45 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
         self.session.addOutput(self.audioOutput)
         self.videoDeviceInput = cameraInput
 
-        self.session.commitConfiguration()
-
-        // The connection only exists once the configuration is committed
         self.configureVideoConnection()
+
+        self.session.commitConfiguration()
 
         return true
     }
 
-    /// Frames are delivered rotated to portrait. The connection is reset by the session whenever the
-    /// input changes, so this needs to run after every change of the camera.
+    /// The connection is reset by the session whenever the input changes, so this needs to run after every
+    /// change of the camera. The recording is not mirrored, like in the system camera, while the preview of
+    /// the front camera is.
     private func configureVideoConnection() {
         guard let connection = self.videoOutput.connection(with: .video) else { return }
 
+        Self.apply(self.interfaceOrientation, to: connection)
+
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = false
+        }
+    }
+
+    /// Rotates the frames of a connection so they are upright in the given orientation of the interface
+    static func apply(_ orientation: UIInterfaceOrientation, to connection: AVCaptureConnection) {
         if #available(iOS 17.0, *) {
-            if connection.isVideoRotationAngleSupported(90) {
-                connection.videoRotationAngle = 90
+            let angle: CGFloat
+
+            switch orientation {
+            case .landscapeRight: angle = 0
+            case .landscapeLeft: angle = 180
+            case .portraitUpsideDown: angle = 270
+            default: angle = 90
             }
-        } else if connection.isVideoOrientationSupported {
-            connection.videoOrientation = .portrait
+
+            if connection.isVideoRotationAngleSupported(angle) {
+                connection.videoRotationAngle = angle
+            }
+        } else if connection.isVideoOrientationSupported,
+                  let videoOrientation = AVCaptureVideoOrientation(rawValue: orientation == .unknown ? UIInterfaceOrientation.portrait.rawValue : orientation.rawValue) {
+            connection.videoOrientation = videoOrientation
         }
     }
 
@@ -257,15 +296,21 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
 
         guard let writer = try? AVAssetWriter(outputURL: self.outputURL, fileType: .mp4) else { return false }
 
+        // Moves the metadata to the front of the file, so it can be played while it is being downloaded
+        writer.shouldOptimizeForNetworkUse = true
+
+        let videoWidth = self.isLandscape ? Self.videoLongSide : Self.videoShortSide
+        let videoHeight = self.isLandscape ? Self.videoShortSide : Self.videoLongSide
+
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264.rawValue,
-            AVVideoWidthKey: Self.videoWidth,
-            AVVideoHeightKey: Self.videoHeight,
+            AVVideoWidthKey: videoWidth,
+            AVVideoHeightKey: videoHeight,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: 2_500_000,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoMaxKeyFrameIntervalKey: 60
-            ]
+            ] as [String: Any]
         ]
 
         let audioSettings: [String: Any] = [
@@ -339,6 +384,11 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     // MARK: - Notifications
 
     @objc private func sessionWasInterrupted(_ notification: Notification) {
+        if let reasonValue = notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int,
+           AVCaptureSession.InterruptionReason(rawValue: reasonValue) == .audioDeviceInUseByAnotherClient {
+            self.audioDeviceTakenByAnotherClient = true
+        }
+
         DispatchQueue.main.async { self.onFailure?() }
     }
 
@@ -351,6 +401,13 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     /// The capture session activates the shared audio session on its own. Afterwards the category
     /// from before is set again, so voice messages, audio playback and calls are not affected.
     private func restoreAudioSession() {
+        // During a call the audio session belongs to the call, and so it does when another app took the device
+        guard !self.audioSessionIsInUseElsewhere else {
+            self.previousAudioMode = nil
+            self.previousAudioOptions = nil
+            return
+        }
+
         let audioSession = AVAudioSession.sharedInstance()
 
         try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
@@ -364,6 +421,12 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
         self.previousAudioCategory = nil
         self.previousAudioMode = nil
         self.previousAudioOptions = nil
+    }
+
+    private var audioSessionIsInUseElsewhere: Bool {
+        return self.audioDeviceTakenByAnotherClient
+            || NCRoomsManager.shared.callViewController != nil
+            || !CallKitManager.sharedInstance().calls.isEmpty
     }
 }
 
@@ -387,7 +450,10 @@ final class VideoMessagePreviewView: UIView {
         return button
     }()
 
-    init(session: AVCaptureSession, showsSwitchCameraButton: Bool) {
+    private let interfaceOrientation: UIInterfaceOrientation
+
+    init(session: AVCaptureSession, interfaceOrientation: UIInterfaceOrientation, showsSwitchCameraButton: Bool) {
+        self.interfaceOrientation = interfaceOrientation
         self.previewLayer = AVCaptureVideoPreviewLayer(session: session)
 
         super.init(frame: .zero)
@@ -427,13 +493,7 @@ final class VideoMessagePreviewView: UIView {
         self.previewLayer.frame = self.bounds
 
         if let connection = self.previewLayer.connection {
-            if #available(iOS 17.0, *) {
-                if connection.isVideoRotationAngleSupported(90) {
-                    connection.videoRotationAngle = 90
-                }
-            } else if connection.isVideoOrientationSupported {
-                connection.videoOrientation = .portrait
-            }
+            VideoMessageRecorder.apply(self.interfaceOrientation, to: connection)
         }
     }
 

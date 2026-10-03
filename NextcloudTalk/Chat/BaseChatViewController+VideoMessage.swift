@@ -4,6 +4,7 @@
 //
 
 import AVFoundation
+import Toast
 import UIKit
 
 /// What the record button next to an empty input field records
@@ -128,12 +129,12 @@ extension BaseChatViewController {
         }
 
         // Like for voice messages, the recording does not start while the system asks for the permission
-        Self.requestCaptureAccessIfNeeded(for: .video) {
-            Self.requestCaptureAccessIfNeeded(for: .audio) {}
+        BaseChatViewController.requestCaptureAccessIfNeeded(for: .video) {
+            BaseChatViewController.requestCaptureAccessIfNeeded(for: .audio) {}
         }
     }
 
-    private static func requestCaptureAccessIfNeeded(for mediaType: AVMediaType, completion: @escaping () -> Void) {
+    fileprivate static func requestCaptureAccessIfNeeded(for mediaType: AVMediaType, completion: @escaping () -> Void) {
         guard AVCaptureDevice.authorizationStatus(for: mediaType) == .notDetermined else {
             completion()
             return
@@ -154,15 +155,20 @@ extension BaseChatViewController {
     // MARK: - Recording
 
     private func startRecordingVideoMessage() {
+        // A recording that is still being stopped has its own recorder, so this only guards against a second start
+        guard self.videoMessageRecorder == nil else { return }
+
         // Playing a voice message and recording do not go together
         self.pauseVoiceMessagePlayer()
 
-        let recorder = VideoMessageRecorder()
+        let interfaceOrientation = self.view.window?.windowScene?.interfaceOrientation ?? .portrait
+        let recorder = VideoMessageRecorder(interfaceOrientation: interfaceOrientation == .unknown ? .portrait : interfaceOrientation)
         recorder.onFailure = { [weak self, weak recorder] in
             guard let self, let recorder, self.videoMessageRecorder === recorder else { return }
 
             NCLog.log("Video message recording failed or was interrupted")
             self.finishVideoMessageRecording(send: false)
+            self.presentVideoMessageDiscardedHint()
         }
 
         self.videoMessageRecorder = recorder
@@ -176,6 +182,7 @@ extension BaseChatViewController {
             guard success else {
                 NCLog.log("Could not start recording a video message")
                 self.finishVideoMessageRecording(send: false)
+                self.presentVideoMessageDiscardedHint()
                 return
             }
 
@@ -207,6 +214,9 @@ extension BaseChatViewController {
         self.resetVoiceRecordingLockButton()
         self.shouldLockInterfaceOrientation(lock: false)
 
+        // Brings back the icon of the mode, or the clock when there are scheduled messages
+        self.showVoiceMessageRecordButton()
+
         recorder.stop(keepFile: send && isLongEnough) { [weak self] fileURL in
             guard let fileURL else { return }
 
@@ -214,8 +224,16 @@ extension BaseChatViewController {
         }
     }
 
+    /// A recording that could not go on is dropped, which would otherwise be invisible
+    private func presentVideoMessageDiscardedHint() {
+        let toastPosition = CGPoint(x: self.textInputbar.center.x, y: self.textInputbar.center.y - self.textInputbar.frame.size.height)
+        self.view.makeToast(NSLocalizedString("Video message could not be recorded", comment: ""), duration: 3, point: toastPosition, title: nil, image: nil, completion: nil)
+    }
+
     private func showVideoMessagePreview(for recorder: VideoMessageRecorder) {
-        let previewView = VideoMessagePreviewView(session: recorder.session, showsSwitchCameraButton: recorder.canSwitchCamera)
+        let previewView = VideoMessagePreviewView(session: recorder.session,
+                                                  interfaceOrientation: recorder.interfaceOrientation,
+                                                  showsSwitchCameraButton: recorder.canSwitchCamera)
         previewView.translatesAutoresizingMaskIntoConstraints = false
         previewView.onSwitchCamera = { [weak recorder] in
             recorder?.switchCamera()
@@ -226,11 +244,21 @@ extension BaseChatViewController {
 
         NSLayoutConstraint.activate([
             previewView.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
-            previewView.heightAnchor.constraint(equalTo: self.view.heightAnchor, multiplier: 0.42),
-            previewView.widthAnchor.constraint(equalTo: previewView.heightAnchor, multiplier: 9.0 / 16.0),
             // Leaves room for the buttons of a locked recording
             previewView.bottomAnchor.constraint(equalTo: self.textInputbar.topAnchor, constant: -96)
         ])
+
+        if recorder.isLandscape {
+            NSLayoutConstraint.activate([
+                previewView.widthAnchor.constraint(equalTo: self.view.widthAnchor, multiplier: 0.5),
+                previewView.heightAnchor.constraint(equalTo: previewView.widthAnchor, multiplier: 9.0 / 16.0)
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                previewView.heightAnchor.constraint(equalTo: self.view.heightAnchor, multiplier: 0.42),
+                previewView.widthAnchor.constraint(equalTo: previewView.heightAnchor, multiplier: 9.0 / 16.0)
+            ])
+        }
     }
 
     // MARK: - Sending
@@ -238,57 +266,6 @@ extension BaseChatViewController {
     /// Uploads the video like a voice message, without a confirmation, but as an ordinary file: it has no
     /// message type, so everyone sees a regular video.
     private func shareVideoMessage(fileURL: URL) {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
-        let dateString = dateFormatter.string(from: Date())
-
-        // Replace chars that are not allowed on the filesystem
-        let notAllowedCharSet = CharacterSet(charactersIn: "\\/:%")
-        var roomString = self.room.displayName.components(separatedBy: notAllowedCharSet).joined(separator: " ")
-
-        // Replace multiple spaces with 1
-        if let regex = try? NSRegularExpression(pattern: "  +") {
-            roomString = regex.stringByReplacingMatches(in: roomString, range: .init(location: 0, length: roomString.count), withTemplate: " ")
-        }
-
-        var videoFileName = "Talk video from \(dateString) (\(roomString))"
-
-        // Trim the file name if too long
-        if videoFileName.count > 146 {
-            videoFileName = String(videoFileName.prefix(146))
-        }
-
-        videoFileName += ".mp4"
-
-        let chatFileController = NCChatFileController(account: self.account)
-        let destinationFilePath = URL(fileURLWithPath: chatFileController.tempDirectoryPath).appendingPathComponent(videoFileName).path
-
-        guard chatFileController.moveFileToTemporaryDirectory(fromSourcePath: fileURL.path, destinationPath: destinationFilePath) else {
-            NCLog.log("Failed to move video message to temporary directory")
-            return
-        }
-
-        var replyToMessage: NCChatMessage?
-        if let replyMessageView, replyMessageView.isVisible {
-            replyToMessage = replyMessageView.message
-            replyMessageView.dismiss()
-        }
-
-        var metaData = ChatFileUploadMetadata()
-        metaData.replyTo = replyToMessage?.messageId
-        metaData.threadId = self.thread?.threadId
-
-        // A parent living in another conversation means this is a private reply
-        if let replyToToken = replyToMessage?.token, replyToToken != self.room.token {
-            metaData.replyToToken = replyToToken
-        }
-
-        var upload = ChatFileUpload(localPath: destinationFilePath,
-                                    fileName: videoFileName,
-                                    room: self.room,
-                                    account: self.account)
-        upload.metadata = metaData
-
-        self.upload(upload)
+        self.shareRecording(fromPath: fileURL.path, namePrefix: "Talk video from", fileExtension: "mp4", isVoiceMessage: false)
     }
 }

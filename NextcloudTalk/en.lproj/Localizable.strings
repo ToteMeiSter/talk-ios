@@ -2744,6 +2744,9 @@
 "Video call" = "Video call";
 
 /* No comment provided by engineer. */
+"Video message could not be recorded" = "Video message could not be recorded";
+
+/* No comment provided by engineer. */
 "Video quality" = "Video quality";
 
 /* Other participants can only view the shared files */

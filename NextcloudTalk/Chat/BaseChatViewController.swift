@@ -2209,6 +2209,12 @@ import Toast
         self.showVoiceMessageRecordButton()
         guard let recorder = self.recorder else { return }
 
+        self.shareRecording(fromPath: recorder.url.path, namePrefix: "Talk recording from", fileExtension: "mp3", isVoiceMessage: true)
+    }
+
+    /// Uploads a recording without a confirmation. Voice messages get a temporary message and the voice message
+    /// type, other recordings (videos) are ordinary files without both.
+    internal func shareRecording(fromPath sourcePath: String, namePrefix: String, fileExtension: String, isVoiceMessage: Bool) {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
         let dateString = dateFormatter.string(from: Date())
@@ -2222,18 +2228,26 @@ import Toast
             roomString = regex.stringByReplacingMatches(in: roomString, range: .init(location: 0, length: roomString.count), withTemplate: " ")
         }
 
-        var audioFileName = "Talk recording from \(dateString) (\(roomString))"
+        var baseFileName = "\(namePrefix) \(dateString) (\(roomString))"
 
         // Trim the file name if too long
-        if audioFileName.count > 146 {
-            audioFileName = String(audioFileName.prefix(146))
+        if baseFileName.count > 146 {
+            baseFileName = String(baseFileName.prefix(146))
         }
-
-        audioFileName += ".mp3"
 
         let chatFileController = NCChatFileController(account: self.account)
         let tempDirectoryURL = URL(fileURLWithPath: chatFileController.tempDirectoryPath)
-        let destinationFilePath = tempDirectoryURL.appendingPathComponent(audioFileName).path
+
+        // Never replace or lose a recording made in the same second, as the temporary directory is shared
+        var fileName = "\(baseFileName).\(fileExtension)"
+        var duplicateCounter = 1
+
+        while FileManager.default.fileExists(atPath: tempDirectoryURL.appendingPathComponent(fileName).path) {
+            duplicateCounter += 1
+            fileName = "\(baseFileName) (\(duplicateCounter)).\(fileExtension)"
+        }
+
+        let destinationFilePath = tempDirectoryURL.appendingPathComponent(fileName).path
 
         var replyToMessage: NCChatMessage?
         if let replyMessageView, replyMessageView.isVisible {
@@ -2241,48 +2255,55 @@ import Toast
             replyMessageView.dismiss()
         }
 
-        if let temporaryMessage = self.createTemporaryMessage(
-            message: audioFileName,
-            replyTo: replyToMessage,
-            messageParameters: "\(destinationFilePath)",
-            silently: false,
-            isVoiceMessage: true
-        ) {
-            let movedFileToTemporaryDirectory = chatFileController.moveFileToTemporaryDirectory(
-                fromSourcePath: recorder.url.path,
-                destinationPath: destinationFilePath
+        var temporaryMessage: NCChatMessage?
+
+        if isVoiceMessage {
+            temporaryMessage = self.createTemporaryMessage(
+                message: fileName,
+                replyTo: replyToMessage,
+                messageParameters: "\(destinationFilePath)",
+                silently: false,
+                isVoiceMessage: true
             )
 
-            if !movedFileToTemporaryDirectory {
-                print("Failed to move voice-message to temporary directory.")
+            if temporaryMessage == nil {
+                print("Temporary message could not be created")
                 return
             }
-
-            if movedFileToTemporaryDirectory, NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
-                self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
-            }
-
-            var metaData = ChatFileUploadMetadata()
-            metaData.isVoiceMessage = true
-            metaData.replyTo = replyToMessage?.messageId
-            metaData.threadId = self.thread?.threadId
-
-            // A parent living in another conversation means this is a private reply
-            if let replyToToken = replyToMessage?.token, replyToToken != self.room.token {
-                metaData.replyToToken = replyToToken
-            }
-
-            var upload = ChatFileUpload(localPath: destinationFilePath,
-                                        fileName: audioFileName,
-                                        room: self.room,
-                                        account: self.account)
-            upload.metadata = metaData
-            upload.referenceId = temporaryMessage.referenceId
-
-            self.upload(upload)
-        } else {
-            print("Temporary message could not be created")
         }
+
+        let movedFileToTemporaryDirectory = chatFileController.moveFileToTemporaryDirectory(
+            fromSourcePath: sourcePath,
+            destinationPath: destinationFilePath
+        )
+
+        if !movedFileToTemporaryDirectory {
+            print("Failed to move recording to temporary directory.")
+            return
+        }
+
+        if let temporaryMessage, NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
+            self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
+        }
+
+        var metaData = ChatFileUploadMetadata()
+        metaData.isVoiceMessage = isVoiceMessage
+        metaData.replyTo = replyToMessage?.messageId
+        metaData.threadId = self.thread?.threadId
+
+        // A parent living in another conversation means this is a private reply
+        if let replyToToken = replyToMessage?.token, replyToToken != self.room.token {
+            metaData.replyToToken = replyToToken
+        }
+
+        var upload = ChatFileUpload(localPath: destinationFilePath,
+                                    fileName: fileName,
+                                    room: self.room,
+                                    account: self.account)
+        upload.metadata = metaData
+        upload.referenceId = temporaryMessage?.referenceId
+
+        self.upload(upload)
     }
 
     func upload(_ upload: ChatFileUpload) {
