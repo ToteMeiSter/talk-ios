@@ -13,8 +13,9 @@ import MBProgressHUD
 
 private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
-/// How many items can be in a share when more are added from this screen. Matches the Android app.
-private let kShareConfirmationMaxItems = 10
+/// How many items can be in a share when more are added from this screen, and how many can be picked at once
+/// in the chat. Matches the Android app.
+let kShareConfirmationMaxItems = 10
 
 @objc public protocol ShareConfirmationViewControllerDelegate {
     @objc func shareConfirmationViewControllerDidFail(_ viewController: ShareConfirmationViewController)
@@ -1063,11 +1064,23 @@ private let kShareConfirmationMaxItems = 10
     // MARK: - UIDocumentPickerViewController Delegate
 
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        for documentURL in urls {
+        let freeSlots = max(0, kShareConfirmationMaxItems - self.shareItemController.shareItems.count)
+
+        for documentURL in urls.prefix(freeSlots) {
             self.shareItemController.addItem(with: documentURL)
         }
 
         self.collectionViewScrollToEnd()
+
+        if urls.count > freeSlots {
+            let message = String.localizedStringWithFormat(NSLocalizedString("You can select up to %ld items", comment: "Shown when more photos and videos are selected than can be sent at once"), kShareConfirmationMaxItems)
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default))
+
+            DispatchQueue.main.async {
+                self.present(alert, animated: true)
+            }
+        }
     }
 
     // MARK: - ScrollView/CollectionView

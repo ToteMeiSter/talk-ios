@@ -1072,7 +1072,7 @@ import Toast
     func presentPhotoLibrary() {
         DispatchQueue.main.async {
             var pickerConfig = PHPickerConfiguration()
-            pickerConfig.selectionLimit = 20
+            pickerConfig.selectionLimit = kShareConfirmationMaxItems
             pickerConfig.filter = PHPickerFilter.any(of: [.images, .videos])
 
             self.photoPicker = PHPickerViewController(configuration: pickerConfig)

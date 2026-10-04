@@ -23,7 +23,7 @@ final class AttachmentGridViewController: UIViewController,
                                           PHPhotoLibraryChangeObserver {
 
     /// The most items that can be selected at once
-    static let maxSelection = 10
+    static let maxSelection = kShareConfirmationMaxItems
 
     private static let columns = 3
     private static let spacing: CGFloat = 2
