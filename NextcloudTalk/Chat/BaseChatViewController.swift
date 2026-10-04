@@ -769,7 +769,7 @@ import Toast
     func showAttachmentButton() {
         self.setInputbarImage(UIImage(systemName: "plus"), for: self.leftButton)
         self.leftButton.accessibilityLabel = NSLocalizedString("Share a file from your Nextcloud", comment: "")
-        self.leftButton.accessibilityHint = NSLocalizedString("Double tap to choose what to share", comment: "")
+        self.leftButton.accessibilityHint = NSLocalizedString("Double tap to choose what to share", comment: "Accessibility hint of the button that opens the attachment sheet")
         self.leftButton.accessibilityIdentifier = "shareButton"
     }
 

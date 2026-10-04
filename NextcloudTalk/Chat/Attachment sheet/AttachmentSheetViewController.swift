@@ -300,7 +300,7 @@ final class AttachmentSheetViewController: UIViewController, AttachmentGridViewC
         let count = grid.selectedAssets.count
 
         if count > 0 {
-            self.sendButton.configuration?.title = String(format: NSLocalizedString("Send (%ld)", comment: "Sends the selected photos and videos, the number is how many"), count)
+            self.sendButton.configuration?.title = String.localizedStringWithFormat(NSLocalizedString("Send (%ld)", comment: "Sends the selected photos and videos, the number is how many"), count)
         }
 
         UIView.animate(withDuration: 0.2) {
@@ -389,12 +389,12 @@ final class AttachmentSheetViewController: UIViewController, AttachmentGridViewC
     }
 
     private func updateExportProgress(index: Int, count: Int, fraction: Double) {
-        self.progressLabel.text = String(format: NSLocalizedString("Preparing %1$ld of %2$ld…", comment: "Photos and videos are being prepared for sending, the numbers are the current one and all of them"), index + 1, count)
+        self.progressLabel.text = String.localizedStringWithFormat(NSLocalizedString("Preparing %1$ld of %2$ld…", comment: "Photos and videos are being prepared for sending, the numbers are the current one and all of them"), index + 1, count)
         self.progressView.progress = Float((Double(index) + fraction) / Double(count))
     }
 
     private func showExportError(_ error: Error) {
-        let alert = UIAlertController(title: NSLocalizedString("Could not prepare the selected items", comment: ""),
+        let alert = UIAlertController(title: NSLocalizedString("Could not prepare the selected items", comment: "Title of an error shown when photos or videos could not be read from the photo library"),
                                       message: error.localizedDescription,
                                       preferredStyle: .alert)
 

@@ -77,14 +77,14 @@ final class AttachmentGridViewController: UIViewController,
 
     private lazy var limitedAccessBanner: UIView = {
         let label = UILabel()
-        label.text = NSLocalizedString("You allowed access to some of your photos only", comment: "")
+        label.text = NSLocalizedString("You allowed access to some of your photos only", comment: "Shown in the attachment sheet when the access to the photo library is limited")
         label.font = UIFont.preferredFont(forTextStyle: .footnote)
         label.adjustsFontForContentSizeCategory = true
         label.textColor = .secondaryLabel
         label.numberOfLines = 0
 
         var configuration = UIButton.Configuration.plain()
-        configuration.title = NSLocalizedString("Select more photos", comment: "")
+        configuration.title = NSLocalizedString("Select more photos", comment: "Opens the system picker to allow access to more photos")
         configuration.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 0)
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var attributes = attributes
@@ -273,9 +273,9 @@ final class AttachmentGridViewController: UIViewController,
         self.setSelectedAssets([])
 
         if isRestricted {
-            self.deniedLabel.text = NSLocalizedString("Access to your photos is restricted on this device", comment: "")
+            self.deniedLabel.text = NSLocalizedString("Access to your photos is restricted on this device", comment: "Shown in the attachment sheet when the photo library can not be used")
         } else {
-            self.deniedLabel.text = NSLocalizedString("Allow access to your photos to see your recent photos and videos here", comment: "")
+            self.deniedLabel.text = NSLocalizedString("Allow access to your photos to see your recent photos and videos here", comment: "Shown in the attachment sheet when the access to the photo library was denied")
         }
 
         self.allowAccessButton.isHidden = isRestricted
@@ -368,7 +368,7 @@ final class AttachmentGridViewController: UIViewController,
         if let index = newSelection.firstIndex(where: { $0.localIdentifier == asset.localIdentifier }) {
             newSelection.remove(at: index)
         } else if newSelection.count >= Self.maxSelection {
-            let message = String(format: NSLocalizedString("You can select up to %ld items", comment: ""), Self.maxSelection)
+            let message = String.localizedStringWithFormat(NSLocalizedString("You can select up to %ld items", comment: "Shown when more photos and videos are selected than can be sent at once"), Self.maxSelection)
 
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
             UIAccessibility.post(notification: .announcement, argument: message)
