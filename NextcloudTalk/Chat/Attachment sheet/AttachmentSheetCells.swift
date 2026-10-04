@@ -137,7 +137,7 @@ final class AttachmentAssetCell: UICollectionViewCell {
     func configure(for asset: PHAsset) {
         let isVideo = asset.mediaType == .video
 
-        self.durationLabel.text = isVideo ? Self.formattedDuration(asset.duration) : nil
+        self.durationLabel.text = isVideo ? InAppCameraSupport.formattedDuration(asset.duration) : nil
         self.durationLabel.isHidden = !isVideo
 
         let kind = isVideo ? NSLocalizedString("Video", comment: "A video in the photo library") : NSLocalizedString("Photo", comment: "A photo in the photo library")
@@ -149,7 +149,7 @@ final class AttachmentAssetCell: UICollectionViewCell {
         }
 
         if isVideo {
-            self.accessibilityLabel = "\(self.accessibilityLabel ?? kind), \(Self.formattedDuration(asset.duration))"
+            self.accessibilityLabel = "\(self.accessibilityLabel ?? kind), \(InAppCameraSupport.formattedDuration(asset.duration))"
         }
     }
 
@@ -180,20 +180,6 @@ final class AttachmentAssetCell: UICollectionViewCell {
         formatter.timeStyle = .short
         return formatter
     }()
-
-    /// "0:07", "12:34" or "1:02:03"
-    static func formattedDuration(_ duration: TimeInterval) -> String {
-        let totalSeconds = Int(duration.rounded())
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
-        }
-
-        return String(format: "%d:%02d", minutes, seconds)
-    }
 }
 
 /// The first tile of the grid: a live view of the camera, or an icon when the camera can not be used right now

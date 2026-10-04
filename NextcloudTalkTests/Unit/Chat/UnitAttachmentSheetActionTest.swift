@@ -75,12 +75,4 @@ final class UnitAttachmentSheetActionTest: XCTestCase {
 
         XCTAssertEqual(actions, [.camera, .photoLibrary, .giphy, .files, .nextcloudFiles])
     }
-
-    func testFormattedDuration() throws {
-        XCTAssertEqual(AttachmentAssetCell.formattedDuration(0), "0:00")
-        XCTAssertEqual(AttachmentAssetCell.formattedDuration(7.2), "0:07")
-        XCTAssertEqual(AttachmentAssetCell.formattedDuration(59.6), "1:00")
-        XCTAssertEqual(AttachmentAssetCell.formattedDuration(754), "12:34")
-        XCTAssertEqual(AttachmentAssetCell.formattedDuration(3723), "1:02:03")
-    }
 }
