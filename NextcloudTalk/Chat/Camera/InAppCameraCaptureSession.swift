@@ -18,6 +18,9 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
 
     let session = AVCaptureSession()
 
+    /// Photos are taken with the shortest shutter lag, like the camera of the Android app
+    static let photoQualityPrioritization: AVCapturePhotoOutput.QualityPrioritization = .speed
+
     var onPhotoCaptured: ((Result<URL, Error>) -> Void)?
     var onRecordingStarted: (() -> Void)?
     var onRecordingFinished: ((Result<URL, Error>) -> Void)?
@@ -301,6 +304,10 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
 
             if self.photoOutput.maxPhotoDimensions.width > 0 {
                 settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            }
+
+            if Self.photoQualityPrioritization.rawValue <= self.photoOutput.maxPhotoQualityPrioritization.rawValue {
+                settings.photoQualityPrioritization = Self.photoQualityPrioritization
             }
 
             self.prepare(self.photoOutput.connection(with: .video), orientation: orientation)
