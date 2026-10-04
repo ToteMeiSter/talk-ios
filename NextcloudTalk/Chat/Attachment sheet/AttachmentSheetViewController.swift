@@ -258,8 +258,16 @@ final class AttachmentSheetViewController: UIViewController, AttachmentGridViewC
     }
 
     private func choose(_ action: AttachmentSheetAction) {
-        self.stopPreview()
-        self.delegate?.attachmentSheet(self, didChoose: action)
+        // The camera of the chat is opened after the sheet is closed, so the preview needs to have let go of it
+        if action == .camera {
+            self.stopPreview { [weak self] in
+                guard let self else { return }
+                self.delegate?.attachmentSheet(self, didChoose: action)
+            }
+        } else {
+            self.stopPreview()
+            self.delegate?.attachmentSheet(self, didChoose: action)
+        }
     }
 
     // MARK: - Camera preview
@@ -281,9 +289,15 @@ final class AttachmentSheetViewController: UIViewController, AttachmentGridViewC
         self.grid.cameraSession = previewSession.session
     }
 
-    private func stopPreview() {
-        self.previewSession?.stop()
+    private func stopPreview(completion: (() -> Void)? = nil) {
         self.grid.cameraSession = nil
+
+        guard let previewSession else {
+            completion?()
+            return
+        }
+
+        previewSession.stop(completion: completion)
     }
 
     @objc private func applicationWillResignActive() {

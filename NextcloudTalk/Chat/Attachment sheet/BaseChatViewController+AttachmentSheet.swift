@@ -38,6 +38,11 @@ extension BaseChatViewController: AttachmentSheetViewControllerDelegate {
 
     func attachmentSheet(_ sheet: AttachmentSheetViewController, didExport files: [AttachmentAssetExporter.ExportedFile]) {
         guard let (shareConfirmationVC, navigationController) = self.createShareConfirmationViewController() else {
+            // Every file has a folder of its own
+            for file in files {
+                try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent())
+            }
+
             sheet.dismiss(animated: true)
             return
         }

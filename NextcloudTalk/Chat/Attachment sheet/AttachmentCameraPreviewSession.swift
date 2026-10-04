@@ -37,10 +37,17 @@ final class AttachmentCameraPreviewSession {
         }
     }
 
-    func stop() {
-        self.queue.async { [weak self] in
-            guard let self, self.session.isRunning else { return }
-            self.session.stopRunning()
+    /// - Parameter completion: Called on the main queue once the session is stopped
+    func stop(completion: (() -> Void)? = nil) {
+        // Strong on purpose: the session needs to be stopped even if its owner is gone by the time the queue gets to it
+        self.queue.async {
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            if let completion {
+                DispatchQueue.main.async(execute: completion)
+            }
         }
     }
 

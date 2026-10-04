@@ -1776,6 +1776,7 @@ import Toast
 
     func inAppCameraViewController(_ controller: InAppCameraViewController, didCaptureMediaAt fileURL: URL) {
         guard let (shareConfirmationVC, navigationController) = self.createShareConfirmationViewController() else {
+            try? FileManager.default.removeItem(at: fileURL)
             controller.dismiss(animated: true)
             return
         }
