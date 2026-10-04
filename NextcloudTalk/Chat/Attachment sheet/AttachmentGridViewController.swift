@@ -383,16 +383,12 @@ final class AttachmentGridViewController: UIViewController,
 
     // MARK: - Camera tile
 
-    private var interfaceOrientation: UIInterfaceOrientation {
-        return self.view.window?.windowScene?.interfaceOrientation ?? .portrait
-    }
-
     private func updateCameraTile() {
         guard self.isViewLoaded, self.showsCameraTile,
               let cell = self.collectionView.cellForItem(at: IndexPath(item: 0, section: 0)) as? AttachmentCameraCell
         else { return }
 
-        cell.configure(session: self.cameraSession, interfaceOrientation: self.interfaceOrientation)
+        cell.configure(session: self.cameraSession, interfaceOrientation: CameraCaptureHelpers.interfaceOrientation(of: self.view))
     }
 
     // MARK: - Layout
@@ -443,7 +439,7 @@ final class AttachmentGridViewController: UIViewController,
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: AttachmentCameraCell.reuseIdentifier, for: indexPath)
 
             if let cameraCell = cell as? AttachmentCameraCell {
-                cameraCell.configure(session: self.cameraSession, interfaceOrientation: self.interfaceOrientation)
+                cameraCell.configure(session: self.cameraSession, interfaceOrientation: CameraCaptureHelpers.interfaceOrientation(of: self.view))
             }
 
             return cell
