@@ -161,8 +161,7 @@ extension BaseChatViewController {
         // Playing a voice message and recording do not go together
         self.pauseVoiceMessagePlayer()
 
-        let interfaceOrientation = self.view.window?.windowScene?.interfaceOrientation ?? .portrait
-        let recorder = VideoMessageRecorder(interfaceOrientation: interfaceOrientation == .unknown ? .portrait : interfaceOrientation)
+        let recorder = VideoMessageRecorder(interfaceOrientation: CameraCaptureHelpers.interfaceOrientation(of: self.view))
         recorder.onFailure = { [weak self, weak recorder] in
             guard let self, let recorder, self.videoMessageRecorder === recorder else { return }
 
@@ -206,8 +205,7 @@ extension BaseChatViewController {
 
         let isLongEnough = recorder.elapsed >= 1
 
-        self.videoMessagePreviewView?.removeFromSuperview()
-        self.videoMessagePreviewView = nil
+        self.hideVideoMessagePreview()
 
         self.hideVoiceMessageRecordingView()
         self.handleCollapseVoiceRecording()
@@ -231,34 +229,85 @@ extension BaseChatViewController {
     }
 
     private func showVideoMessagePreview(for recorder: VideoMessageRecorder) {
+        // Dims the chat and keeps the touches away from it, the preview and the recording panel are the only things
+        // to use while recording
+        let scrimView = UIView()
+        scrimView.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        scrimView.isUserInteractionEnabled = true
+        scrimView.isAccessibilityElement = false
+
         let previewView = VideoMessagePreviewView(session: recorder.session,
-                                                  interfaceOrientation: recorder.interfaceOrientation,
+                                                  interfaceOrientation: CameraCaptureHelpers.interfaceOrientation(of: self.view),
                                                   showsSwitchCameraButton: recorder.canSwitchCamera)
-        previewView.translatesAutoresizingMaskIntoConstraints = false
         previewView.onSwitchCamera = { [weak recorder] in
             recorder?.switchCamera()
         }
 
+        // The connection of the preview is created again with the camera, so the orientation is applied once more
+        recorder.onCameraSwitched = { [weak self] in
+            self?.videoMessagePreviewView?.setNeedsLayout()
+            self?.updateVideoMessagePreviewLayout()
+        }
+
+        self.view.addSubview(scrimView)
         self.view.addSubview(previewView)
+        self.videoMessageScrimView = scrimView
         self.videoMessagePreviewView = previewView
 
-        NSLayoutConstraint.activate([
-            previewView.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
-            // Leaves room for the buttons of a locked recording
-            previewView.bottomAnchor.constraint(equalTo: self.textInputbar.topAnchor, constant: -96)
-        ])
+        // The gesture of the lock needs its button to be seen
+        self.bringVoiceRecordingLockButtonToFront()
 
-        if recorder.isLandscape {
-            NSLayoutConstraint.activate([
-                previewView.widthAnchor.constraint(equalTo: self.view.widthAnchor, multiplier: 0.5),
-                previewView.heightAnchor.constraint(equalTo: previewView.widthAnchor, multiplier: 9.0 / 16.0)
-            ])
+        // VoiceOver reads the recording panel and the switch camera button, not the chat behind them
+        self.tableView?.accessibilityElementsHidden = true
+
+        self.updateVideoMessagePreviewLayout()
+
+        UIAccessibility.post(notification: .layoutChanged, argument: previewView)
+    }
+
+    /// Adds a view to the chat, below the dimming of a video recording when it is shown, so it is not left over it
+    func addBelowVideoMessageScrim(_ overlayView: UIView) {
+        if let scrimView = self.videoMessageScrimView {
+            self.view.insertSubview(overlayView, belowSubview: scrimView)
         } else {
-            NSLayoutConstraint.activate([
-                previewView.heightAnchor.constraint(equalTo: self.view.heightAnchor, multiplier: 0.42),
-                previewView.widthAnchor.constraint(equalTo: previewView.heightAnchor, multiplier: 9.0 / 16.0)
-            ])
+            self.view.addSubview(overlayView)
         }
+    }
+
+    /// Removes the preview and what is shown with it, whatever the way the recording ended
+    private func hideVideoMessagePreview() {
+        self.videoMessagePreviewView?.removeFromSuperview()
+        self.videoMessagePreviewView = nil
+        self.videoMessageScrimView?.removeFromSuperview()
+        self.videoMessageScrimView = nil
+        self.lockedVideoSendButton?.removeFromSuperview()
+        self.lockedVideoSendButton = nil
+
+        self.tableView?.accessibilityElementsHidden = false
+        self.rightButton.accessibilityElementsHidden = false
+
+        UIAccessibility.post(notification: .layoutChanged, argument: nil)
+    }
+
+    /// Places the preview in the free space above the recording panel: it follows the orientation of the interface,
+    /// and is placed again whenever the layout changes, e.g. by a rotation.
+    func updateVideoMessagePreviewLayout() {
+        guard let previewView = self.videoMessagePreviewView else { return }
+
+        let inputbarTop = self.view.convert(self.textInputbar.bounds, from: self.textInputbar).minY
+        self.videoMessageScrimView?.frame = CGRect(x: 0, y: 0, width: self.view.bounds.width, height: max(inputbarTop, 0))
+
+        let insets = self.view.safeAreaInsets
+        let area = CGRect(x: insets.left,
+                          y: insets.top,
+                          width: self.view.bounds.width - insets.left - insets.right,
+                          height: inputbarTop - insets.top)
+
+        let orientation = CameraCaptureHelpers.interfaceOrientation(of: self.view)
+
+        // Only what is shown follows the orientation. The file keeps the one the recording started in.
+        previewView.interfaceOrientation = orientation
+        previewView.frame = VideoMessagePreviewPlacement.frame(in: area, aspect: VideoMessagePreviewPlacement.frameAspect(for: orientation))
     }
 
     // MARK: - Sending
