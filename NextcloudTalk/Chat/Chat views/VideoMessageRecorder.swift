@@ -62,13 +62,8 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private var sessionStartTime: CMTime?
     private var isWriting = false
 
-    // Audio session state to bring back, as the capture session changes it
-    private var previousAudioCategory: AVAudioSession.Category?
-    private var previousAudioMode: AVAudioSession.Mode?
-    private var previousAudioOptions: AVAudioSession.CategoryOptions?
-
-    // Set when another app took the audio device, the audio session is not ours to touch then
-    private var audioDeviceTakenByAnotherClient = false
+    // Brings back the audio session, as the capture session changes it
+    private let audioSessionRestorer = CaptureAudioSessionRestorer()
 
     init(interfaceOrientation: UIInterfaceOrientation) {
         self.interfaceOrientation = interfaceOrientation
@@ -90,10 +85,7 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
 
     /// Starts the camera and the recording. `completion` is called on the main queue.
     func start(completion: @escaping (Bool) -> Void) {
-        let audioSession = AVAudioSession.sharedInstance()
-        self.previousAudioCategory = audioSession.category
-        self.previousAudioMode = audioSession.mode
-        self.previousAudioOptions = audioSession.categoryOptions
+        self.audioSessionRestorer.remember()
 
         let initialPosition = self.cameraPosition
 
@@ -102,7 +94,7 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
                   self.sampleQueue.sync(execute: { self.prepareWriter() })
             else {
                 DispatchQueue.main.async {
-                    self.restoreAudioSession()
+                    self.audioSessionRestorer.restore()
                     completion(false)
                 }
                 return
@@ -128,7 +120,7 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
 
                 let finish: (URL?) -> Void = { url in
                     DispatchQueue.main.async {
-                        self.restoreAudioSession()
+                        self.audioSessionRestorer.restore()
                         completion?(url)
                     }
                 }
@@ -172,29 +164,18 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     func switchCamera() {
         let newPosition: AVCaptureDevice.Position = self.cameraPosition == .front ? .back : .front
 
-        guard Self.camera(at: newPosition) != nil else { return }
+        guard CameraCaptureHelpers.camera(at: newPosition) != nil else { return }
 
         self.cameraPosition = newPosition
 
         self.sessionQueue.async {
-            guard let newDevice = Self.camera(at: newPosition),
+            guard let newDevice = CameraCaptureHelpers.camera(at: newPosition),
                   let newInput = try? AVCaptureDeviceInput(device: newDevice)
             else { return }
 
             self.session.beginConfiguration()
 
-            let oldInput = self.videoDeviceInput
-
-            if let oldInput {
-                self.session.removeInput(oldInput)
-            }
-
-            if self.session.canAddInput(newInput) {
-                self.session.addInput(newInput)
-                self.videoDeviceInput = newInput
-            } else if let oldInput, self.session.canAddInput(oldInput) {
-                self.session.addInput(oldInput)
-            }
+            self.videoDeviceInput = CameraCaptureHelpers.replaceVideoInput(self.videoDeviceInput, with: newInput, in: self.session)
 
             // The connection of the output is created again with the new input
             self.configureVideoConnection()
@@ -204,17 +185,13 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
 
     var canSwitchCamera: Bool {
-        return Self.camera(at: .front) != nil && Self.camera(at: .back) != nil
+        return CameraCaptureHelpers.camera(at: .front) != nil && CameraCaptureHelpers.camera(at: .back) != nil
     }
 
     // MARK: - Configuration
 
-    private static func camera(at position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-    }
-
     private func configureSession(position: AVCaptureDevice.Position) -> Bool {
-        guard let camera = Self.camera(at: position) ?? Self.camera(at: position == .front ? .back : .front),
+        guard let camera = CameraCaptureHelpers.camera(at: position) ?? CameraCaptureHelpers.camera(at: position == .front ? .back : .front),
               let microphone = AVCaptureDevice.default(for: .audio),
               let cameraInput = try? AVCaptureDeviceInput(device: camera),
               let microphoneInput = try? AVCaptureDeviceInput(device: microphone)
@@ -261,32 +238,11 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private func configureVideoConnection() {
         guard let connection = self.videoOutput.connection(with: .video) else { return }
 
-        Self.apply(self.interfaceOrientation, to: connection)
+        CameraCaptureHelpers.apply(self.interfaceOrientation, to: connection)
 
         if connection.isVideoMirroringSupported {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = false
-        }
-    }
-
-    /// Rotates the frames of a connection so they are upright in the given orientation of the interface
-    static func apply(_ orientation: UIInterfaceOrientation, to connection: AVCaptureConnection) {
-        if #available(iOS 17.0, *) {
-            let angle: CGFloat
-
-            switch orientation {
-            case .landscapeRight: angle = 0
-            case .landscapeLeft: angle = 180
-            case .portraitUpsideDown: angle = 270
-            default: angle = 90
-            }
-
-            if connection.isVideoRotationAngleSupported(angle) {
-                connection.videoRotationAngle = angle
-            }
-        } else if connection.isVideoOrientationSupported,
-                  let videoOrientation = AVCaptureVideoOrientation(rawValue: orientation == .unknown ? UIInterfaceOrientation.portrait.rawValue : orientation.rawValue) {
-            connection.videoOrientation = videoOrientation
         }
     }
 
@@ -386,7 +342,7 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     @objc private func sessionWasInterrupted(_ notification: Notification) {
         if let reasonValue = notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int,
            AVCaptureSession.InterruptionReason(rawValue: reasonValue) == .audioDeviceInUseByAnotherClient {
-            self.audioDeviceTakenByAnotherClient = true
+            self.audioSessionRestorer.audioDeviceTakenByAnotherClient = true
         }
 
         DispatchQueue.main.async { self.onFailure?() }
@@ -395,47 +351,12 @@ final class VideoMessageRecorder: NSObject, AVCaptureVideoDataOutputSampleBuffer
     @objc private func sessionRuntimeError(_ notification: Notification) {
         DispatchQueue.main.async { self.onFailure?() }
     }
-
-    // MARK: - Audio session
-
-    /// The capture session activates the shared audio session on its own. Afterwards the category
-    /// from before is set again, so voice messages, audio playback and calls are not affected.
-    private func restoreAudioSession() {
-        // During a call the audio session belongs to the call, and so it does when another app took the device
-        guard !self.audioSessionIsInUseElsewhere else {
-            self.previousAudioMode = nil
-            self.previousAudioOptions = nil
-            return
-        }
-
-        let audioSession = AVAudioSession.sharedInstance()
-
-        try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
-
-        if let category = self.previousAudioCategory,
-           let mode = self.previousAudioMode,
-           let options = self.previousAudioOptions {
-            try? audioSession.setCategory(category, mode: mode, options: options)
-        }
-
-        self.previousAudioCategory = nil
-        self.previousAudioMode = nil
-        self.previousAudioOptions = nil
-    }
-
-    private var audioSessionIsInUseElsewhere: Bool {
-        return self.audioDeviceTakenByAnotherClient
-            || NCRoomsManager.shared.callViewController != nil
-            || !CallKitManager.sharedInstance().calls.isEmpty
-    }
 }
 
 /// Live preview of the camera while recording a video message, with a button to switch the camera
-final class VideoMessagePreviewView: UIView {
+final class VideoMessagePreviewView: CameraPreviewView {
 
     var onSwitchCamera: (() -> Void)?
-
-    private let previewLayer: AVCaptureVideoPreviewLayer
 
     private lazy var switchCameraButton: UIButton = {
         let button = UIButton(type: .system)
@@ -450,21 +371,11 @@ final class VideoMessagePreviewView: UIView {
         return button
     }()
 
-    private let interfaceOrientation: UIInterfaceOrientation
-
     init(session: AVCaptureSession, interfaceOrientation: UIInterfaceOrientation, showsSwitchCameraButton: Bool) {
-        self.interfaceOrientation = interfaceOrientation
-        self.previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        super.init(session: session, interfaceOrientation: interfaceOrientation)
 
-        super.init(frame: .zero)
-
-        self.backgroundColor = .black
-        self.clipsToBounds = true
         self.layer.cornerRadius = 16
         self.layer.cornerCurve = .continuous
-
-        self.previewLayer.videoGravity = .resizeAspectFill
-        self.layer.addSublayer(self.previewLayer)
 
         self.addSubview(self.switchCameraButton)
         self.switchCameraButton.isHidden = !showsSwitchCameraButton
@@ -485,16 +396,6 @@ final class VideoMessagePreviewView: UIView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-
-        self.previewLayer.frame = self.bounds
-
-        if let connection = self.previewLayer.connection {
-            VideoMessageRecorder.apply(self.interfaceOrientation, to: connection)
-        }
     }
 
     @objc private func previewTapped() {
