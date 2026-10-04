@@ -93,6 +93,23 @@ final class UnitInAppCameraTest: XCTestCase {
         XCTAssertEqual(InAppCameraSupport.captureOrientation(device: .faceDown, interface: .unknown), .portrait)
     }
 
+    func testHeldOrientationKeepsTheLastOneWhenTheDeviceLiesFlat() throws {
+        XCTAssertEqual(InAppCameraSupport.heldOrientation(current: .landscapeLeft, last: .portrait), .landscapeLeft)
+        XCTAssertEqual(InAppCameraSupport.heldOrientation(current: .portraitUpsideDown, last: .landscapeRight), .portraitUpsideDown)
+        XCTAssertEqual(InAppCameraSupport.heldOrientation(current: .faceUp, last: .landscapeLeft), .landscapeLeft)
+        XCTAssertEqual(InAppCameraSupport.heldOrientation(current: .faceDown, last: .landscapeRight), .landscapeRight)
+        XCTAssertEqual(InAppCameraSupport.heldOrientation(current: .unknown, last: .portraitUpsideDown), .portraitUpsideDown)
+        XCTAssertEqual(InAppCameraSupport.heldOrientation(current: .faceUp, last: .unknown), .unknown)
+    }
+
+    func testFlatDeviceCapturesInTheLastHeldOrientationOnThePhone() throws {
+        // Held in landscape, then laid flat: the interface is portrait, the photo still is landscape
+        let held = InAppCameraSupport.heldOrientation(current: .faceUp, last: .landscapeLeft)
+
+        XCTAssertEqual(InAppCameraSupport.captureOrientation(device: held, interface: .portrait), .landscapeRight)
+        XCTAssertEqual(InAppCameraSupport.iconRotationDegrees(device: held, interface: .portrait), 90)
+    }
+
     // MARK: - Layout along the body
 
     func testScreenEdgeOfTheBodyFollowsTheInterface() throws {

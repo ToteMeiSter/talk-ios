@@ -109,6 +109,15 @@ enum InAppCameraSupport {
         }
     }
 
+    /// The orientation the device is held in: the current one, or the last one that was usable while the device
+    /// lies flat or has no orientation. The interface can not stand in for it when it is locked to portrait.
+    static func heldOrientation(current: UIDeviceOrientation, last: UIDeviceOrientation) -> UIDeviceOrientation {
+        switch current {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight: return current
+        default: return last
+        }
+    }
+
     /// How often the body of the device is turned clockwise against the interface: 0 in portrait, 1 with the home
     /// button on the left (`.landscapeLeft`), 2 upside down, 3 with the home button on the right
     static func interfaceQuarterTurns(_ interface: UIInterfaceOrientation) -> Int {

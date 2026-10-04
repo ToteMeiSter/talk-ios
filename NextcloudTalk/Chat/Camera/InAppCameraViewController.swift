@@ -56,6 +56,14 @@ final class InAppCameraViewController: UIViewController {
     // The angle the icons are rotated to, it is not limited to a circle so the animation takes the short way
     private var iconAngle: Double = 0
 
+    // The last orientation the device was held in, for when it lies flat. Interface is portrait on the phone, so
+    // the interface can not tell how the device is held.
+    private var lastHeldOrientation: UIDeviceOrientation = .unknown
+
+    // Set while the interface rotates, the icons are turned when it is done
+    private var isInterfaceTransitioning = false
+    private var iconRotationWorkItem: DispatchWorkItem?
+
     // MARK: - Views
 
     private lazy var previewView: CameraPreviewView = CameraPreviewView(session: self.captureSession.session, interfaceOrientation: .portrait)
@@ -210,8 +218,11 @@ final class InAppCameraViewController: UIViewController {
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
 
+        self.isInterfaceTransitioning = true
+
         // The orientation of the interface is the new one at the latest when the transition is done
         coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.isInterfaceTransitioning = false
             self?.updatePreviewOrientation()
             self?.updateBodyLayout()
             self?.updateIconRotation(animated: false)
@@ -334,9 +345,9 @@ final class InAppCameraViewController: UIViewController {
             self.pinConstraint(self.flashButton, to: topEdge, inset: 12),
             self.pinConstraint(self.flashButton, to: bodyEdge(.right), inset: 16),
 
-            // The center of the timer is where the center of the buttons is
-            self.pinConstraint(self.timerLabel, to: topEdge, inset: 22),
+            // The timer is on the line of the centers of the buttons, at any edge
             self.centerAlongConstraint(self.timerLabel, edge: topEdge),
+            self.centerAcrossConstraint(self.timerLabel, edge: topEdge, like: self.closeButton),
 
             self.centerAlongConstraint(self.hintLabel, edge: shutterEdge)
         ]
@@ -380,15 +391,48 @@ final class InAppCameraViewController: UIViewController {
         }
     }
 
+    /// Puts a view on the line of the center of another one, across the direction of an edge
+    private func centerAcrossConstraint(_ view: UIView, edge: InAppCameraEdge, like other: UIView) -> NSLayoutConstraint {
+        switch edge {
+        case .top, .bottom: return view.centerYAnchor.constraint(equalTo: other.centerYAnchor)
+        case .left, .right: return view.centerXAnchor.constraint(equalTo: other.centerXAnchor)
+        }
+    }
+
     // MARK: - Rotation of the icons
 
     @objc private func deviceOrientationDidChange() {
-        self.updateIconRotation(animated: true)
+        self.iconRotationWorkItem?.cancel()
+        self.iconRotationWorkItem = nil
+
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            self.updateIconRotation(animated: true)
+            return
+        }
+
+        // On the iPad the interface rotates too, and the notification can come before the interface has its new
+        // orientation. The angle is calculated a moment later, so it is the one against the new interface. When the
+        // rotation is locked the interface does not change, and the icons turn after the same moment.
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, !self.isInterfaceTransitioning else { return }
+
+            self.updateIconRotation(animated: true)
+        }
+
+        self.iconRotationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
+    }
+
+    /// The orientation the device is held in. When it lies flat, or is not known, it is the last one it was held in.
+    private func heldOrientation() -> UIDeviceOrientation {
+        self.lastHeldOrientation = InAppCameraSupport.heldOrientation(current: UIDevice.current.orientation, last: self.lastHeldOrientation)
+
+        return self.lastHeldOrientation
     }
 
     /// Turns the icons so they are upright for the person who holds the device. Flat or unknown keeps the angle.
     private func updateIconRotation(animated: Bool) {
-        guard let degrees = InAppCameraSupport.iconRotationDegrees(device: UIDevice.current.orientation,
+        guard let degrees = InAppCameraSupport.iconRotationDegrees(device: self.heldOrientation(),
                                                                    interface: CameraCaptureHelpers.interfaceOrientation(of: self.view)) else { return }
 
         let target = InAppCameraSupport.shortestRotationTarget(current: self.iconAngle, target: degrees)
@@ -589,7 +633,7 @@ final class InAppCameraViewController: UIViewController {
 
     /// The orientation a photo or a video is captured in
     private var captureOrientation: UIInterfaceOrientation {
-        return InAppCameraSupport.captureOrientation(device: UIDevice.current.orientation,
+        return InAppCameraSupport.captureOrientation(device: self.heldOrientation(),
                                                      interface: CameraCaptureHelpers.interfaceOrientation(of: self.view))
     }
 
