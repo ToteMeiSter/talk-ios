@@ -3,13 +3,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+import ImageIO
 import Photos
 import UniformTypeIdentifiers
 
 /// Writes photos and videos of the photo library into files, so they can be handed to the upload confirmation.
 ///
-/// The original resource of an asset is written, not a rendition: HEIC stays HEIC, an animated GIF stays a GIF
+/// The original resource of an asset is written, not a rendition: an animated GIF stays a GIF, a PNG stays a PNG
 /// and a video stays a MOV. Edits made in the Photos app are kept by using the edited resource.
+/// HEIC and HEIF photos are the exception, they are written as JPEG, as the server does not make previews of them.
 enum AttachmentAssetExporter {
 
     struct ExportedFile {
@@ -102,6 +104,30 @@ enum AttachmentAssetExporter {
         return "\(name).\(fileExtension)"
     }
 
+    /// Whether a photo of this type is converted to JPEG, which is the case for HEIC and HEIF
+    static func needsJPEGConversion(uniformTypeIdentifier: String?) -> Bool {
+        guard let uniformTypeIdentifier, let type = UTType(uniformTypeIdentifier) else { return false }
+
+        return type.conforms(to: .heic) || type.conforms(to: .heif)
+    }
+
+    /// The name of a file with the extension changed to jpg
+    static func jpegFileName(for fileName: String) -> String {
+        return (fileName as NSString).deletingPathExtension + ".jpg"
+    }
+
+    /// Writes a JPEG of an image file. Orientation and metadata of the image are kept.
+    static func writeJPEG(from sourceURL: URL, to destinationURL: URL) throws {
+        guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              CGImageSourceGetCount(source) > 0,
+              let destination = CGImageDestinationCreateWithURL(destinationURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else { throw CocoaError(.fileReadCorruptFile) }
+
+        CGImageDestinationAddImageFromSource(destination, source, 0, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+
+        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
+    }
+
     // MARK: - Export
 
     /// Writes the data of an asset into a new file below `directory`. Assets that live in iCloud are downloaded.
@@ -119,15 +145,21 @@ enum AttachmentAssetExporter {
             throw ExportError.noResource(fileName: displayName)
         }
 
-        let fileName = self.exportFileName(originalFileName: originalResource?.originalFilename ?? resource.originalFilename,
-                                           resourceFileName: resource.originalFilename,
-                                           uniformTypeIdentifier: resource.uniformTypeIdentifier,
-                                           isVideo: isVideo)
+        let resourceFileName = self.exportFileName(originalFileName: originalResource?.originalFilename ?? resource.originalFilename,
+                                                   resourceFileName: resource.originalFilename,
+                                                   uniformTypeIdentifier: resource.uniformTypeIdentifier,
+                                                   isVideo: isVideo)
+
+        let convertsToJPEG = !isVideo && self.needsJPEGConversion(uniformTypeIdentifier: resource.uniformTypeIdentifier)
+        let fileName = convertsToJPEG ? self.jpegFileName(for: resourceFileName) : resourceFileName
 
         // A folder per asset, as two assets can have the same file name
         let assetDirectory = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: assetDirectory, withIntermediateDirectories: true)
         let fileURL = assetDirectory.appendingPathComponent(fileName)
+
+        // The data is written as it is, and converted afterwards when needed
+        let writtenURL = convertsToJPEG ? assetDirectory.appendingPathComponent("source-" + resourceFileName) : fileURL
 
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
@@ -140,13 +172,18 @@ enum AttachmentAssetExporter {
 
         do {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                PHAssetResourceManager.default().writeData(for: resource, toFile: fileURL, options: options) { error in
+                PHAssetResourceManager.default().writeData(for: resource, toFile: writtenURL, options: options) { error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
                         continuation.resume()
                     }
                 }
+            }
+
+            if convertsToJPEG {
+                try self.writeJPEG(from: writtenURL, to: fileURL)
+                try? FileManager.default.removeItem(at: writtenURL)
             }
         } catch {
             try? FileManager.default.removeItem(at: assetDirectory)

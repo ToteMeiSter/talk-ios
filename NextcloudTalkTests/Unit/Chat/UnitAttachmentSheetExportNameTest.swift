@@ -32,4 +32,18 @@ final class UnitAttachmentSheetExportNameTest: XCTestCase {
         XCTAssertEqual(AttachmentAssetExporter.exportFileName(originalFileName: "VID_0001", resourceFileName: "VID_0001", uniformTypeIdentifier: nil, isVideo: true), "VID_0001.mov")
         XCTAssertTrue(AttachmentAssetExporter.exportFileName(originalFileName: "", resourceFileName: "", uniformTypeIdentifier: nil, isVideo: true).hasPrefix("VID_"))
     }
+
+    func testOnlyHeicAndHeifAreConvertedToJPEG() throws {
+        XCTAssertTrue(AttachmentAssetExporter.needsJPEGConversion(uniformTypeIdentifier: "public.heic"))
+        XCTAssertTrue(AttachmentAssetExporter.needsJPEGConversion(uniformTypeIdentifier: "public.heif"))
+        XCTAssertFalse(AttachmentAssetExporter.needsJPEGConversion(uniformTypeIdentifier: "public.jpeg"))
+        XCTAssertFalse(AttachmentAssetExporter.needsJPEGConversion(uniformTypeIdentifier: "public.png"))
+        XCTAssertFalse(AttachmentAssetExporter.needsJPEGConversion(uniformTypeIdentifier: "com.compuserve.gif"))
+        XCTAssertFalse(AttachmentAssetExporter.needsJPEGConversion(uniformTypeIdentifier: "com.apple.quicktime-movie"))
+        XCTAssertFalse(AttachmentAssetExporter.needsJPEGConversion(uniformTypeIdentifier: nil))
+    }
+
+    func testJPEGFileName() throws {
+        XCTAssertEqual(AttachmentAssetExporter.jpegFileName(for: "IMG_0042.HEIC"), "IMG_0042.jpg")
+    }
 }
