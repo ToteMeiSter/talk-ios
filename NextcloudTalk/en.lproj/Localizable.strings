@@ -2121,6 +2121,9 @@
 /* No comment provided by engineer. */
 "Recent threads" = "Recent threads";
 
+/* Accessibility action of the shutter button of the camera that starts recording a video */
+"Record video" = "Record video";
+
 /* No comment provided by engineer. */
 "Record video message" = "Record video message";
 

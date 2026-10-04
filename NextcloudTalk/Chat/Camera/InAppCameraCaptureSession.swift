@@ -11,8 +11,9 @@ enum InAppCameraError: Error {
     case captureFailed
 }
 
-/// The capture side of the in-app camera: one session for photos and videos with sound. The sound is left out
-/// when there is no access to the microphone. Every callback is called on the main queue.
+/// The capture side of the in-app camera: one session for photos and videos. The microphone is only part of the
+/// session while a video is recorded, so the audio session of the app is not touched by just showing the camera.
+/// The sound is left out when there is no access to the microphone. Every callback is called on the main queue.
 final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, AVCaptureFileOutputRecordingDelegate {
 
     let session = AVCaptureSession()
@@ -33,10 +34,9 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
         return CameraCaptureHelpers.camera(at: .front) != nil && CameraCaptureHelpers.camera(at: .back) != nil
     }
 
-    /// Whether the camera in use has a flash for photos, or a torch for videos
-    var supportsFlash: Bool {
-        return !self.photoOutput.supportedFlashModes.isEmpty || (self.videoDeviceInput?.device.hasTorch ?? false)
-    }
+    /// Whether the camera in use has a flash for photos, or a torch for videos. Read on the session queue,
+    /// and handed over to the main queue together with `onConfigurationChanged`.
+    private(set) var supportsFlash = false
 
     private let sessionQueue = DispatchQueue(label: "\(groupIdentifier).inAppCamera.session")
     private let photoOutput = AVCapturePhotoOutput()
@@ -46,6 +46,13 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
     private var isConfigured = false
     private var torchWasEnabled = false
     private let audioSessionRestorer = CaptureAudioSessionRestorer()
+
+    /// The audio session was remembered for a recording and needs to be brought back. Only used on the main queue.
+    private var audioSessionNeedsRestore = false
+
+    /// Photos should not get bigger than what the sensors of the common devices give (12 MP, 4:3), like the
+    /// system camera does by default. Devices with a bigger sensor would otherwise make files of 48 MP.
+    private static let maxPhotoPixelCount = 12_700_000
 
     override init() {
         super.init()
@@ -64,7 +71,6 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
     /// Configures the session on the first call and starts it. `completion` is called on the main queue.
     func start(completion: @escaping (Bool) -> Void) {
         let position = self.cameraPosition
-        self.audioSessionRestorer.remember()
 
         self.sessionQueue.async {
             if !self.isConfigured {
@@ -72,10 +78,7 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
             }
 
             guard self.isConfigured else {
-                DispatchQueue.main.async {
-                    self.audioSessionRestorer.restore()
-                    completion(false)
-                }
+                DispatchQueue.main.async { completion(false) }
                 return
             }
 
@@ -83,7 +86,10 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
                 self.session.startRunning()
             }
 
+            let supportsFlash = self.readSupportsFlash()
+
             DispatchQueue.main.async {
+                self.supportsFlash = supportsFlash
                 self.onConfigurationChanged?()
                 completion(true)
             }
@@ -98,19 +104,11 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
             }
 
             self.setTorch(enabled: false)
+            self.removeMicrophone()
             self.session.stopRunning()
 
             DispatchQueue.main.async {
-                self.audioSessionRestorer.restore()
-            }
-        }
-    }
-
-    /// Adds the microphone to the session, for when the access was allowed after the session was set up
-    func enableMicrophoneIfAllowed() {
-        self.sessionQueue.async {
-            if self.isConfigured, self.audioDeviceInput == nil {
-                _ = self.addMicrophoneIfAllowed()
+                self.restoreAudioSessionIfNeeded()
             }
         }
     }
@@ -135,7 +133,15 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
             self.videoDeviceInput = CameraCaptureHelpers.replaceVideoInput(self.videoDeviceInput, with: newInput, in: self.session)
             self.session.commitConfiguration()
 
-            DispatchQueue.main.async { self.onConfigurationChanged?() }
+            // The sizes of photos depend on the camera
+            self.useLargestPhotoDimensions()
+
+            let supportsFlash = self.readSupportsFlash()
+
+            DispatchQueue.main.async {
+                self.supportsFlash = supportsFlash
+                self.onConfigurationChanged?()
+            }
         }
     }
 
@@ -148,6 +154,7 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
 
         self.session.beginConfiguration()
 
+        // Needed to add the outputs, the preset for photos is set once they are part of the session
         if self.session.canSetSessionPreset(.high) {
             self.session.sessionPreset = .high
         }
@@ -171,8 +178,8 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
 
         self.session.commitConfiguration()
 
-        // A video without sound is better than no video
-        _ = self.addMicrophoneIfAllowed()
+        // The preset for photos gives the full 4:3 picture of the sensor, the one for videos is set while recording
+        self.setPreset(.photo)
 
         DispatchQueue.main.async {
             self.cameraPosition = cameraInput.device.position
@@ -182,8 +189,46 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
     }
 
     /// Needs to be called on the session queue
+    private func setPreset(_ preset: AVCaptureSession.Preset) {
+        guard self.session.sessionPreset != preset, self.session.canSetSessionPreset(preset) else { return }
+
+        self.session.beginConfiguration()
+        self.session.sessionPreset = preset
+        self.session.commitConfiguration()
+
+        if preset == .photo {
+            self.useLargestPhotoDimensions()
+        }
+    }
+
+    /// Lets the photo output deliver the biggest photos the active format of the camera can do, up to
+    /// `maxPhotoPixelCount`. Needs to be called on the session queue.
+    private func useLargestPhotoDimensions() {
+        guard let supported = self.videoDeviceInput?.device.activeFormat.supportedMaxPhotoDimensions, !supported.isEmpty else { return }
+
+        func pixelCount(_ dimensions: CMVideoDimensions) -> Int {
+            return Int(dimensions.width) * Int(dimensions.height)
+        }
+
+        let fitting = supported.filter { pixelCount($0) <= Self.maxPhotoPixelCount }
+        let wanted = fitting.max { pixelCount($0) < pixelCount($1) } ?? supported.min { pixelCount($0) < pixelCount($1) }
+
+        guard let wanted, wanted.width != self.photoOutput.maxPhotoDimensions.width || wanted.height != self.photoOutput.maxPhotoDimensions.height else { return }
+
+        self.session.beginConfiguration()
+        self.photoOutput.maxPhotoDimensions = wanted
+        self.session.commitConfiguration()
+    }
+
+    /// Needs to be called on the session queue
+    private func readSupportsFlash() -> Bool {
+        return !self.photoOutput.supportedFlashModes.isEmpty || (self.videoDeviceInput?.device.hasTorch ?? false)
+    }
+
+    /// Needs to be called on the session queue
     private func addMicrophoneIfAllowed() -> Bool {
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+        guard self.audioDeviceInput == nil,
+              AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
               let microphone = AVCaptureDevice.default(for: .audio),
               let microphoneInput = try? AVCaptureDeviceInput(device: microphone)
         else { return false }
@@ -197,6 +242,26 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
         self.audioDeviceInput = microphoneInput
 
         return true
+    }
+
+    /// Takes the microphone out of the session again, so the session leaves the audio session alone.
+    /// Needs to be called on the session queue.
+    private func removeMicrophone() {
+        guard let microphoneInput = self.audioDeviceInput else { return }
+
+        self.session.beginConfiguration()
+        self.session.removeInput(microphoneInput)
+        self.session.commitConfiguration()
+
+        self.audioDeviceInput = nil
+    }
+
+    /// Needs to be called on the main queue
+    private func restoreAudioSessionIfNeeded() {
+        guard self.audioSessionNeedsRestore else { return }
+
+        self.audioSessionNeedsRestore = false
+        self.audioSessionRestorer.restore()
     }
 
     /// The connection is reset by the session whenever the input changes, so the rotation and the mirroring
@@ -234,6 +299,10 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
                 settings.flashMode = flashMode.captureFlashMode
             }
 
+            if self.photoOutput.maxPhotoDimensions.width > 0 {
+                settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            }
+
             self.prepare(self.photoOutput.connection(with: .video), orientation: orientation)
             self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
@@ -259,11 +328,29 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
 
     // MARK: - Video
 
+    /// Records with sound if the access to the microphone was allowed, a video without sound is better than no video
     func startRecording(flashMode: InAppCameraFlashMode, orientation: UIInterfaceOrientation) {
+        let withSound = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+
+        if withSound, !self.audioSessionNeedsRestore {
+            self.audioSessionRestorer.remember()
+            self.audioSessionNeedsRestore = true
+        }
+
         self.sessionQueue.async {
             guard self.session.isRunning, !self.movieOutput.isRecording else {
-                DispatchQueue.main.async { self.onRecordingFinished?(.failure(InAppCameraError.captureFailed)) }
+                DispatchQueue.main.async {
+                    self.restoreAudioSessionIfNeeded()
+                    self.onRecordingFinished?(.failure(InAppCameraError.captureFailed))
+                }
                 return
+            }
+
+            // The preset for photos can not record videos
+            self.setPreset(.high)
+
+            if withSound {
+                _ = self.addMicrophoneIfAllowed()
             }
 
             self.prepare(self.movieOutput.connection(with: .video), orientation: orientation)
@@ -305,6 +392,12 @@ final class InAppCameraCaptureSession: NSObject, AVCapturePhotoCaptureDelegate, 
 
         self.sessionQueue.async {
             self.setTorch(enabled: false)
+            self.removeMicrophone()
+            self.setPreset(.photo)
+
+            DispatchQueue.main.async {
+                self.restoreAudioSessionIfNeeded()
+            }
         }
 
         if finishedSuccessfully {

@@ -17,6 +17,7 @@ protocol InAppCameraViewControllerDelegate: AnyObject {
 }
 
 /// Full screen camera: a tap on the shutter button takes a photo, holding it records a video with sound.
+/// The microphone is only asked for and used when the first video is recorded.
 /// The camera does not close itself, that is up to the delegate.
 final class InAppCameraViewController: UIViewController {
 
@@ -43,8 +44,10 @@ final class InAppCameraViewController: UIViewController {
     private var recordingTimer: Timer?
 
     private var isSessionRunning = false
+    private var isSessionStarted = false
     private var isCaptureAvailable = false
     private var isShown = false
+    private var isClosing = false
 
     // MARK: - Views
 
@@ -217,7 +220,13 @@ final class InAppCameraViewController: UIViewController {
         self.shutterView.accessibilityLabel = NSLocalizedString("Take photo", comment: "")
         self.shutterView.accessibilityHint = NSLocalizedString("Tap for photo, hold for video", comment: "")
         self.shutterView.onAccessibilityActivate = { [weak self] in
-            self?.takePhoto()
+            guard let self else { return }
+
+            if self.isRecordingRequested {
+                self.stopRecording()
+            } else {
+                self.takePhoto()
+            }
         }
 
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(shutterGestureChanged))
@@ -297,6 +306,9 @@ final class InAppCameraViewController: UIViewController {
         self.captureSession.onConfigurationChanged = { [weak self] in
             self?.updateFlashButton()
             self?.updateControls()
+
+            // The connection of the preview is new after the session started or the camera was switched
+            self?.previewView.setNeedsLayout()
         }
 
         self.captureSession.onInterruptionChanged = { [weak self] isInterrupted in
@@ -360,21 +372,14 @@ final class InAppCameraViewController: UIViewController {
         self.isSessionRunning = true
         self.showStatus(nil)
 
-        // The sound of videos needs the microphone. Without it, the videos have no sound.
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                if granted {
-                    Task { @MainActor in
-                        self?.captureSession.enableMicrophoneIfAllowed()
-                    }
-                }
-            }
-        }
-
         self.captureSession.start { [weak self] success in
-            guard let self else { return }
+            guard let self, self.isSessionRunning else { return }
 
-            if !success {
+            if success {
+                // The shutter works as soon as the session runs
+                self.isSessionStarted = true
+                self.showStatus(nil)
+            } else {
                 NCLog.log("Could not start the in-app camera")
                 self.isSessionRunning = false
                 self.showStatus(NSLocalizedString("The camera is not available right now", comment: ""), showsSettings: false)
@@ -386,6 +391,7 @@ final class InAppCameraViewController: UIViewController {
         guard self.isSessionRunning else { return }
 
         self.isSessionRunning = false
+        self.isSessionStarted = false
         self.finishRecordingForTeardown()
         self.captureSession.stop()
         self.updateControls()
@@ -397,7 +403,7 @@ final class InAppCameraViewController: UIViewController {
         self.settingsButton.isHidden = !showsSettings
         self.statusStackView.isHidden = message == nil
 
-        self.isCaptureAvailable = message == nil
+        self.isCaptureAvailable = message == nil && self.isSessionStarted
         self.updateControls()
     }
 
@@ -422,6 +428,26 @@ final class InAppCameraViewController: UIViewController {
         self.shutterView.isUserInteractionEnabled = self.isCaptureAvailable
         self.hintLabel.isHidden = self.isRecordingRequested || !self.isCaptureAvailable
         self.flashButton.isHidden = !self.captureSession.supportsFlash || !self.isCaptureAvailable
+        self.updateShutterAccessibility()
+    }
+
+    /// The shutter only takes photos with VoiceOver, so recording a video is an action of its own
+    private func updateShutterAccessibility() {
+        let title = self.isRecordingRequested ? NSLocalizedString("Stop recording", comment: "") : NSLocalizedString("Record video", comment: "Accessibility action of the shutter button of the camera that starts recording a video")
+
+        self.shutterView.accessibilityCustomActions = self.isCaptureAvailable || self.isRecordingRequested ? [
+            UIAccessibilityCustomAction(name: title) { [weak self] _ in
+                guard let self else { return false }
+
+                if self.isRecordingRequested {
+                    self.stopRecording()
+                } else {
+                    self.startRecording()
+                }
+
+                return true
+            }
+        ] : nil
     }
 
     private func updateFlashButton() {
@@ -443,6 +469,7 @@ final class InAppCameraViewController: UIViewController {
     // MARK: - Actions
 
     private func closeTapped() {
+        self.isClosing = true
         self.holdWorkItem?.cancel()
 
         if self.isRecordingRequested {
@@ -536,7 +563,12 @@ final class InAppCameraViewController: UIViewController {
 
         switch result {
         case .success(let url):
-            self.deliver(url)
+            // A closed camera has no use for the photo, like for a video
+            if self.isClosing || !self.isShown {
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                self.deliver(url)
+            }
         case .failure(let error):
             NCLog.log("Could not take a photo with the in-app camera: \(error.localizedDescription)")
             self.showMessage(NSLocalizedString("Could not take the photo", comment: ""))
@@ -549,6 +581,15 @@ final class InAppCameraViewController: UIViewController {
         self.holdWorkItem = nil
 
         guard self.isCaptureAvailable, !self.isCapturingPhoto, !self.isRecordingRequested else { return }
+
+        // The access to the microphone is asked for with the first video. The finger is on the shutter
+        // while the question is shown, so the video is recorded with the next hold.
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            self.shutterView.setPressed(false)
+
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            return
+        }
 
         self.isRecordingRequested = true
         self.discardsRecording = false
@@ -600,7 +641,7 @@ final class InAppCameraViewController: UIViewController {
         switch result {
         case .success(let url):
             // A closed camera has no use for the video
-            if discards || !self.isShown {
+            if discards || self.isClosing || !self.isShown {
                 try? FileManager.default.removeItem(at: url)
             } else {
                 self.deliver(url)

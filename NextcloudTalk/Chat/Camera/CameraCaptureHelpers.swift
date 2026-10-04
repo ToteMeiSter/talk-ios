@@ -87,6 +87,17 @@ class CameraPreviewView: UIView {
 
         self.previewLayer.videoGravity = .resizeAspectFill
         self.layer.addSublayer(self.previewLayer)
+
+        // The session is set up on another queue, so the layer has no connection to rotate before it ran
+        NotificationCenter.default.addObserver(self, selector: #selector(sessionDidStartRunning), name: AVCaptureSession.didStartRunningNotification, object: session)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func sessionDidStartRunning() {
+        DispatchQueue.main.async { self.setNeedsLayout() }
     }
 
     required init?(coder: NSCoder) {
