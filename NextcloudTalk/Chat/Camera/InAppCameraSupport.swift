@@ -65,6 +65,24 @@ enum InAppCameraMediaKind {
     }
 }
 
+/// An edge of the body of the device or of the screen, in clockwise order
+enum InAppCameraEdge: Int {
+    case top = 0
+    case right = 1
+    case bottom = 2
+    case left = 3
+
+    /// The direction that points out of the screen over this edge, as steps in x and y (y grows downwards)
+    var outwardDirection: (dx: Int, dy: Int) {
+        switch self {
+        case .top: return (0, -1)
+        case .right: return (1, 0)
+        case .bottom: return (0, 1)
+        case .left: return (-1, 0)
+        }
+    }
+}
+
 enum InAppCameraSupport {
 
     /// A recording ends by itself after this time
@@ -89,6 +107,64 @@ enum InAppCameraSupport {
         case .landscapeRight: return .landscapeLeft
         default: return interface == .unknown ? .portrait : interface
         }
+    }
+
+    /// The orientation the device is held in: the current one, or the last one that was usable while the device
+    /// lies flat or has no orientation. The interface can not stand in for it when it is locked to portrait.
+    static func heldOrientation(current: UIDeviceOrientation, last: UIDeviceOrientation) -> UIDeviceOrientation {
+        switch current {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight: return current
+        default: return last
+        }
+    }
+
+    /// How often the body of the device is turned clockwise against the interface: 0 in portrait, 1 with the home
+    /// button on the left (`.landscapeLeft`), 2 upside down, 3 with the home button on the right
+    static func interfaceQuarterTurns(_ interface: UIInterfaceOrientation) -> Int {
+        switch interface {
+        case .landscapeLeft: return 1
+        case .portraitUpsideDown: return 2
+        case .landscapeRight: return 3
+        default: return 0
+        }
+    }
+
+    /// The edge of the screen an edge of the body of the device (as in portrait, with the home button at the bottom)
+    /// is at, when the interface has the given orientation
+    static func screenEdge(ofBodyEdge edge: InAppCameraEdge, interface: UIInterfaceOrientation) -> InAppCameraEdge {
+        return InAppCameraEdge(rawValue: (edge.rawValue + self.interfaceQuarterTurns(interface)) % 4) ?? edge
+    }
+
+    /// The angle in degrees (0, 90, 180 or 270, clockwise) the icons of the camera are rotated by, so they are upright
+    /// for the person who holds the device. It is the rotation of the device against the interface.
+    /// Nil when the device has no usable orientation (flat on a table), the icons stay as they are then.
+    static func iconRotationDegrees(device: UIDeviceOrientation, interface: UIInterfaceOrientation) -> Int? {
+        let deviceTurns: Int
+
+        switch device {
+        case .portrait: deviceTurns = 0
+        // The home button is on the left, so the device is turned clockwise
+        case .landscapeRight: deviceTurns = 1
+        case .portraitUpsideDown: deviceTurns = 2
+        case .landscapeLeft: deviceTurns = 3
+        default: return nil
+        }
+
+        return (((self.interfaceQuarterTurns(interface) - deviceTurns) % 4) + 4) % 4 * 90
+    }
+
+    /// The angle to animate the icons to, an angle that looks the same as the target but is the shortest way from the
+    /// current one. So 0 to 270 goes through -90 and not around the full circle.
+    static func shortestRotationTarget(current: Double, target: Int) -> Double {
+        var delta = (Double(target) - current).truncatingRemainder(dividingBy: 360)
+
+        if delta > 180 {
+            delta -= 360
+        } else if delta <= -180 {
+            delta += 360
+        }
+
+        return current + delta
     }
 
     /// The time of a recording like "0:07" or "12:34", or "1:02:03" after an hour
