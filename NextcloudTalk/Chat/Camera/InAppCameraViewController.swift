@@ -49,6 +49,13 @@ final class InAppCameraViewController: UIViewController {
     private var isShown = false
     private var isClosing = false
 
+    // The layout of the buttons follows the body of the device, see `updateBodyLayout`
+    private var bodyConstraints: [NSLayoutConstraint] = []
+    private var layoutOrientation: UIInterfaceOrientation?
+
+    // The angle the icons are rotated to, it is not limited to a circle so the animation takes the short way
+    private var iconAngle: Double = 0
+
     // MARK: - Views
 
     private lazy var previewView: CameraPreviewView = CameraPreviewView(session: self.captureSession.session, interfaceOrientation: .portrait)
@@ -163,7 +170,10 @@ final class InAppCameraViewController: UIViewController {
         self.updateFlashButton()
         self.updateControls()
 
+        self.updateBodyLayout()
+
         NotificationCenter.default.addObserver(self, selector: #selector(applicationDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(deviceOrientationDidChange), name: UIDevice.orientationDidChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(applicationWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
     }
 
@@ -174,6 +184,8 @@ final class InAppCameraViewController: UIViewController {
 
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
         self.updatePreviewOrientation()
+        self.updateBodyLayout()
+        self.updateIconRotation(animated: false)
         self.evaluateAvailability()
     }
 
@@ -192,14 +204,32 @@ final class InAppCameraViewController: UIViewController {
         super.viewDidLayoutSubviews()
 
         self.updatePreviewOrientation()
+        self.updateBodyLayout()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+
+        // The orientation of the interface is the new one at the latest when the transition is done
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.updatePreviewOrientation()
+            self?.updateBodyLayout()
+            self?.updateIconRotation(animated: false)
+        }
     }
 
     override var prefersStatusBarHidden: Bool {
         return true
     }
 
+    /// The interface stays in portrait on the phone, only the icons turn with the device. The iPad has to rotate for
+    /// multitasking, there the buttons are laid out along the body of the device instead.
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        return UIDevice.current.userInterfaceIdiom == .pad ? .all : .allButUpsideDown
+        return UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
+    }
+
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        return UIDevice.current.userInterfaceIdiom == .pad ? super.preferredInterfaceOrientationForPresentation : .portrait
     }
 
     // MARK: - Setup
@@ -253,27 +283,13 @@ final class InAppCameraViewController: UIViewController {
             self.flashOverlayView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
             self.flashOverlayView.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
 
-            self.closeButton.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
-            self.closeButton.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 16),
-
-            self.flashButton.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
-            self.flashButton.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -16),
-
-            self.timerLabel.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
-            self.timerLabel.centerYAnchor.constraint(equalTo: self.closeButton.centerYAnchor),
+            // The place of the timer, the buttons and the hint is set in updateBodyLayout
             self.timerLabel.heightAnchor.constraint(equalToConstant: 24),
             self.timerLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
 
-            self.shutterView.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
-            self.shutterView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -24),
             self.shutterView.widthAnchor.constraint(equalToConstant: InAppCameraShutterView.size),
             self.shutterView.heightAnchor.constraint(equalToConstant: InAppCameraShutterView.size),
 
-            self.switchCameraButton.centerYAnchor.constraint(equalTo: self.shutterView.centerYAnchor),
-            self.switchCameraButton.leadingAnchor.constraint(equalTo: self.shutterView.trailingAnchor, constant: 40),
-
-            self.hintLabel.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
-            self.hintLabel.bottomAnchor.constraint(equalTo: self.shutterView.topAnchor, constant: -16),
             self.hintLabel.leadingAnchor.constraint(greaterThanOrEqualTo: safeArea.leadingAnchor, constant: 16),
             self.hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: safeArea.trailingAnchor, constant: -16),
 
@@ -282,6 +298,117 @@ final class InAppCameraViewController: UIViewController {
             self.statusStackView.leadingAnchor.constraint(greaterThanOrEqualTo: safeArea.leadingAnchor, constant: 32),
             self.statusStackView.trailingAnchor.constraint(lessThanOrEqualTo: safeArea.trailingAnchor, constant: -32)
         ])
+    }
+
+    // MARK: - Layout along the body of the device
+
+    /// Lays out the buttons along the body of the device: the shutter at the natural bottom (the edge with the
+    /// home button), the switch of the camera next to it, close and flash at the natural top. On the phone the interface
+    /// is always in portrait, so this is the normal layout there. On the iPad the interface rotates, so the
+    /// edges of the body are moved to the edges of the screen they are at.
+    private func updateBodyLayout() {
+        let orientation = CameraCaptureHelpers.interfaceOrientation(of: self.view)
+
+        guard orientation != self.layoutOrientation else { return }
+
+        self.layoutOrientation = orientation
+
+        let bodyEdge = { (edge: InAppCameraEdge) in InAppCameraSupport.screenEdge(ofBodyEdge: edge, interface: orientation) }
+        let shutterEdge = bodyEdge(.bottom)
+        let topEdge = bodyEdge(.top)
+        let sideOfSwitch = bodyEdge(.right).outwardDirection
+        let towardsTop = topEdge.outwardDirection
+
+        // The center of the switch is the radius of the shutter, the space and the radius of the switch away
+        let switchDistance = InAppCameraShutterView.size / 2 + 40 + 22
+
+        var constraints = [
+            self.pinConstraint(self.shutterView, to: shutterEdge, inset: 24),
+            self.centerAlongConstraint(self.shutterView, edge: shutterEdge),
+
+            self.switchCameraButton.centerXAnchor.constraint(equalTo: self.shutterView.centerXAnchor, constant: CGFloat(sideOfSwitch.dx) * switchDistance),
+            self.switchCameraButton.centerYAnchor.constraint(equalTo: self.shutterView.centerYAnchor, constant: CGFloat(sideOfSwitch.dy) * switchDistance),
+
+            self.pinConstraint(self.closeButton, to: topEdge, inset: 12),
+            self.pinConstraint(self.closeButton, to: bodyEdge(.left), inset: 16),
+            self.pinConstraint(self.flashButton, to: topEdge, inset: 12),
+            self.pinConstraint(self.flashButton, to: bodyEdge(.right), inset: 16),
+
+            // The center of the timer is where the center of the buttons is
+            self.pinConstraint(self.timerLabel, to: topEdge, inset: 22),
+            self.centerAlongConstraint(self.timerLabel, edge: topEdge),
+
+            self.centerAlongConstraint(self.hintLabel, edge: shutterEdge)
+        ]
+
+        // The hint is on the side of the shutter that points to the top of the body
+        if towardsTop.dy < 0 {
+            constraints.append(self.hintLabel.bottomAnchor.constraint(equalTo: self.shutterView.topAnchor, constant: -16))
+        } else if towardsTop.dy > 0 {
+            constraints.append(self.hintLabel.topAnchor.constraint(equalTo: self.shutterView.bottomAnchor, constant: 16))
+        } else if towardsTop.dx > 0 {
+            constraints.append(self.hintLabel.leftAnchor.constraint(equalTo: self.shutterView.rightAnchor, constant: 16))
+        } else {
+            constraints.append(self.hintLabel.rightAnchor.constraint(equalTo: self.shutterView.leftAnchor, constant: -16))
+        }
+
+        NSLayoutConstraint.deactivate(self.bodyConstraints)
+        NSLayoutConstraint.activate(constraints)
+        self.bodyConstraints = constraints
+
+        self.updateIconRotation(animated: false)
+    }
+
+    /// Fixes a view at a distance from an edge of the safe area. Left and right are the sides of the screen, they do
+    /// not turn around in a language that is written from the right, as the body of the device does not either.
+    private func pinConstraint(_ view: UIView, to edge: InAppCameraEdge, inset: CGFloat) -> NSLayoutConstraint {
+        let safeArea = self.view.safeAreaLayoutGuide
+
+        switch edge {
+        case .top: return view.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: inset)
+        case .bottom: return view.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -inset)
+        case .left: return view.leftAnchor.constraint(equalTo: safeArea.leftAnchor, constant: inset)
+        case .right: return view.rightAnchor.constraint(equalTo: safeArea.rightAnchor, constant: -inset)
+        }
+    }
+
+    /// Puts a view in the middle of the screen along an edge
+    private func centerAlongConstraint(_ view: UIView, edge: InAppCameraEdge) -> NSLayoutConstraint {
+        switch edge {
+        case .top, .bottom: return view.centerXAnchor.constraint(equalTo: self.view.centerXAnchor)
+        case .left, .right: return view.centerYAnchor.constraint(equalTo: self.view.centerYAnchor)
+        }
+    }
+
+    // MARK: - Rotation of the icons
+
+    @objc private func deviceOrientationDidChange() {
+        self.updateIconRotation(animated: true)
+    }
+
+    /// Turns the icons so they are upright for the person who holds the device. Flat or unknown keeps the angle.
+    private func updateIconRotation(animated: Bool) {
+        guard let degrees = InAppCameraSupport.iconRotationDegrees(device: UIDevice.current.orientation,
+                                                                   interface: CameraCaptureHelpers.interfaceOrientation(of: self.view)) else { return }
+
+        let target = InAppCameraSupport.shortestRotationTarget(current: self.iconAngle, target: degrees)
+
+        guard target != self.iconAngle else { return }
+
+        self.iconAngle = target
+
+        let transform = CGAffineTransform(rotationAngle: CGFloat(target * .pi / 180))
+        let rotate = {
+            for view in [self.closeButton, self.flashButton, self.switchCameraButton] {
+                view.transform = transform
+            }
+        }
+
+        if animated {
+            UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: rotate)
+        } else {
+            rotate()
+        }
     }
 
     private func makeCircleButton(symbolName: String, accessibilityLabel: String, action: @escaping () -> Void) -> UIButton {
