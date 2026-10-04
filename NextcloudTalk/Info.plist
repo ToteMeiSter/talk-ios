@@ -59,7 +59,7 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>It is needed to share your location with others</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Microphone is used in voice and video calls</string>
+	<string>Microphone is used in voice and video calls and to record videos to share in chats</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Photo Library access is needed to share pictures and videos from your device</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
