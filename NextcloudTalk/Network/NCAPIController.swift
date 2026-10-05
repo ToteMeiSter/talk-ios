@@ -3202,7 +3202,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
 
         guard let attachmentFolderServerURL = self.attachmentFolderServerURL(forAccount: account)
         else {
-            completionBlock(false, 0)
+            // 0 means "the folder is there" for the callers. Not knowing where the folder is, is an error.
+            // The code is `ChatFileUploadRetryPolicy.attachmentFolderUnknownCode`, which is not visible in every
+            // target this file is compiled into.
+            completionBlock(false, NSURLErrorBadURL)
             return
         }
 

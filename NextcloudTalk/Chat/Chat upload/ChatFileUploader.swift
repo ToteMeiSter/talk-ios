@@ -220,7 +220,8 @@ enum ChatFileUploader {
     static func ensureAttachmentFolder(for account: TalkAccount) async throws {
         let statusCode: Int = await withCheckedContinuation { continuation in
             NCAPIController.sharedInstance().checkOrCreateAttachmentFolder(forAccount: account) { created, statusCode in
-                // The callback reports 0 for a folder that is there already, and false for "not created"
+                // The callback reports 0 for a folder that is there already, and false for "not created". Any other
+                // code is an error, including the one for an account without a folder URL.
                 continuation.resume(returning: created ? 0 : statusCode)
             }
         }
