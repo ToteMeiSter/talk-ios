@@ -42,8 +42,24 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// Ids of uploads that have a transfer in the session.
     private var transferringIds = Set<String>()
 
+    /// Ids of uploads that are waiting for the server to tell where to upload to.
+    private var resolvingIds = Set<String>()
+
     /// Ids of uploads that have a request to announce running.
     private var announcingIds = Set<String>()
+
+    /// Ids of uploads that have an announcement planned for later. There is at most one chain per upload.
+    private var scheduledAnnounceIds = Set<String>()
+
+    /// The tasks of the session are known, see `start()`.
+    private var didCollectTasks = false
+
+    /// The states were prepared for the new process, see `recoverStoredStates()`.
+    private var didRecoverStates = false
+
+    /// Results of transfers that came in while their state could not be read, i.e. before the first unlock
+    /// of the device. They are handled when the data is available.
+    private var deferredTransferEvents: [(id: String, failure: ChatFileUploadFailure?)] = []
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
@@ -68,7 +84,14 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// Reconnects with the session of an earlier launch and carries on with what is left. To be called
     /// on every launch, before the first upload is started.
     func start() {
-        NotificationCenter.default.addObserver(self, selector: #selector(self.applicationDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(self.applicationDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        center.addObserver(self, selector: #selector(self.applicationDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.addObserver(self, selector: #selector(self.protectedDataDidBecomeAvailable), name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
+
+        // Has to happen before the session delivers anything: an announcement that is in flight in THIS process
+        // must not look like one that was cut off by the death of the last process
+        self.recoverStoredStates()
 
         // Creating the session is what makes the system deliver the events of transfers that ended while
         // there was no process.
@@ -95,7 +118,32 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     }
 
     @objc private func applicationDidBecomeActive() {
+        // Whatever the system wanted to hear is over once the user is back, and a flag from earlier events
+        // must not make the next background launch end at once
+        self.didReceiveAllBackgroundEvents = false
+        self.callBackgroundCompletionHandler()
+
         self.announcePendingUploads()
+        self.restartUploadsFromForeground()
+    }
+
+    @objc private func applicationDidEnterBackground() {
+        if self.backgroundCompletionHandler == nil {
+            self.didReceiveAllBackgroundEvents = false
+        }
+    }
+
+    @objc private func protectedDataDidBecomeAvailable() {
+        self.recoverStoredStates()
+
+        let events = self.deferredTransferEvents
+        self.deferredTransferEvents = []
+
+        for event in events {
+            self.transferFinished(id: event.id, failure: event.failure)
+        }
+
+        self.processStoredStates()
     }
 
     private func reconnect(with tasks: [URLSessionTask]) {
@@ -105,36 +153,133 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             }
         }
 
-        self.store.removeOrphanedFiles()
+        self.didCollectTasks = true
+        self.processStoredStates()
+    }
+
+    /// Prepares the stored states for a new process. Needs the states to be readable.
+    private func recoverStoredStates() {
+        guard !self.didRecoverStates, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        self.didRecoverStates = true
 
         for var state in self.store.loadAll() {
             state.recoverAfterRelaunch()
             try? self.store.save(state)
+        }
+    }
 
+    /// Carries on with the states found on disk. Waits for the first unlock of the device, before it the states
+    /// cannot be read, which does not mean they are gone.
+    private func processStoredStates() {
+        guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        let now = Date().timeIntervalSince1970
+        let report = self.store.loadAllReport()
+
+        if !report.hasUnreadable {
+            // A transfer that ended between asking the session for its tasks and now left its id behind
+            let uploadingIds = Set(report.states.filter { $0.step == .uploading }.map { $0.id })
+            self.transferringIds = self.transferringIds.filter { uploadingIds.contains($0) }
+        }
+
+        self.store.removeOrphanedFiles(isProtectedDataAvailable: true)
+
+        for state in report.states {
             switch state.step {
             case .uploading:
-                if state.destination == nil {
-                    // The app went away while it was waiting for the server to tell where to upload to
-                    self.interrupt(state, reason: "destination not resolved")
-                } else if !self.transferringIds.contains(state.id) {
-                    // Events of finished transfers arrive right after the session was created. What is
-                    // still without a transfer after that was cancelled, e.g. because the user terminated the app.
-                    let id = state.id
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.orphanCheckDelay) { [weak self] in
-                        self?.interruptIfWithoutTransfer(id: id)
-                    }
-                }
+                self.checkUploading(state)
             case .uploaded:
                 self.announce(id: state.id)
             case .failed:
-                // The process might have died before the message was updated
-                self.markMessageAsFailed(referenceId: state.id)
+                if self.isObsolete(state, now: now) {
+                    NCLog.log("Removing the failed upload of \(state.fileName), it is obsolete")
+                    self.store.remove(state)
+                } else {
+                    // The process might have died before the message was updated
+                    self.markMessageAsFailed(referenceId: state.id)
+                }
             case .announced:
-                self.store.remove(state)
+                // The file is not needed anymore. The state stays for a while, see `isAnnounced`.
+                self.store.removeFile(for: state)
+
+                if now - (state.announcedAt ?? 0) > ChatUploadState.announcedRetention {
+                    self.store.removeState(id: state.id)
+                }
             }
         }
 
         self.callBackgroundCompletionHandlerIfIdle()
+    }
+
+    private func checkUploading(_ state: ChatUploadState) {
+        if state.destination == nil {
+            // Nothing to do for a destination that is asked for right now
+            guard !self.resolvingIds.contains(state.id) else { return }
+
+            // The app went away while it was waiting for the server to tell where to upload to
+            self.interrupt(state, reason: "destination not resolved")
+        } else if !self.transferringIds.contains(state.id), !state.suspendedBySystem {
+            // Events of finished transfers arrive right after the session was created. What is
+            // still without a transfer after that was cancelled, e.g. because the user terminated the app.
+            // A transfer the system stopped is started again when the app is in front.
+            let id = state.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.orphanCheckDelay) { [weak self] in
+                self?.interruptIfWithoutTransfer(id: id)
+            }
+        }
+    }
+
+    /// A failed upload nobody can ask to send again anymore, or nobody did for long.
+    private func isObsolete(_ state: ChatUploadState, now: TimeInterval) -> Bool {
+        if now - state.createdAt > ChatUploadState.failedRetention { return true }
+
+        let database = NCDatabaseManager.sharedInstance()
+
+        guard database.talkAccount(forAccountId: state.accountId) != nil,
+              database.room(withToken: state.roomToken, forAccountId: state.accountId) != nil
+        else { return true }
+
+        return NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", state.id).firstObject() == nil
+    }
+
+    /// Whether the file was posted. The temporary message of such an upload that is still shown is stale.
+    func isAnnounced(referenceId: String) -> Bool {
+        return self.store.load(id: referenceId)?.step == .announced
+    }
+
+    /// Sends the transfers again that are better sent from the foreground.
+    ///
+    /// The system treats a transfer that was created in the background as discretionary and may hold it back
+    /// for hours, so what did not send a byte yet is cancelled and created again now. The cancellation that
+    /// comes back is known to the state and not a failure. A transfer the system stopped is started again.
+    private func restartUploadsFromForeground() {
+        guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        self.session.getAllTasks { [weak self] tasks in
+            DispatchQueue.main.async {
+                self?.restart(from: tasks)
+            }
+        }
+    }
+
+    private func restart(from tasks: [URLSessionTask]) {
+        for state in self.store.loadAll() where state.step == .uploading {
+            let task = tasks.first { $0.taskDescription == state.id && ($0.state == .running || $0.state == .suspended) }
+
+            if let task {
+                guard state.startedInBackground, task.countOfBytesSent == 0 else { continue }
+
+                var restarting = state
+                restarting.prepareRestartFromForeground()
+
+                if self.persist(restarting) {
+                    task.cancel()
+                }
+            } else if state.suspendedBySystem, state.destination != nil, !self.transferringIds.contains(state.id) {
+                self.startTransfer(state, after: 0)
+            }
+        }
     }
 
     private func interruptIfWithoutTransfer(id: String) {
@@ -225,6 +370,9 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     func retry(referenceId: String) -> Bool {
         guard var state = self.store.load(id: referenceId) else { return false }
 
+        // Posted already: nothing to send, the message of the server is the one to show
+        if state.step == .announced { return true }
+
         guard self.store.fileExists(for: state) || state.fileUploaded else {
             return false
         }
@@ -237,7 +385,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         case .announce:
             self.announce(id: referenceId)
         case .startTransfer:
-            if state.destination != nil {
+            // The name of a file in the attachment folder was free when it was chosen, which can be long ago now
+            if state.destination != nil, state.destinationKind != .attachmentFolder {
                 self.startTransfer(state, after: 0)
             } else if let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: state.accountId),
                       let room = NCDatabaseManager.sharedInstance().room(withToken: state.roomToken, forAccountId: state.accountId) {
@@ -259,8 +408,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     }
 
     /// The user deleted the message of an upload that failed.
-    func discard(referenceId: String) {
-        guard let state = self.store.load(id: referenceId) else { return }
+    func discard(referenceId: String?) {
+        guard let referenceId, let state = self.store.load(id: referenceId) else { return }
 
         // The state goes first, so the cancellation below finds nothing to carry on with
         self.store.remove(state)
@@ -277,6 +426,9 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     @MainActor
     private func resolveDestinationAndTransfer(id: String, room: NCRoom, account: TalkAccount) async {
         guard let state = self.store.load(id: id) else { return }
+
+        self.resolvingIds.insert(id)
+        defer { self.resolvingIds.remove(id) }
 
         // Keeps the app running while it waits for the server to answer
         let bgTask = BGTaskHelper.startBackgroundTask(withName: "ChatUploadResolveDestination")
@@ -321,6 +473,11 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             self.interrupt(state, reason: "request could not be built")
             return
         }
+
+        // A transfer created while the app is in the background is a discretionary one for the system
+        var state = state
+        state.transferStarted(inBackground: UIApplication.shared.applicationState == .background)
+        self.persist(state)
 
         let task = self.session.uploadTask(with: request, fromFile: self.store.fileURL(for: state))
         task.taskDescription = state.id
@@ -409,8 +566,18 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     // MARK: - Steps
 
     private func transferFinished(id: String, failure: ChatFileUploadFailure?) {
-        guard var state = self.store.load(id: id) else {
+        var state: ChatUploadState
+
+        switch self.store.loadResult(id: id) {
+        case .found(let found):
+            state = found
+        case .missing:
             // Discarded in the meantime
+            return
+        case .unreadable:
+            // Before the first unlock of the device. The result is not lost, just handled later.
+            NCLog.log("The state of the upload \(id) cannot be read yet, its result is handled later")
+            self.deferredTransferEvents.append((id, failure))
             return
         }
 
@@ -426,10 +593,47 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             self.startTransfer(state, after: delay)
         case .announce:
             self.announce(id: id)
+        case .recreateAttachmentFolder:
+            self.recreateAttachmentFolderAndTransfer(state)
+        case .suspended:
+            // Started again when the app is in front, see `restartUploadsFromForeground`
+            NCLog.log("The system stopped the transfer of \(state.fileName), it is sent again when the app is active")
         case .failed:
             self.markMessageAsFailed(referenceId: id)
         case .finished, .none:
             break
+        }
+    }
+
+    /// The server did not find the attachment folder. Creates it and sends the file again.
+    private func recreateAttachmentFolderAndTransfer(_ state: ChatUploadState) {
+        guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: state.accountId) else {
+            self.interrupt(state, reason: "account is gone")
+            return
+        }
+
+        let id = state.id
+        let bgTask = BGTaskHelper.startBackgroundTask(withName: "ChatUploadAttachmentFolder")
+
+        Task { @MainActor in
+            defer { bgTask.stopBackgroundTask() }
+
+            do {
+                try await ChatFileUploader.ensureAttachmentFolder(for: account)
+            } catch {
+                NCLog.log("Could not create the attachment folder for \(state.fileName). Error: \(error.localizedDescription)")
+
+                if let current = self.store.load(id: id), current.step == .uploading {
+                    self.interrupt(current, reason: "attachment folder")
+                }
+
+                return
+            }
+
+            // The user might have deleted the message in the meantime
+            guard let current = self.store.load(id: id), current.step == .uploading else { return }
+
+            self.startTransfer(current, after: 0)
         }
     }
 
@@ -439,11 +643,19 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// the next try knows whether the file might have been posted already.
     private func announce(id: String, after delay: TimeInterval = 0) {
         if delay > 0 {
+            // One chain per upload: a second one would use up the attempts twice as fast
+            guard self.scheduledAnnounceIds.insert(id).inserted else { return }
+
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.announce(id: id)
+                // An announcement that was started in the meantime took over from this one
+                guard let self, self.scheduledAnnounceIds.remove(id) != nil else { return }
+
+                self.announce(id: id)
             }
             return
         }
+
+        self.scheduledAnnounceIds.remove(id)
 
         guard !self.announcingIds.contains(id),
               var state = self.store.load(id: id),
@@ -483,7 +695,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                                                     at: destination)
             } catch {
                 failure = ChatFileUploader.failure(for: error)
-                NCLog.log("Announcing \(announcedState.fileName) failed. Error: \(error.localizedDescription)")
+                NCLog.log("Announcing \(announcedState.fileName) failed. Error: \(error.localizedDescription). Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
             }
 
             self.announcingIds.remove(id)
@@ -503,12 +715,13 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         switch action {
         case .finished:
             NCLog.log("Uploaded and shared \(state.fileName)")
-            self.store.remove(state)
+            // The state stays for a while, see `isAnnounced`
+            self.store.removeFile(for: state)
         case .announce(let delay):
             self.announce(id: id, after: delay)
         case .failed:
             self.markMessageAsFailed(referenceId: id)
-        case .startTransfer, .none:
+        case .startTransfer, .recreateAttachmentFolder, .suspended, .none:
             break
         }
     }
