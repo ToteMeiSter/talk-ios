@@ -25,4 +25,16 @@ final class UnitChatAttachmentFolderTest: TestBaseRealm {
         XCTAssertEqual(result?.statusCode, NCAPIController.attachmentFolderUnknownCode)
         XCTAssertNotEqual(result?.statusCode, 0)
     }
+
+    func testAnExistingFolderIsAvailable() {
+        // What the callback reports for a folder that is there, and for one that was created
+        XCTAssertTrue(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: 0))
+        XCTAssertTrue(NCAPIController.isAttachmentFolderAvailable(created: true, statusCode: 0))
+    }
+
+    func testErrorsAreNoAvailableFolder() {
+        XCTAssertFalse(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: NCAPIController.attachmentFolderUnknownCode))
+        XCTAssertFalse(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: 507))
+        XCTAssertFalse(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: 403))
+    }
 }

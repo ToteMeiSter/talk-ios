@@ -3328,14 +3328,21 @@ class NCAPIController: NSObject, NKCommonDelegate {
         }
     }
 
-    /// Creates the attachment folder when it is missing. Returns whether it had to be created.
+    /// Creates the attachment folder when it is missing. Returns whether the folder is there afterwards, which includes
+    /// a folder that was there already, e.g. because an upload running at the same time created it.
     @MainActor
     func checkOrCreateAttachmentFolder(forAccount account: TalkAccount) async -> Bool {
         return await withCheckedContinuation { continuation in
-            checkOrCreateAttachmentFolder(forAccount: account) { created, _ in
-                continuation.resume(returning: created)
+            checkOrCreateAttachmentFolder(forAccount: account) { created, statusCode in
+                continuation.resume(returning: NCAPIController.isAttachmentFolderAvailable(created: created, statusCode: statusCode))
             }
         }
+    }
+
+    /// The callback of `checkOrCreateAttachmentFolder` answers `(false, 0)` for a folder that exists, and `(true, 0)` for
+    /// one it created. Anything else is an error.
+    static func isAttachmentFolderAvailable(created: Bool, statusCode: Int) -> Bool {
+        return created || statusCode == 0
     }
 
     @MainActor
