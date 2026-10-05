@@ -243,6 +243,29 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertEqual(announced.step, .announced)
     }
 
+    // MARK: - Destination
+
+    func testDestinationIsStoredAndRestored() {
+        var state = makeState()
+        state.destinationKind = nil
+        state.draftPath = nil
+        state.serverPath = nil
+        state.serverURL = nil
+        XCTAssertNil(state.destination)
+
+        state.setDestination(.draftFolder(draftPath: "Talk/Draft/a.jpg", serverPath: "/Talk/Draft/a.jpg", serverURL: "https://cloud.example.com/a.jpg"))
+        XCTAssertTrue(state.isDraftFolder)
+        XCTAssertEqual(state.destination?.serverURL, "https://cloud.example.com/a.jpg")
+
+        guard case .draftFolder(let draftPath, _, _)? = state.destination else { return XCTFail("Expected the draft folder") }
+        XCTAssertEqual(draftPath, "Talk/Draft/a.jpg")
+
+        state.setDestination(.attachmentFolder(serverPath: "/Talk/b.jpg", serverURL: "https://cloud.example.com/b.jpg"))
+        XCTAssertFalse(state.isDraftFolder)
+        XCTAssertNil(state.draftPath)
+        XCTAssertEqual(state.destination?.serverPath, "/Talk/b.jpg")
+    }
+
     // MARK: - Serialization
 
     func testStateSurvivesEncodingAndDecoding() throws {

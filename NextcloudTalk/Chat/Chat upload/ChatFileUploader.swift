@@ -189,10 +189,21 @@ enum ChatFileUploader {
 
     /// Determines where to upload the file to, which is the only place that knows about the two
     /// different ways of getting a file into a conversation.
-    private static func resolveDestination(for upload: ChatFileUpload) async throws -> ChatFileUploadDestination {
-        guard upload.room.supportsConversationSubfolders else {
+    static func resolveDestination(for upload: ChatFileUpload) async throws -> ChatFileUploadDestination {
+        return try await self.resolveDestination(in: upload.room, account: upload.account, fileName: upload.fileName, allowUpdate: upload.allowUpdate)
+    }
+
+    /// Like `resolveDestination(for:)`, waiting for the network as long as the retry policy says so.
+    static func resolveDestinationWithRetries(in room: NCRoom, account: TalkAccount, fileName: String, allowUpdate: Bool) async throws -> ChatFileUploadDestination {
+        return try await self.retrying {
+            try await self.resolveDestination(in: room, account: account, fileName: fileName, allowUpdate: allowUpdate)
+        }
+    }
+
+    static func resolveDestination(in room: NCRoom, account: TalkAccount, fileName: String, allowUpdate: Bool) async throws -> ChatFileUploadDestination {
+        guard room.supportsConversationSubfolders else {
             do {
-                let uniqueName = try await NCAPIController.sharedInstance().uniqueNameForFileUpload(withName: upload.fileName, isOriginalName: true, forAccount: upload.account)
+                let uniqueName = try await NCAPIController.sharedInstance().uniqueNameForFileUpload(withName: fileName, isOriginalName: true, forAccount: account)
 
                 return .attachmentFolder(serverPath: uniqueName.fileServerPath, serverURL: uniqueName.fileServerURL)
             } catch {
@@ -200,12 +211,12 @@ enum ChatFileUploader {
             }
         }
 
-        let draftFolder = try await self.probeDraftFolder(for: upload.room,
-                                                          account: upload.account,
-                                                          fileNames: [upload.fileName],
-                                                          allowUpdate: upload.allowUpdate)
+        let draftFolder = try await self.probeDraftFolder(for: room,
+                                                          account: account,
+                                                          fileNames: [fileName],
+                                                          allowUpdate: allowUpdate)
 
-        return try await self.draftFolderDestination(in: draftFolder, for: upload)
+        return try await self.draftFolderDestination(in: draftFolder, fileName: fileName, account: account)
     }
 
     /// Makes sure the conversation subfolder exists and returns the draft folder to upload into.
@@ -218,14 +229,18 @@ enum ChatFileUploader {
     }
 
     private static func draftFolderDestination(in draftFolder: String, for upload: ChatFileUpload) async throws -> ChatFileUploadDestination {
+        return try await self.draftFolderDestination(in: draftFolder, fileName: upload.fileName, account: upload.account)
+    }
+
+    private static func draftFolderDestination(in draftFolder: String, fileName: String, account: TalkAccount) async throws -> ChatFileUploadDestination {
         // The file is uploaded under a temporary name, it only gets its final name when the
         // attachment endpoint moves it out of the draft folder.
-        let fileExtension = URL(fileURLWithPath: upload.fileName).pathExtension
+        let fileExtension = URL(fileURLWithPath: fileName).pathExtension
         let temporaryName = UUID().uuidString + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
         let draftPath = "\(draftFolder)/\(temporaryName)"
         let serverPath = "/\(draftPath)"
 
-        guard let serverURL = NCAPIController.sharedInstance().serverFileURL(forfilePath: serverPath, forAccount: upload.account)
+        guard let serverURL = NCAPIController.sharedInstance().serverFileURL(forfilePath: serverPath, forAccount: account)
         else { throw ChatFileUploadError.destinationUnavailable(underlyingError: nil) }
 
         return .draftFolder(draftPath: draftPath, serverPath: serverPath, serverURL: serverURL)
@@ -286,27 +301,44 @@ enum ChatFileUploader {
 
     /// Posts the already uploaded file as a message into the conversation.
     private static func announce(_ upload: ChatFileUpload, at destination: ChatFileUploadDestination) async throws {
+        try await self.announce(inRoom: upload.room.token,
+                                account: upload.account,
+                                fileName: upload.fileName,
+                                referenceId: upload.referenceId,
+                                metadata: upload.metadata,
+                                allowUpdate: upload.allowUpdate,
+                                at: destination)
+    }
+
+    // swiftlint:disable:next function_parameter_count
+    static func announce(inRoom token: String,
+                         account: TalkAccount,
+                         fileName: String,
+                         referenceId: String?,
+                         metadata: ChatFileUploadMetadata,
+                         allowUpdate: Bool,
+                         at destination: ChatFileUploadDestination) async throws {
         let apiController = NCAPIController.sharedInstance()
-        let talkMetaData = upload.metadata.asDictionary()
+        let talkMetaData = metadata.asDictionary()
 
         do {
             switch destination {
             case .draftFolder(let draftPath, _, _):
-                try await apiController.postConversationAttachment(inRoom: upload.room.token,
+                try await apiController.postConversationAttachment(inRoom: token,
                                                                    filePath: draftPath,
-                                                                   fileName: upload.fileName,
-                                                                   referenceId: upload.referenceId,
+                                                                   fileName: fileName,
+                                                                   referenceId: referenceId,
                                                                    talkMetaData: talkMetaData,
-                                                                   allowUpdate: upload.allowUpdate,
-                                                                   forAccount: upload.account)
+                                                                   allowUpdate: allowUpdate,
+                                                                   forAccount: account)
             case .attachmentFolder(let serverPath, _):
                 // The files sharing API has no way to grant update permissions, which is why the
                 // option is not offered at all without conversation subfolders.
-                try await apiController.shareFileOrFolder(forAccount: upload.account,
+                try await apiController.shareFileOrFolder(forAccount: account,
                                                           atPath: serverPath,
-                                                          toRoom: upload.room.token,
+                                                          toRoom: token,
                                                           withTalkMetaData: talkMetaData,
-                                                          withReferenceId: upload.referenceId)
+                                                          withReferenceId: referenceId)
             }
         } catch {
             throw ChatFileUploadError.shareFailed(underlyingError: error)

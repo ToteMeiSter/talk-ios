@@ -91,16 +91,18 @@ struct ChatUploadState: Codable, Equatable {
     /// container is not stable.
     var localFileName: String
 
-    var destinationKind: DestinationKind
+    /// Where the file is uploaded to. All of these are `nil` until the destination is resolved, which
+    /// needs the network and happens when the user sends the file.
+    var destinationKind: DestinationKind?
 
     /// Path in the draft folder, only for `.draftFolder`.
     var draftPath: String?
 
     /// Path of the file relative to the files root of the user.
-    var serverPath: String
+    var serverPath: String?
 
     /// Absolute URL the file is uploaded to.
-    var serverURL: String
+    var serverURL: String?
 
     var allowUpdate = false
     var metadata = Metadata()
@@ -133,6 +135,35 @@ struct ChatUploadState: Codable, Equatable {
 
     var isDraftFolder: Bool {
         return self.destinationKind == .draftFolder
+    }
+
+    var destination: ChatFileUploadDestination? {
+        guard let serverPath, let serverURL else { return nil }
+
+        switch self.destinationKind {
+        case .draftFolder:
+            guard let draftPath else { return nil }
+            return .draftFolder(draftPath: draftPath, serverPath: serverPath, serverURL: serverURL)
+        case .attachmentFolder:
+            return .attachmentFolder(serverPath: serverPath, serverURL: serverURL)
+        case .none:
+            return nil
+        }
+    }
+
+    mutating func setDestination(_ destination: ChatFileUploadDestination) {
+        switch destination {
+        case .draftFolder(let draftPath, let serverPath, let serverURL):
+            self.destinationKind = .draftFolder
+            self.draftPath = draftPath
+            self.serverPath = serverPath
+            self.serverURL = serverURL
+        case .attachmentFolder(let serverPath, let serverURL):
+            self.destinationKind = .attachmentFolder
+            self.draftPath = nil
+            self.serverPath = serverPath
+            self.serverURL = serverURL
+        }
     }
 
     // MARK: - Transitions
