@@ -2339,9 +2339,15 @@ import Toast
 
             upload.referenceId = temporaryMessage.referenceId
 
-            // The file is copied here, the caller may delete it right after this returns. A failure is shown
-            // on the message by a notification, which arrives after the message is in the chat.
+            // The file is copied here, the caller may delete it right after this returns
             let isStaged = ChatBackgroundUploader.shared.stage(upload)
+
+            if !isStaged {
+                // `stage` marked the stored message as failed. The notification about it is handled before the
+                // message below is appended, so the copy that is appended has to say it as well.
+                temporaryMessage.sendingFailed = true
+                temporaryMessage.isOfflineMessage = false
+            }
 
             if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: self.room) {
                 self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
