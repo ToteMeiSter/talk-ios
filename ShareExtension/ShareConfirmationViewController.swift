@@ -68,6 +68,7 @@ let kShareConfirmationMaxItems = 10
     private var imagePicker: UIImagePickerController?
     private var hud: MBProgressHUD?
     private var objectShareMessage: NCChatMessage?
+    private var fileShareMessage: NCChatMessage?
 
     /// Whether the media preview is shown, which it is as long as files are shared. Text and rich objects
     /// have their own look.
@@ -86,6 +87,7 @@ let kShareConfirmationMaxItems = 10
         case text
         case item
         case objectShare
+        case fileShare
     }
 
     // MARK: - UI Controls
@@ -478,6 +480,22 @@ let kShareConfirmationMaxItems = 10
         }
     }
 
+    /// Shows an already uploaded file as the thing to share. Sending shares the file of the
+    /// message into the room, there is no new upload.
+    public func shareFileMessage(_ fileMessage: NCChatMessage) {
+        self.shareType = .fileShare
+
+        DispatchQueue.main.async {
+            self.setTextInputbarHidden(true, animated: false)
+            self.showsMediaPreview = false
+            self.shareTextView.isHidden = false
+            self.shareTextView.isUserInteractionEnabled = false
+            self.shareTextView.text = fileMessage.file()?.name ?? ""
+            self.fileShareMessage = fileMessage
+            self.updateOptionsView()
+        }
+    }
+
     // MARK: - View lifecycle
 
     public override func viewDidLoad() {
@@ -709,6 +727,8 @@ let kShareConfirmationMaxItems = 10
             self.sendSharedText()
         } else if self.shareType == .objectShare {
             self.sendObjectShare()
+        } else if self.shareType == .fileShare {
+            self.sendFileShare()
         } else {
             self.uploadAndShareFiles()
         }
@@ -800,6 +820,36 @@ let kShareConfirmationMaxItems = 10
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
                 self.delegate?.shareConfirmationViewControllerDidFinish(self)
             }
+            self.stopAnimatingSharingIndicator()
+        }
+    }
+
+    func sendFileShare() {
+        // The path comes from the message object that was handed to us in process, never from outside
+        guard let fileMessage = self.fileShareMessage, let path = fileMessage.file()?.path else {
+            self.delegate?.shareConfirmationViewControllerDidFail(self)
+            self.stopAnimatingSharingIndicator()
+            return
+        }
+
+        var metaData = ChatFileUploadMetadata()
+        metaData.silent = self.shareSilently
+
+        // A message with a caption has its text as message, without one it is only the file placeholder
+        if fileMessage.message != "{file}",
+           NCDatabaseManager.sharedInstance().serverHasTalkCapability(.mediaCaption, forAccountId: self.account.accountId) {
+            metaData.caption = fileMessage.sendingMessage
+        }
+
+        NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
+            if let error {
+                NCLog.log(String(format: "Failed to share file. Error: %@", error.localizedDescription))
+                self.delegate?.shareConfirmationViewControllerDidFail(self)
+            } else {
+                NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
+                self.delegate?.shareConfirmationViewControllerDidFinish(self)
+            }
+
             self.stopAnimatingSharingIndicator()
         }
     }

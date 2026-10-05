@@ -58,6 +58,18 @@
     return self;
 }
 
+- (id)initToForwardFileMessage:(NCChatMessage *)fileMessage fromChatViewController:(UIViewController *)chatViewController
+{
+    self = [super init];
+    if (self) {
+        self.chatViewController = chatViewController;
+        self.forwardFileMessage = fileMessage;
+        self.forwarding = YES;
+    }
+    
+    return self;
+}
+
 - (void)viewDidLoad
 {
     [super viewDidLoad];
@@ -543,6 +555,10 @@
         shareConfirmationVC.delegate = (id<ShareConfirmationViewControllerDelegate>)_chatViewController;
         shareConfirmationVC.forwardingMessage = YES;
         [shareConfirmationVC shareObjectShareMessage:_forwardObjectShareMessage];
+    } else if (_forwardFileMessage) {
+        shareConfirmationVC.delegate = (id<ShareConfirmationViewControllerDelegate>)_chatViewController;
+        shareConfirmationVC.forwardingMessage = YES;
+        [shareConfirmationVC shareFileMessage:_forwardFileMessage];
     } else {
         [self setSharedItemToShareConfirmationViewController:shareConfirmationVC];
     }
