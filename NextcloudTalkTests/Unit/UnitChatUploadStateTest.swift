@@ -302,6 +302,113 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertTrue(state.isExpired(now: now + ChatUploadState.maxAge + 1))
     }
 
+    func testBeginAnnounceOnTopOfARequestInFlightRemembersItMayHaveSucceeded() {
+        var state = uploadedState(kind: .draftFolder)
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertFalse(state.announceMayHaveSucceeded)
+
+        // The state of the request that never ended is read again (no `recoverAfterRelaunch` in between)
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertTrue(state.announceMayHaveSucceeded)
+
+        // A 404 of the draft folder then means that the file was moved already
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .finished)
+    }
+
+    func testNotFoundIsNoSuccessWithoutAnEarlierRequest() {
+        var state = uploadedState(kind: .draftFolder)
+        XCTAssertTrue(state.beginAnnounce())
+
+        XCTAssertNotEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .finished)
+        XCTAssertNotEqual(state.step, .announced)
+    }
+
+    // MARK: - Pause of the server
+
+    func testRetryAfterIsKeptAsEarliestBegin() {
+        var state = makeState()
+        let failure = ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 600)
+
+        XCTAssertEqual(state.transferFinished(failure: failure, now: now), .startTransfer(after: 600))
+        XCTAssertEqual(state.earliestBeginAt, now + 600)
+        XCTAssertEqual(state.remainingPause(now: now + 60), 540)
+        XCTAssertEqual(state.remainingPause(now: now + 601), 0)
+    }
+
+    func testRemainingPauseIsCappedWhenTheClockWasSetBack() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 600), now: now)
+
+        // The clock jumped back by a day
+        XCTAssertEqual(state.remainingPause(now: now - 24 * 60 * 60), ChatFileUploadRetryPolicy.maxRetryAfter)
+
+        state.earliestBeginAt = now + 10_000
+        XCTAssertEqual(state.remainingPause(now: now), ChatFileUploadRetryPolicy.maxRetryAfter)
+    }
+
+    func testRestartFromForegroundKeepsTheRestOfThePause() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 600), now: now)
+        state.transferStarted(inBackground: true)
+        state.prepareRestartFromForeground()
+
+        // The user opens the app a minute later and the task is cancelled by the app
+        let action = state.transferFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled), now: now + 60)
+
+        XCTAssertEqual(action, .startTransfer(after: 540))
+        // No attempt was made, so nothing was used up
+        XCTAssertEqual(state.serverErrorCount, 1)
+    }
+
+    func testRestartFromForegroundAfterThePauseStartsAtOnce() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 503), now: now)
+        state.prepareRestartFromForeground()
+
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled), now: now + 3600), .startTransfer(after: 0))
+    }
+
+    func testRestartWithoutAKnownPauseUsesTheBackoffOfOldStates() {
+        var state = makeState()
+        state.failureCount = 2
+        state.prepareRestartFromForeground()
+
+        XCTAssertNil(state.earliestBeginAt)
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled), now: now), .startTransfer(after: ChatFileUploadRetryPolicy.delay(forFailureCount: 2)))
+    }
+
+    func testEarliestBeginIsClearedByResultAndByRetry() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 60), now: now)
+        XCTAssertNotNil(state.earliestBeginAt)
+
+        _ = state.transferFinished(failure: nil, now: now + 60)
+        XCTAssertNil(state.earliestBeginAt)
+
+        XCTAssertTrue(state.beginAnnounce())
+        _ = state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 503, retryAfter: 30), now: now + 61)
+        XCTAssertEqual(state.earliestBeginAt, now + 91)
+
+        state.fail(reason: "test")
+        _ = state.prepareRetry(now: now + 100)
+        XCTAssertNil(state.earliestBeginAt)
+    }
+
+    func testStateWithoutEarliestBeginIsReadable() throws {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 60), now: now)
+
+        let data = try JSONEncoder().encode(state)
+        XCTAssertEqual(try JSONDecoder().decode(ChatUploadState.self, from: data).earliestBeginAt, now + 60)
+
+        var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        json.removeValue(forKey: "earliestBeginAt")
+        let old = try JSONDecoder().decode(ChatUploadState.self, from: JSONSerialization.data(withJSONObject: json))
+
+        XCTAssertNil(old.earliestBeginAt)
+        XCTAssertEqual(old.remainingPause(now: now), 0)
+    }
+
     // MARK: - Posted uploads
 
     func testPostedUploadKeepsAMarkWithTheTime() {
@@ -321,6 +428,31 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertEqual(state.prepareRetry(now: now), .none)
         state.fail(reason: "late")
         XCTAssertEqual(state.step, .announced)
+    }
+
+    func testPostedUploadIsKeptAndCannotBeSentAgainForDays() {
+        var state = uploadedState(kind: .draftFolder)
+        XCTAssertTrue(state.beginAnnounce())
+        _ = state.announceFinished(failure: nil, now: now)
+
+        // The old mark of 48 hours is gone: a voice message that was not replaced by the one of the server is
+        // still known to be posted after 3 to 6 days
+        for days in [3.0, 4.0, 5.0, 6.0] {
+            let later = now + days * 24 * 60 * 60
+
+            XCTAssertFalse(state.isAnnouncedRetentionOver(now: later), "day \(days)")
+            XCTAssertEqual(state.prepareRetry(now: later), .none, "day \(days)")
+            XCTAssertEqual(state.step, .announced)
+        }
+
+        XCTAssertTrue(state.isAnnouncedRetentionOver(now: now + 8 * 24 * 60 * 60))
+    }
+
+    func testPostedMarkWithoutTimeIsOver() {
+        var state = uploadedState(kind: .draftFolder)
+        state.step = .announced
+
+        XCTAssertTrue(state.isAnnouncedRetentionOver(now: now))
     }
 
     // MARK: - Retry by the user

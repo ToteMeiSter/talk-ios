@@ -160,6 +160,21 @@ final class UnitChatFileUploadRetryPolicyTest: XCTestCase {
         XCTAssertEqual(ChatFileUploadRetryPolicy.decision(for: ChatFileUploadFailure(), serverErrorCount: 1, failureCount: 1), .fail)
     }
 
+    func testUnknownAttachmentFolderIsAnErrorThatIsNotRetried() {
+        let code = NCAPIController.attachmentFolderUnknownCode
+
+        // 0 is "the folder is there", so it must not be the code of an error. It is an URL error as the
+        // uploader hands codes below 100 to the policy as such.
+        XCTAssertNotEqual(code, 0)
+        XCTAssertLessThan(code, 100)
+
+        let failure = ChatFileUploadFailure(urlErrorCode: code)
+
+        XCTAssertEqual(ChatFileUploadRetryPolicy.classify(failure), .permanent)
+        XCTAssertEqual(ChatFileUploadRetryPolicy.classify(errorCode: code), .permanent)
+        XCTAssertEqual(ChatFileUploadRetryPolicy.decision(for: failure, serverErrorCount: 0, failureCount: 1), .fail)
+    }
+
     func testAlreadyAnnounced() {
         let notFound = ChatFileUploadFailure(httpStatusCode: 404)
 

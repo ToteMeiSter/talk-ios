@@ -61,10 +61,6 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// The states were prepared for the new process, see `recoverStoredStates()`.
     private var didRecoverStates = false
 
-    /// Results of transfers that came in while their state could not be read, i.e. before the first unlock
-    /// of the device. They are handled when the data is available.
-    private var deferredTransferEvents: [(id: String, failure: ChatFileUploadFailure?)] = []
-
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.sessionSendsLaunchEvents = true
@@ -140,14 +136,6 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     @objc private func protectedDataDidBecomeAvailable() {
         self.recoverStoredStates()
-
-        let events = self.deferredTransferEvents
-        self.deferredTransferEvents = []
-
-        for event in events {
-            self.transferFinished(id: event.id, failure: event.failure)
-        }
-
         self.processStoredStates()
     }
 
@@ -167,22 +155,50 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
-    /// Prepares the stored states for a new process. Needs the states to be readable.
+    /// Prepares the stored states for a new process. Needs the states to be readable, and does nothing before that
+    /// and after the first time.
+    ///
+    /// Everything that looks at the stored states or starts work from them calls this first, because the order of
+    /// `didBecomeActive` and `protectedDataDidBecomeAvailable` after a launch before the first unlock is not defined.
+    /// Else an announcement started in between would be taken for one of the dead process, or the other way round.
+    /// Note that `isProtectedDataAvailable` is `false` whenever the screen is locked, not only before the first unlock,
+    /// so a process of this launch can have announcements in flight when this finally runs: those are skipped here,
+    /// and `ChatUploadState.beginAnnounce` covers the other order.
+    /// The call is idempotent and cheap, which is why it is called from every entry and the notification is not waited for.
     private func recoverStoredStates() {
         guard !self.didRecoverStates, UIApplication.shared.isProtectedDataAvailable else { return }
 
         self.didRecoverStates = true
 
-        for var state in self.store.loadAll() {
+        for var state in self.store.loadAll() where !self.announcingIds.contains(state.id) {
             state.recoverAfterRelaunch()
             try? self.store.save(state)
         }
+
     }
 
-    /// Carries on with the states found on disk. Waits for the first unlock of the device, before it the states
-    /// cannot be read, which does not mean they are gone.
+    /// Handles the results of transfers that came in before the states were readable, maybe in an earlier process.
+    ///
+    /// Waits for the tasks of the session to be known: the result of a failure starts the transfer again, and
+    /// `startTransfer` only leaves out a transfer that is running already when it knows the tasks. Else an event that
+    /// was handled before the process died would start a second chain of attempts. Called before any other work on
+    /// the states.
+    private func handleStoredEvents() {
+        guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        for event in self.store.loadEvents() {
+            self.transferFinished(id: event.id, failure: event.failure)
+            self.store.removeEvent(event)
+        }
+    }
+
+    /// Carries on with the states found on disk. Waits for the data to be available (not locked), before the first
+    /// unlock the states cannot be read, which does not mean they are gone.
     private func processStoredStates() {
         guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        self.recoverStoredStates()
+        self.handleStoredEvents()
 
         let now = Date().timeIntervalSince1970
         let report = self.store.loadAllReport()
@@ -213,7 +229,10 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                 // The file is not needed anymore. The state stays for a while, see `isAnnounced`.
                 self.store.removeFile(for: state)
 
-                if now - (state.announcedAt ?? 0) > ChatUploadState.announcedRetention {
+                if state.isAnnouncedRetentionOver(now: now) {
+                    // Without the mark nothing tells "Resend" that the file is posted already, so the message of the
+                    // upload that was not replaced by the one of the server goes with it
+                    self.removeTemporaryMessage(referenceId: state.id)
                     self.store.removeState(id: state.id)
                 }
             }
@@ -274,6 +293,9 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     }
 
     private func restart(from tasks: [URLSessionTask]) {
+        self.recoverStoredStates()
+        self.handleStoredEvents()
+
         for state in self.store.loadAll() where state.step == .uploading {
             let task = tasks.first { $0.taskDescription == state.id && ($0.state == .running || $0.state == .suspended) }
 
@@ -301,7 +323,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             // The name was free when it was chosen, see `retry`
             self.resolveAgain(state)
         } else {
-            self.startTransfer(state, after: 0)
+            // The pause the server asked for, e.g. with `Retry-After`, is not over because the app was away
+            self.startTransfer(state, after: state.remainingPause(now: Date().timeIntervalSince1970))
         }
     }
 
@@ -343,6 +366,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     /// Posts the files that are on the server but not in the conversation.
     private func announcePendingUploads() {
+        self.recoverStoredStates()
+
         for state in self.store.loadAll() where state.step == .uploaded {
             self.announce(id: state.id)
         }
@@ -498,7 +523,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             return
         }
 
-        self.startTransfer(current, after: 0)
+        // The pause the server asked for is not over because the destination was asked for again
+        self.startTransfer(current, after: current.remainingPause(now: Date().timeIntervalSince1970))
     }
 
     private func startTransfer(_ state: ChatUploadState, after delay: TimeInterval) {
@@ -615,9 +641,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             // Discarded in the meantime
             return
         case .unreadable:
-            // Before the first unlock of the device. The result is not lost, just handled later.
-            NCLog.log("The state of the upload \(id) cannot be read yet, its result is handled later")
-            self.deferredTransferEvents.append((id, failure))
+            self.keepResultOfUnreadableState(id: id, failure: failure)
             return
         }
 
@@ -641,6 +665,25 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             self.markMessageAsFailed(referenceId: id)
         case .finished, .none:
             break
+        }
+    }
+
+    /// A result for a state that cannot be read.
+    private func keepResultOfUnreadableState(id: String, failure: ChatFileUploadFailure?) {
+        // A state that cannot be read with the data available is broken, there is nothing to carry on with
+        guard !UIApplication.shared.isProtectedDataAvailable else {
+            NCLog.log("The state of the upload \(id) is broken, its result is dropped")
+            return
+        }
+
+        // Before the first unlock of the device. The result is kept on disk and handled when the data is
+        // available, which can be in another process.
+        NCLog.log("The state of the upload \(id) cannot be read yet, its result is handled later")
+
+        do {
+            try self.store.saveEvent(ChatUploadStore.TransferEvent(id: id, failure: failure, date: Date().timeIntervalSince1970))
+        } catch {
+            NCLog.log("Could not store the result of the upload \(id). Error: \(error.localizedDescription)")
         }
     }
 
@@ -713,11 +756,21 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
         self.scheduledAnnounceIds.remove(id)
 
+        self.recoverStoredStates()
+
         guard !self.announcingIds.contains(id),
               var state = self.store.load(id: id),
               state.step == .uploaded,
               let destination = state.destination
         else { return }
+
+        // The chain of a process that is gone is not there anymore. Do not ask before the pause of the server is over.
+        let pause = state.remainingPause(now: Date().timeIntervalSince1970)
+
+        if pause > 0 {
+            self.announce(id: id, after: pause)
+            return
+        }
 
         guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: state.accountId) else {
             self.interrupt(state, reason: "account is gone")
@@ -792,6 +845,14 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         } catch {
             NCLog.log("Could not store the state of the upload of \(state.fileName). Error: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    private func removeTemporaryMessage(referenceId: String) {
+        RLMRealm.writeTransaction { realm in
+            if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() {
+                realm.delete(managedTemporaryMessage)
+            }
         }
     }
 

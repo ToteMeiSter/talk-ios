@@ -22,6 +22,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
     // MARK: - Public var
     public let kReceivedChatMessagesLimit = 100
 
+    /// What `checkOrCreateAttachmentFolder` reports when the account has no attachment folder URL. 0 is "the folder
+    /// is there" for its callers. An `NSURLErrorDomain` code that the retry policy sees as permanent, so waiting and
+    /// asking again does not happen.
+    static let attachmentFolderUnknownCode = NSURLErrorBadURL
+
     // MARK: - Private var
     private let kDavEndpoint = "/remote.php/dav"
     private let kNCOCSAPIVersion = "/ocs/v2.php"
@@ -3202,7 +3207,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
 
         guard let attachmentFolderServerURL = self.attachmentFolderServerURL(forAccount: account)
         else {
-            completionBlock(false, 0)
+            // Not knowing where the folder is, is an error
+            completionBlock(false, NCAPIController.attachmentFolderUnknownCode)
             return
         }
 
@@ -3211,7 +3217,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
             if error.errorCode == 404 {
                 // Attachment folder does not exist
                 NextcloudKit.shared.createFolder(serverUrlFileName: attachmentFolderServerURL, options: options) { _, _, _, error in
-                    completionBlock(error.errorCode == 0, error.errorCode)
+                    let result = NCAPIController.attachmentFolderResult(forCreateErrorCode: error.errorCode)
+                    completionBlock(result.created, result.statusCode)
                 }
             } else {
                 print("Error checking attachment folder: \(error.errorDescription)")
@@ -3322,14 +3329,34 @@ class NCAPIController: NSObject, NKCommonDelegate {
         }
     }
 
-    /// Creates the attachment folder when it is missing. Returns whether it had to be created.
+    /// Creates the attachment folder when it is missing. Returns whether the folder is there afterwards, which includes
+    /// a folder that was there already, e.g. because an upload running at the same time created it.
     @MainActor
     func checkOrCreateAttachmentFolder(forAccount account: TalkAccount) async -> Bool {
         return await withCheckedContinuation { continuation in
-            checkOrCreateAttachmentFolder(forAccount: account) { created, _ in
-                continuation.resume(returning: created)
+            checkOrCreateAttachmentFolder(forAccount: account) { created, statusCode in
+                continuation.resume(returning: NCAPIController.isAttachmentFolderAvailable(created: created, statusCode: statusCode))
             }
         }
+    }
+
+    /// What `checkOrCreateAttachmentFolder` reports for the answer of MKCOL. 405 means the folder is there: another
+    /// upload of the same batch created it between the check and the request.
+    static func attachmentFolderResult(forCreateErrorCode errorCode: Int) -> (created: Bool, statusCode: Int) {
+        switch errorCode {
+        case 0:
+            return (true, 0)
+        case 405:
+            return (false, 0)
+        default:
+            return (false, errorCode)
+        }
+    }
+
+    /// The callback of `checkOrCreateAttachmentFolder` answers `(false, 0)` for a folder that exists, and `(true, 0)` for
+    /// one it created. Anything else is an error.
+    static func isAttachmentFolderAvailable(created: Bool, statusCode: Int) -> Bool {
+        return created || statusCode == 0
     }
 
     @MainActor

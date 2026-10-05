@@ -91,15 +91,20 @@ struct ChatUploadState: Codable, Equatable {
         case id, accountId, roomToken, fileName, localFileName, destinationKind, draftPath, serverPath, serverURL
         case allowUpdate, metadata, step, fileUploaded, serverErrorCount, failureCount, announceAttempts
         case announceInFlight, announceMayHaveSucceeded, createdAt, failureReason, attachmentFolderRecreated
-        case startedInBackground, expectedCancel, suspendedBySystem, announcedAt
+        case startedInBackground, expectedCancel, suspendedBySystem, announcedAt, earliestBeginAt
     }
-
-    /// A posted upload is kept this long without its file. A message that was not replaced by the one of
-    /// the server and is sent again then is known to be posted already.
-    static let announcedRetention: TimeInterval = 48 * 60 * 60
 
     /// A failed upload is dropped after this long, with its file.
     static let failedRetention: TimeInterval = 7 * 24 * 60 * 60
+
+    /// A posted upload is kept this long without its file. A message that was not replaced by the one of
+    /// the server and is sent again then is known to be posted already.
+    ///
+    /// The file of a voice message is the recording itself, which is not deleted with the state, so "Resend" finds it
+    /// and would post it twice once the state of the posted upload is gone. That is why the temporary message goes
+    /// when the state does (`ChatBackgroundUploader.processStoredStates`). What is left: a chat that is open at that
+    /// moment holds its own copy of the message and can still resend it.
+    static let announcedRetention: TimeInterval = failedRetention
 
     /// Reference id of the temporary message. Also the key of the upload.
     var id: String
@@ -173,9 +178,27 @@ struct ChatUploadState: Codable, Equatable {
     /// Time the file was posted. The state of a posted file is kept for a while, see `announcedRetention`.
     var announcedAt: TimeInterval?
 
+    /// Time before which the next attempt must not start, seconds since 1970. Set when a failure asks for a pause
+    /// (backoff, `Retry-After`), so a restart of the attempt from the foreground or in a new process does not
+    /// shorten the pause and does not use up attempts with answers like 429.
+    var earliestBeginAt: TimeInterval?
+
     /// The upload is older than a temporary message lives, see `maxAge`.
     func isExpired(now: TimeInterval) -> Bool {
         return now - self.createdAt > Self.maxAge
+    }
+
+    /// The state of a posted file is not needed anymore.
+    func isAnnouncedRetentionOver(now: TimeInterval) -> Bool {
+        return now - (self.announcedAt ?? 0) > Self.announcedRetention
+    }
+
+    /// What is left of the pause the last failure asked for. Never more than the longest pause there is: the time
+    /// is the one of the wall clock, which can be set back, and the pause must not grow by that.
+    func remainingPause(now: TimeInterval) -> TimeInterval {
+        guard let earliestBeginAt else { return 0 }
+
+        return min(max(0, earliestBeginAt - now), ChatFileUploadRetryPolicy.maxRetryAfter)
     }
 
     var isDraftFolder: Bool {
@@ -224,6 +247,7 @@ struct ChatUploadState: Codable, Equatable {
             self.step = .uploaded
             self.serverErrorCount = 0
             self.failureCount = 0
+            self.earliestBeginAt = nil
             return .announce(after: 0)
         }
 
@@ -234,6 +258,12 @@ struct ChatUploadState: Codable, Equatable {
             if self.expectedCancel {
                 self.expectedCancel = false
                 self.startedInBackground = false
+
+                // What is left of the pause the server asked for, e.g. with `Retry-After`
+                if self.earliestBeginAt != nil {
+                    return .startTransfer(after: self.remainingPause(now: now))
+                }
+
                 return .startTransfer(after: self.failureCount > 0 ? ChatFileUploadRetryPolicy.delay(forFailureCount: self.failureCount) : 0)
             }
 
@@ -272,6 +302,12 @@ struct ChatUploadState: Codable, Equatable {
     mutating func beginAnnounce() -> Bool {
         guard self.step == .uploaded, self.fileUploaded else { return false }
 
+        // A request that was in flight and never ended (the process died, or the state was read before it was
+        // recovered) might have got through, and the new one must know
+        if self.announceInFlight {
+            self.announceMayHaveSucceeded = true
+        }
+
         self.announceAttempts += 1
         self.announceInFlight = true
         return true
@@ -288,6 +324,7 @@ struct ChatUploadState: Codable, Equatable {
         guard let failure else {
             self.step = .announced
             self.announcedAt = now
+            self.earliestBeginAt = nil
             return .finished
         }
 
@@ -330,6 +367,7 @@ struct ChatUploadState: Codable, Equatable {
         self.serverErrorCount = 0
         self.failureCount = 0
         self.failureReason = nil
+        self.earliestBeginAt = nil
         self.suspendedBySystem = false
         self.attachmentFolderRecreated = false
         self.createdAt = now
@@ -362,6 +400,8 @@ struct ChatUploadState: Codable, Equatable {
             self.fail(reason: "http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0)")
             return .failed
         }
+
+        self.earliestBeginAt = now + delay
 
         return next(delay)
     }
@@ -402,6 +442,7 @@ extension ChatUploadState {
         self.expectedCancel = try container.decodeIfPresent(Bool.self, forKey: .expectedCancel) ?? false
         self.suspendedBySystem = try container.decodeIfPresent(Bool.self, forKey: .suspendedBySystem) ?? false
         self.announcedAt = try container.decodeIfPresent(TimeInterval.self, forKey: .announcedAt)
+        self.earliestBeginAt = try container.decodeIfPresent(TimeInterval.self, forKey: .earliestBeginAt)
     }
 }
 
