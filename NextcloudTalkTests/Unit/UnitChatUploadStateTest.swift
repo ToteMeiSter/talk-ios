@@ -430,16 +430,22 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertEqual(state.step, .announced)
     }
 
-    func testPostedMarkOutlivesTheTimeAMessageCanBeResent() {
+    func testPostedUploadIsKeptAndCannotBeSentAgainForDays() {
         var state = uploadedState(kind: .draftFolder)
-        state.step = .announced
-        state.announcedAt = now
+        XCTAssertTrue(state.beginAnnounce())
+        _ = state.announceFinished(failure: nil, now: now)
 
-        // A voice message is resent from the recording, which stays: the mark must outlive the 48 hours of old
-        XCTAssertFalse(state.isAnnouncedRetentionOver(now: now + 3 * 24 * 60 * 60))
-        XCTAssertFalse(state.isAnnouncedRetentionOver(now: now + ChatUploadState.failedRetention))
-        XCTAssertTrue(state.isAnnouncedRetentionOver(now: now + ChatUploadState.failedRetention + 1))
-        XCTAssertGreaterThanOrEqual(ChatUploadState.announcedRetention, ChatUploadState.failedRetention)
+        // The old mark of 48 hours is gone: a voice message that was not replaced by the one of the server is
+        // still known to be posted after 3 to 6 days
+        for days in [3.0, 4.0, 5.0, 6.0] {
+            let later = now + days * 24 * 60 * 60
+
+            XCTAssertFalse(state.isAnnouncedRetentionOver(now: later), "day \(days)")
+            XCTAssertEqual(state.prepareRetry(now: later), .none, "day \(days)")
+            XCTAssertEqual(state.step, .announced)
+        }
+
+        XCTAssertTrue(state.isAnnouncedRetentionOver(now: now + 8 * 24 * 60 * 60))
     }
 
     func testPostedMarkWithoutTimeIsOver() {

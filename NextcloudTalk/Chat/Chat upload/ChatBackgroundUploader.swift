@@ -219,6 +219,9 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                 self.store.removeFile(for: state)
 
                 if state.isAnnouncedRetentionOver(now: now) {
+                    // Without the mark nothing tells "Resend" that the file is posted already, so the message of the
+                    // upload that was not replaced by the one of the server goes with it
+                    self.removeTemporaryMessage(referenceId: state.id)
                     self.store.removeState(id: state.id)
                 }
             }
@@ -830,6 +833,14 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         } catch {
             NCLog.log("Could not store the state of the upload of \(state.fileName). Error: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    private func removeTemporaryMessage(referenceId: String) {
+        RLMRealm.writeTransaction { realm in
+            if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() {
+                realm.delete(managedTemporaryMessage)
+            }
         }
     }
 

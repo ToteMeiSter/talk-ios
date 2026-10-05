@@ -100,9 +100,10 @@ struct ChatUploadState: Codable, Equatable {
     /// A posted upload is kept this long without its file. A message that was not replaced by the one of
     /// the server and is sent again then is known to be posted already.
     ///
-    /// Not shorter than `failedRetention`: the file of a voice message is the recording itself, which is not
-    /// deleted with the state, so "Resend" finds it as long as the message can be resent, and posts it twice
-    /// if the state of the posted upload is gone by then.
+    /// The file of a voice message is the recording itself, which is not deleted with the state, so "Resend" finds it
+    /// and would post it twice once the state of the posted upload is gone. That is why the temporary message goes
+    /// when the state does (`ChatBackgroundUploader.processStoredStates`). What is left: a chat that is open at that
+    /// moment holds its own copy of the message and can still resend it.
     static let announcedRetention: TimeInterval = failedRetention
 
     /// Reference id of the temporary message. Also the key of the upload.
