@@ -218,7 +218,7 @@ enum ChatFileUploadRetryPolicy {
 
     static func backgroundCancelReason(of error: Error) -> Int? {
         for link in self.chain(of: error) {
-            guard let value = link.nsError?.userInfo["NSURLErrorBackgroundTaskCancelledReasonKey"] else { continue }
+            guard let value = link.nsError?.userInfo[NSURLErrorBackgroundTaskCancelledReasonKey] else { continue }
 
             if let number = value as? NSNumber { return number.intValue }
         }

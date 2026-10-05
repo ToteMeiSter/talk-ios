@@ -40,7 +40,7 @@ final class UnitChatFileUploadRetryPolicyTest: XCTestCase {
     }
 
     func testCancellationReasonIsReadFromTheError() {
-        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: ["NSURLErrorBackgroundTaskCancelledReasonKey": 1])
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: [NSURLErrorBackgroundTaskCancelledReasonKey: 1])
         let failure = ChatFileUploadFailure(error: error)
 
         XCTAssertEqual(failure.urlErrorCode, NSURLErrorCancelled)
