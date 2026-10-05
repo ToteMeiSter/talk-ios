@@ -490,10 +490,29 @@ let kShareConfirmationMaxItems = 10
             self.showsMediaPreview = false
             self.shareTextView.isHidden = false
             self.shareTextView.isUserInteractionEnabled = false
-            self.shareTextView.text = fileMessage.file()?.name ?? ""
+
+            // What is forwarded is what is shown: the name of the file and its caption, if there is one
+            var text = fileMessage.file()?.name ?? ""
+
+            if let caption = self.forwardedCaption(of: fileMessage) {
+                text += "\n\n" + (fileMessage.sendingMessageWithDisplayNames ?? caption)
+            }
+
+            self.shareTextView.text = text
             self.fileShareMessage = fileMessage
             self.updateOptionsView()
         }
+    }
+
+    /// The caption of a file message, only when the server can send one along with a shared file
+    private func forwardedCaption(of fileMessage: NCChatMessage) -> String? {
+        guard fileMessage.message != "{file}",
+              NCDatabaseManager.sharedInstance().serverHasTalkCapability(.mediaCaption, forAccountId: self.account.accountId)
+        else { return nil }
+
+        let caption = fileMessage.sendingMessage
+
+        return caption.isEmpty ? nil : caption
     }
 
     // MARK: - View lifecycle
@@ -825,8 +844,14 @@ let kShareConfirmationMaxItems = 10
     }
 
     func sendFileShare() {
-        // The path comes from the message object that was handed to us in process, never from outside
-        guard let fileMessage = self.fileShareMessage, let path = fileMessage.file()?.path else {
+        // The path comes from the message object that was handed to us in process, never from outside.
+        // It is the path of the cached message and can be outdated, e.g. when the file was moved or
+        // deleted since. Then the server refuses the share and the error is shown.
+        // The path only means something for the account of the message, so never send it for another one.
+        guard let fileMessage = self.fileShareMessage,
+              fileMessage.accountId == self.account.accountId,
+              let path = fileMessage.file()?.path
+        else {
             self.delegate?.shareConfirmationViewControllerDidFail(self)
             self.stopAnimatingSharingIndicator()
             return
@@ -835,11 +860,8 @@ let kShareConfirmationMaxItems = 10
         var metaData = ChatFileUploadMetadata()
         metaData.silent = self.shareSilently
 
-        // A message with a caption has its text as message, without one it is only the file placeholder
-        if fileMessage.message != "{file}",
-           NCDatabaseManager.sharedInstance().serverHasTalkCapability(.mediaCaption, forAccountId: self.account.accountId) {
-            metaData.caption = fileMessage.sendingMessage
-        }
+        // Sent only when it was shown on this screen
+        metaData.caption = self.forwardedCaption(of: fileMessage)
 
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
             if let error {

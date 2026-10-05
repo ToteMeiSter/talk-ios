@@ -283,7 +283,8 @@
     }
     
     // Show account button selector if there are more than one account
-    if ([TalkAccount allObjectsInRealm:_realm].count > 1) {
+    // Not when forwarding a file: its path belongs to the account of the message, another account must not send it
+    if (!_forwardFileMessage && [TalkAccount allObjectsInRealm:_realm].count > 1) {
         [self setProfileButtonForAccount:_shareAccount];
     }
     
