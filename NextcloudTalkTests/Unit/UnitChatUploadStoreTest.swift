@@ -209,6 +209,45 @@ final class UnitChatUploadStoreTest: XCTestCase {
         XCTAssertTrue(store.fileExists(for: makeState(id: "orphan", localFileName: name)))
     }
 
+    func testTransferEventsSurviveANewStore() throws {
+        let failure = ChatFileUploadFailure(httpStatusCode: 503, urlErrorCode: nil, retryAfter: 30, backgroundCancelReason: nil)
+        let second = ChatUploadStore.TransferEvent(id: "b", failure: nil, date: 200)
+        let first = ChatUploadStore.TransferEvent(id: "a", failure: failure, date: 100)
+
+        try store.saveEvent(second)
+        try store.saveEvent(first)
+
+        // What a process that is started later finds
+        let events = ChatUploadStore(directory: directory).loadEvents()
+
+        XCTAssertEqual(events, [first, second])
+        XCTAssertEqual(events.first?.failure?.retryAfter, 30)
+        XCTAssertNil(events.last?.failure)
+    }
+
+    func testTransferEventIsRemovedAfterItWasHandled() throws {
+        let event = ChatUploadStore.TransferEvent(id: "a", failure: nil, date: 100)
+        try store.saveEvent(event)
+        try store.saveEvent(ChatUploadStore.TransferEvent(id: "a", failure: nil, date: 100))
+
+        store.removeEvent(event)
+
+        XCTAssertEqual(store.loadEvents().count, 1)
+        XCTAssertNotEqual(store.loadEvents().first?.eventId, event.eventId)
+    }
+
+    func testBrokenTransferEventIsDropped() throws {
+        try store.saveEvent(ChatUploadStore.TransferEvent(id: "a", failure: nil, date: 100))
+        try Data("not json".utf8).write(to: directory.appendingPathComponent("events/broken.json"))
+
+        XCTAssertEqual(store.loadEvents().count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("events/broken.json").path))
+    }
+
+    func testNoEventsWithoutDirectory() {
+        XCTAssertTrue(store.loadEvents().isEmpty)
+    }
+
     func testLoadResultTellsMissingFromUnreadable() throws {
         try store.save(makeState(id: "good"))
         try Data("not json".utf8).write(to: directory.appendingPathComponent("state/broken.json"))

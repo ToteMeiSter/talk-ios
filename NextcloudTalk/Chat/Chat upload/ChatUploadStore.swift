@@ -17,6 +17,7 @@ final class ChatUploadStore {
 
     private var stateDirectory: URL { return self.directory.appendingPathComponent("state", isDirectory: true) }
     private var filesDirectory: URL { return self.directory.appendingPathComponent("files", isDirectory: true) }
+    private var eventsDirectory: URL { return self.directory.appendingPathComponent("events", isDirectory: true) }
 
     init(directory: URL) {
         self.directory = directory
@@ -95,6 +96,56 @@ final class ChatUploadStore {
 
     func removeState(id: String) {
         try? self.fileManager.removeItem(at: self.stateURL(for: id))
+    }
+
+    // MARK: - Transfer events
+
+    /// The result of a transfer that came in while the states could not be read, i.e. before the first unlock of the
+    /// device, to be handled when they can.
+    struct TransferEvent: Codable, Equatable {
+        var eventId = UUID().uuidString
+
+        /// Id of the upload.
+        var id: String
+
+        /// What went wrong, `nil` when the server accepted the file.
+        var failure: ChatFileUploadFailure?
+
+        /// Seconds since 1970.
+        var date: TimeInterval
+    }
+
+    /// Stores an event on disk, so it outlives the process: the system hands out the result of a transfer once, and
+    /// the process may be gone again before the device is unlocked.
+    ///
+    /// The file has no protection (`.noFileProtection`) on purpose. The events come in before the first unlock, and
+    /// a file of the class "until first user authentication" cannot be created then. The file holds the reference
+    /// id of a message and the status codes of a request, no name, no content, no credentials.
+    func saveEvent(_ event: TransferEvent) throws {
+        try self.createDirectoryIfNeeded(self.eventsDirectory)
+
+        let data = try JSONEncoder().encode(event)
+        try data.write(to: self.eventURL(for: event), options: [.atomic, .noFileProtection])
+    }
+
+    /// The stored events, oldest first. A file that cannot be decoded is removed, nothing can be done with it.
+    func loadEvents() -> [TransferEvent] {
+        let urls = (try? self.fileManager.contentsOfDirectory(at: self.eventsDirectory, includingPropertiesForKeys: nil)) ?? []
+        var events: [TransferEvent] = []
+
+        for url in urls where url.pathExtension == "json" {
+            if let data = try? Data(contentsOf: url), let event = try? JSONDecoder().decode(TransferEvent.self, from: data) {
+                events.append(event)
+            } else {
+                try? self.fileManager.removeItem(at: url)
+            }
+        }
+
+        return events.sorted { ($0.date, $0.eventId) < ($1.date, $1.eventId) }
+    }
+
+    func removeEvent(_ event: TransferEvent) {
+        try? self.fileManager.removeItem(at: self.eventURL(for: event))
     }
 
     // MARK: - Files
@@ -197,6 +248,10 @@ final class ChatUploadStore {
     }
 
     // MARK: - Helpers
+
+    private func eventURL(for event: TransferEvent) -> URL {
+        return self.eventsDirectory.appendingPathComponent(self.safeName(event.eventId)).appendingPathExtension("json")
+    }
 
     private func stateURL(for id: String) -> URL {
         return self.stateDirectory.appendingPathComponent(self.safeName(id)).appendingPathExtension("json")

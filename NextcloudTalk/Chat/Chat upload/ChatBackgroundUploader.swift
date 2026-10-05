@@ -61,10 +61,6 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// The states were prepared for the new process, see `recoverStoredStates()`.
     private var didRecoverStates = false
 
-    /// Results of transfers that came in while their state could not be read, i.e. before the first unlock
-    /// of the device. They are handled when the data is available.
-    private var deferredTransferEvents: [(id: String, failure: ChatFileUploadFailure?)] = []
-
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.sessionSendsLaunchEvents = true
@@ -176,11 +172,10 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             try? self.store.save(state)
         }
 
-        let events = self.deferredTransferEvents
-        self.deferredTransferEvents = []
-
-        for event in events {
+        // Results that came in before the states were readable, maybe in an earlier process
+        for event in self.store.loadEvents() {
             self.transferFinished(id: event.id, failure: event.failure)
+            self.store.removeEvent(event)
         }
     }
 
@@ -627,9 +622,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             // Discarded in the meantime
             return
         case .unreadable:
-            // Before the first unlock of the device. The result is not lost, just handled later.
-            NCLog.log("The state of the upload \(id) cannot be read yet, its result is handled later")
-            self.deferredTransferEvents.append((id, failure))
+            self.keepResultOfUnreadableState(id: id, failure: failure)
             return
         }
 
@@ -653,6 +646,25 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             self.markMessageAsFailed(referenceId: id)
         case .finished, .none:
             break
+        }
+    }
+
+    /// A result for a state that cannot be read.
+    private func keepResultOfUnreadableState(id: String, failure: ChatFileUploadFailure?) {
+        // A state that cannot be read with the data available is broken, there is nothing to carry on with
+        guard !UIApplication.shared.isProtectedDataAvailable else {
+            NCLog.log("The state of the upload \(id) is broken, its result is dropped")
+            return
+        }
+
+        // Before the first unlock of the device. The result is kept on disk and handled when the data is
+        // available, which can be in another process.
+        NCLog.log("The state of the upload \(id) cannot be read yet, its result is handled later")
+
+        do {
+            try self.store.saveEvent(ChatUploadStore.TransferEvent(id: id, failure: failure, date: Date().timeIntervalSince1970))
+        } catch {
+            NCLog.log("Could not store the result of the upload \(id). Error: \(error.localizedDescription)")
         }
     }
 

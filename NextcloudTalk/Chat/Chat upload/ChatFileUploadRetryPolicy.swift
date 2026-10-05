@@ -6,7 +6,7 @@
 import Foundation
 
 /// What went wrong with one request of an upload, reduced to the facts the retry policy needs.
-struct ChatFileUploadFailure: Equatable {
+struct ChatFileUploadFailure: Codable, Equatable {
 
     /// HTTP status code of the answer of the server, if there was one.
     var httpStatusCode: Int?
