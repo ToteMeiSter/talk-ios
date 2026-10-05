@@ -27,7 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (id)initToForwardMessage:(NSString *)message fromChatViewController:(UIViewController *)chatViewController;
 - (id)initToForwardObjectShareMessage:(NCChatMessage *)objectShareMessage fromChatViewController:(UIViewController *)chatViewController;
-- (id)initToForwardFileMessage:(NCChatMessage *)fileMessage fromChatViewController:(UIViewController *)chatViewController;
+- (id)initToForwardFileMessage:(NCChatMessage *)fileMessage fromChatViewController:(UIViewController *)chatViewController NS_SWIFT_NAME(init(toForwardFile:fromChatViewController:));
 
 @end
 
