@@ -3217,7 +3217,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
             if error.errorCode == 404 {
                 // Attachment folder does not exist
                 NextcloudKit.shared.createFolder(serverUrlFileName: attachmentFolderServerURL, options: options) { _, _, _, error in
-                    completionBlock(error.errorCode == 0, error.errorCode)
+                    let result = NCAPIController.attachmentFolderResult(forCreateErrorCode: error.errorCode)
+                    completionBlock(result.created, result.statusCode)
                 }
             } else {
                 print("Error checking attachment folder: \(error.errorDescription)")
@@ -3336,6 +3337,19 @@ class NCAPIController: NSObject, NKCommonDelegate {
             checkOrCreateAttachmentFolder(forAccount: account) { created, statusCode in
                 continuation.resume(returning: NCAPIController.isAttachmentFolderAvailable(created: created, statusCode: statusCode))
             }
+        }
+    }
+
+    /// What `checkOrCreateAttachmentFolder` reports for the answer of MKCOL. 405 means the folder is there: another
+    /// upload of the same batch created it between the check and the request.
+    static func attachmentFolderResult(forCreateErrorCode errorCode: Int) -> (created: Bool, statusCode: Int) {
+        switch errorCode {
+        case 0:
+            return (true, 0)
+        case 405:
+            return (false, 0)
+        default:
+            return (false, errorCode)
         }
     }
 
