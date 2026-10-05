@@ -295,6 +295,13 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertFalse(state.expectedCancel)
     }
 
+    func testExpiryIsTheSameForRestartAndFailures() {
+        let state = makeState()
+
+        XCTAssertFalse(state.isExpired(now: now + ChatUploadState.maxAge))
+        XCTAssertTrue(state.isExpired(now: now + ChatUploadState.maxAge + 1))
+    }
+
     // MARK: - Posted uploads
 
     func testPostedUploadKeepsAMarkWithTheTime() {

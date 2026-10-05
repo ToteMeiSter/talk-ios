@@ -173,6 +173,11 @@ struct ChatUploadState: Codable, Equatable {
     /// Time the file was posted. The state of a posted file is kept for a while, see `announcedRetention`.
     var announcedAt: TimeInterval?
 
+    /// The upload is older than a temporary message lives, see `maxAge`.
+    func isExpired(now: TimeInterval) -> Bool {
+        return now - self.createdAt > Self.maxAge
+    }
+
     var isDraftFolder: Bool {
         return self.destinationKind == .draftFolder
     }
@@ -345,7 +350,7 @@ struct ChatUploadState: Codable, Equatable {
             self.serverErrorCount += 1
         }
 
-        if now - self.createdAt > Self.maxAge {
+        if self.isExpired(now: now) {
             self.fail(reason: "expired")
             return .failed
         }

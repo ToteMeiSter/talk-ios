@@ -51,6 +51,10 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// Ids of uploads that have an announcement planned for later. There is at most one chain per upload.
     private var scheduledAnnounceIds = Set<String>()
 
+    /// A transfer the system stopped was started again since the app became active. Keeps the cancellations
+    /// of a system that stops transfers over and over from becoming a loop.
+    private var didRestartSuspendedTransfer = false
+
     /// The tasks of the session are known, see `start()`.
     private var didCollectTasks = false
 
@@ -121,6 +125,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         // Whatever the system wanted to hear is over once the user is back, and a flag from earlier events
         // must not make the next background launch end at once
         self.didReceiveAllBackgroundEvents = false
+        self.didRestartSuspendedTransfer = false
         self.callBackgroundCompletionHandler()
 
         self.announcePendingUploads()
@@ -155,6 +160,11 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
         self.didCollectTasks = true
         self.processStoredStates()
+
+        // The app is in front already, so the tasks are at hand and `applicationDidBecomeActive` came too early for them
+        if UIApplication.shared.applicationState != .background, UIApplication.shared.isProtectedDataAvailable {
+            self.restart(from: tasks)
+        }
     }
 
     /// Prepares the stored states for a new process. Needs the states to be readable.
@@ -219,7 +229,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
             // The app went away while it was waiting for the server to tell where to upload to
             self.interrupt(state, reason: "destination not resolved")
-        } else if !self.transferringIds.contains(state.id), !state.suspendedBySystem {
+        } else if !self.transferringIds.contains(state.id), !state.suspendedBySystem, !self.resolvingIds.contains(state.id) {
             // Events of finished transfers arrive right after the session was created. What is
             // still without a transfer after that was cancelled, e.g. because the user terminated the app.
             // A transfer the system stopped is started again when the app is in front.
@@ -276,14 +286,49 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                 if self.persist(restarting) {
                     task.cancel()
                 }
-            } else if state.suspendedBySystem, state.destination != nil, !self.transferringIds.contains(state.id) {
-                self.startTransfer(state, after: 0)
+            } else if state.suspendedBySystem, state.destination != nil,
+                      !self.transferringIds.contains(state.id), !self.resolvingIds.contains(state.id) {
+                self.restartStopped(state)
             }
         }
     }
 
+    /// Sends a transfer again that the system stopped, which can be long ago.
+    private func restartStopped(_ state: ChatUploadState) {
+        if state.isExpired(now: Date().timeIntervalSince1970) {
+            self.interrupt(state, reason: "expired")
+        } else if state.destinationKind == .attachmentFolder {
+            // The name was free when it was chosen, see `retry`
+            self.resolveAgain(state)
+        } else {
+            self.startTransfer(state, after: 0)
+        }
+    }
+
+    /// Asks the server where to upload to again, and sends the file there.
+    private func resolveAgain(_ state: ChatUploadState) {
+        let id = state.id
+
+        guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: state.accountId),
+              let room = NCDatabaseManager.sharedInstance().room(withToken: state.roomToken, forAccountId: state.accountId)
+        else {
+            self.interrupt(state, reason: "room or account is gone")
+            return
+        }
+
+        // Claimed here, so nothing mistakes the upload for one without a transfer until the task runs
+        self.resolvingIds.insert(id)
+
+        Task { @MainActor in
+            self.resolvingIds.remove(id)
+            await self.resolveDestinationAndTransfer(id: id, room: room, account: account)
+        }
+    }
+
     private func interruptIfWithoutTransfer(id: String) {
-        guard let state = self.store.load(id: id), state.step == .uploading, !self.transferringIds.contains(id) else { return }
+        guard let state = self.store.load(id: id), state.step == .uploading,
+              !self.transferringIds.contains(id), !self.resolvingIds.contains(id)
+        else { return }
 
         self.interrupt(state, reason: "transfer was cancelled")
     }
@@ -388,13 +433,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             // The name of a file in the attachment folder was free when it was chosen, which can be long ago now
             if state.destination != nil, state.destinationKind != .attachmentFolder {
                 self.startTransfer(state, after: 0)
-            } else if let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: state.accountId),
-                      let room = NCDatabaseManager.sharedInstance().room(withToken: state.roomToken, forAccountId: state.accountId) {
-                Task { @MainActor in
-                    await self.resolveDestinationAndTransfer(id: referenceId, room: room, account: account)
-                }
             } else {
-                self.interrupt(state, reason: "room or account is gone")
+                self.resolveAgain(state)
             }
         default:
             // Still going, nothing to do. A file that is waiting to be posted might have been left alone by
@@ -596,12 +636,22 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         case .recreateAttachmentFolder:
             self.recreateAttachmentFolderAndTransfer(state)
         case .suspended:
-            // Started again when the app is in front, see `restartUploadsFromForeground`
-            NCLog.log("The system stopped the transfer of \(state.fileName), it is sent again when the app is active")
+            self.transferSuspended(state)
         case .failed:
             self.markMessageAsFailed(referenceId: id)
         case .finished, .none:
             break
+        }
+    }
+
+    /// Started again when the app comes to the front. When it is in front already, once: a system
+    /// that stops every transfer would else make a loop.
+    private func transferSuspended(_ state: ChatUploadState) {
+        NCLog.log("The system stopped the transfer of \(state.fileName)")
+
+        if UIApplication.shared.applicationState == .active, !self.didRestartSuspendedTransfer {
+            self.didRestartSuspendedTransfer = true
+            self.restartUploadsFromForeground()
         }
     }
 
@@ -615,8 +665,14 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         let id = state.id
         let bgTask = BGTaskHelper.startBackgroundTask(withName: "ChatUploadAttachmentFolder")
 
+        // Nothing mistakes the upload for one without a transfer while the folder is created
+        self.resolvingIds.insert(id)
+
         Task { @MainActor in
-            defer { bgTask.stopBackgroundTask() }
+            defer {
+                self.resolvingIds.remove(id)
+                bgTask.stopBackgroundTask()
+            }
 
             do {
                 try await ChatFileUploader.ensureAttachmentFolder(for: account)
