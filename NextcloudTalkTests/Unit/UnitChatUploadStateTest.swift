@@ -1,0 +1,274 @@
+//
+// SPDX-FileCopyrightText: 2026 Nextcloud GmbH and Nextcloud contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+
+import XCTest
+@testable import NextcloudTalk
+
+final class UnitChatUploadStateTest: XCTestCase {
+
+    private let now: TimeInterval = 1_700_000_000
+
+    private func makeState(kind: ChatUploadState.DestinationKind = .draftFolder) -> ChatUploadState {
+        return ChatUploadState(id: "ref-1",
+                               accountId: "account-1",
+                               roomToken: "token1",
+                               fileName: "photo.jpg",
+                               localFileName: "ref-1.jpg",
+                               destinationKind: kind,
+                               draftPath: kind == .draftFolder ? "Talk/room/Draft/abc.jpg" : nil,
+                               serverPath: "/Talk/room/Draft/abc.jpg",
+                               serverURL: "https://cloud.example.com/remote.php/dav/files/user/Talk/room/Draft/abc.jpg",
+                               createdAt: now)
+    }
+
+    // MARK: - Transfer
+
+    func testSuccessfulTransferMovesToAnnounce() {
+        var state = makeState()
+
+        XCTAssertEqual(state.transferFinished(failure: nil, now: now), .announce(after: 0))
+        XCTAssertEqual(state.step, .uploaded)
+        XCTAssertTrue(state.fileUploaded)
+    }
+
+    func testNetworkErrorsRetryForeverWithoutCounting() {
+        var state = makeState()
+        let failure = ChatFileUploadFailure(urlErrorCode: NSURLErrorNetworkConnectionLost)
+
+        for _ in 0 ..< 50 {
+            guard case .startTransfer = state.transferFinished(failure: failure, now: now + 60) else {
+                return XCTFail("Network errors need to be retried")
+            }
+        }
+
+        XCTAssertEqual(state.serverErrorCount, 0)
+        XCTAssertEqual(state.step, .uploading)
+    }
+
+    func testServerErrorsGiveUpAfterTheLimit() {
+        var state = makeState()
+        let failure = ChatFileUploadFailure(httpStatusCode: 503)
+
+        for _ in 1 ..< ChatFileUploadRetryPolicy.maxServerErrors {
+            guard case .startTransfer = state.transferFinished(failure: failure, now: now) else {
+                return XCTFail("Server errors need to be retried at first")
+            }
+        }
+
+        XCTAssertEqual(state.transferFinished(failure: failure, now: now), .failed)
+        XCTAssertEqual(state.step, .failed)
+        XCTAssertFalse(state.fileUploaded)
+    }
+
+    func testPermanentErrorFailsAtOnce() {
+        var state = makeState()
+
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 507), now: now), .failed)
+        XCTAssertEqual(state.step, .failed)
+
+        // The cancellation by the system
+        var cancelled = makeState()
+        XCTAssertEqual(cancelled.transferFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled), now: now), .failed)
+    }
+
+    func testUploadsExpire() {
+        var state = makeState()
+        let failure = ChatFileUploadFailure(urlErrorCode: NSURLErrorNotConnectedToInternet)
+
+        XCTAssertEqual(state.transferFinished(failure: failure, now: now + ChatUploadState.maxAge + 1), .failed)
+        XCTAssertEqual(state.failureReason, "expired")
+    }
+
+    func testPausesGrowAndResetAfterSuccess() {
+        var state = makeState()
+        let failure = ChatFileUploadFailure(urlErrorCode: NSURLErrorTimedOut)
+
+        XCTAssertEqual(state.transferFinished(failure: failure, now: now), .startTransfer(after: 2))
+        XCTAssertEqual(state.transferFinished(failure: failure, now: now), .startTransfer(after: 4))
+        XCTAssertEqual(state.transferFinished(failure: nil, now: now), .announce(after: 0))
+        XCTAssertEqual(state.failureCount, 0)
+    }
+
+    func testEventsOfOtherStepsAreIgnored() {
+        var state = makeState()
+        _ = state.transferFinished(failure: nil, now: now)
+
+        // A second delivery of the same event
+        XCTAssertEqual(state.transferFinished(failure: nil, now: now), .none)
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 500), now: now), .none)
+        XCTAssertEqual(state.step, .uploaded)
+    }
+
+    // MARK: - Announce
+
+    private func uploadedState(kind: ChatUploadState.DestinationKind = .draftFolder) -> ChatUploadState {
+        var state = makeState(kind: kind)
+        _ = state.transferFinished(failure: nil, now: now)
+        return state
+    }
+
+    func testAnnounceSucceeds() {
+        var state = uploadedState()
+
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertTrue(state.announceInFlight)
+        XCTAssertEqual(state.announceFinished(failure: nil, now: now), .finished)
+        XCTAssertEqual(state.step, .announced)
+        XCTAssertFalse(state.announceInFlight)
+    }
+
+    func testNothingToAnnounceBeforeTheUpload() {
+        var state = makeState()
+
+        XCTAssertFalse(state.beginAnnounce())
+    }
+
+    func testAnnounceIsNotStartedTwiceAfterItFinished() {
+        var state = uploadedState()
+
+        XCTAssertTrue(state.beginAnnounce())
+        _ = state.announceFinished(failure: nil, now: now)
+
+        XCTAssertFalse(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: nil, now: now), .none)
+    }
+
+    func testRepeatedAnnounceAfterLostAnswerFindsTheFileMovedAndCountsAsDone() {
+        var state = uploadedState()
+
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorNetworkConnectionLost), now: now), .announce(after: 2))
+        XCTAssertTrue(state.announceMayHaveSucceeded)
+
+        // The file is gone from the draft folder, because the first request moved it
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .finished)
+        XCTAssertEqual(state.step, .announced)
+    }
+
+    func testNotFoundOfTheFirstAnnounceIsAFailure() {
+        var state = uploadedState()
+
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .failed)
+        XCTAssertEqual(state.step, .failed)
+        // The file is on the server, a retry must not upload it again
+        XCTAssertTrue(state.fileUploaded)
+    }
+
+    func testAnnounceAfterTheProcessDiedDuringTheRequest() {
+        var state = uploadedState()
+        XCTAssertTrue(state.beginAnnounce())
+
+        // Stored with announceInFlight, read back after a relaunch
+        state.recoverAfterRelaunch()
+
+        XCTAssertFalse(state.announceInFlight)
+        XCTAssertTrue(state.announceMayHaveSucceeded)
+
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .finished)
+    }
+
+    func testDefiniteRefusalDoesNotMakeLaterNotFoundASuccess() {
+        var state = uploadedState()
+
+        XCTAssertTrue(state.beginAnnounce())
+        // The conversation does not allow us to chat, definite answer
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 403), now: now), .failed)
+        XCTAssertFalse(state.announceMayHaveSucceeded)
+    }
+
+    func testAnnounceServerErrorsAreLimited() {
+        var state = uploadedState()
+        let failure = ChatFileUploadFailure(httpStatusCode: 500)
+
+        for _ in 1 ..< ChatFileUploadRetryPolicy.maxServerErrors {
+            XCTAssertTrue(state.beginAnnounce())
+            guard case .announce = state.announceFinished(failure: failure, now: now) else {
+                return XCTFail("Needs to retry")
+            }
+        }
+
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: failure, now: now), .failed)
+        XCTAssertEqual(state.step, .failed)
+        XCTAssertTrue(state.fileUploaded)
+    }
+
+    func testAttachmentFolderNeverTreatsNotFoundAsDone() {
+        var state = uploadedState(kind: .attachmentFolder)
+
+        XCTAssertTrue(state.beginAnnounce())
+        _ = state.announceFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorTimedOut), now: now)
+
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .failed)
+    }
+
+    // MARK: - Retry by the user
+
+    func testRetryAfterFailedTransferUploadsAgain() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 403), now: now)
+
+        XCTAssertEqual(state.prepareRetry(now: now + 100), .startTransfer(after: 0))
+        XCTAssertEqual(state.step, .uploading)
+        XCTAssertEqual(state.createdAt, now + 100)
+        XCTAssertEqual(state.serverErrorCount, 0)
+    }
+
+    func testRetryAfterFailedAnnounceOnlyAnnounces() {
+        var state = uploadedState()
+        _ = state.beginAnnounce()
+        _ = state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 403), now: now)
+
+        XCTAssertEqual(state.prepareRetry(now: now), .announce(after: 0))
+        XCTAssertEqual(state.step, .uploaded)
+        XCTAssertTrue(state.beginAnnounce())
+    }
+
+    func testRetryOnlyFromFailed() {
+        var state = makeState()
+        XCTAssertEqual(state.prepareRetry(now: now), .none)
+    }
+
+    func testFailedStateIsKeptWhenFailingTwice() {
+        var announced = uploadedState()
+        _ = announced.beginAnnounce()
+        _ = announced.announceFinished(failure: nil, now: now)
+        announced.fail(reason: "late")
+        XCTAssertEqual(announced.step, .announced)
+    }
+
+    // MARK: - Serialization
+
+    func testStateSurvivesEncodingAndDecoding() throws {
+        var state = makeState()
+        state.metadata.caption = "Hello"
+        state.metadata.replyTo = 42
+        state.metadata.threadId = 7
+        state.metadata.silent = true
+        state.metadata.isVoiceMessage = true
+        state.allowUpdate = true
+        _ = state.transferFinished(failure: nil, now: now)
+        _ = state.beginAnnounce()
+
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(ChatUploadState.self, from: data)
+
+        XCTAssertEqual(decoded, state)
+        XCTAssertEqual(decoded.metadata.uploadMetadata.asDictionary()["caption"] as? String, "Hello")
+        XCTAssertEqual(decoded.metadata.uploadMetadata.asDictionary()["replyTo"] as? Int, 42)
+    }
+
+    func testStateNeverContainsCredentials() throws {
+        let data = try JSONEncoder().encode(makeState())
+        let json = String(data: data, encoding: .utf8) ?? ""
+
+        XCTAssertFalse(json.lowercased().contains("password"))
+        XCTAssertFalse(json.lowercased().contains("authorization"))
+    }
+}
