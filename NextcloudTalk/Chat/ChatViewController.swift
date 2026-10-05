@@ -2408,7 +2408,7 @@ import SwiftUI
     // MARK: - ContextMenu (Long press on message)
 
     func isMessageReplyable(message: NCChatMessage) -> Bool {
-        return message.isReplyable && !message.isDeleting
+        return message.canBeRepliedTo
     }
 
     func isMessageReactable(message: NCChatMessage) -> Bool {
@@ -2655,7 +2655,7 @@ import SwiftUI
         }
 
         // Reply option
-        if self.isMessageReplyable(message: message), self.room.canChat, !self.textInputbar.isEditing {
+        if message.canReply(in: self.room), !self.textInputbar.isEditing {
             actions.append(UIAction(title: NSLocalizedString("Reply", comment: ""), image: .init(systemName: "arrowshape.turn.up.left")) { _ in
                 self.didPressReply(for: message)
             })
@@ -2807,7 +2807,7 @@ import SwiftUI
         }
 
         // Delete option
-        if message.sendingFailed || message.isOfflineMessage || (message.isDeletable(for: self.account, in: self.room) && self.room.canChat) {
+        if message.canDelete(for: self.account, in: self.room) {
             destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
                 self.didPressDelete(for: message)
             })
