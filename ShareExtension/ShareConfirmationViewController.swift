@@ -48,6 +48,10 @@ let kShareConfirmationMaxItems = 10
     /// Must be done with the files when it returns, the temporary copies are deleted right after.
     var uploadHandler: (([ChatFileUpload]) -> Void)?
 
+    /// How long the progress is shown while waiting for the network. The share extension is not carried on by
+    /// the system and the HUD cannot be cancelled, so it reports a missing network soon.
+    private static let maxNetworkWait: TimeInterval = 30
+
     public lazy var shareItemController: ShareItemController = {
         let controller = ShareItemController()
         controller.delegate = self
@@ -944,7 +948,7 @@ let kShareConfirmationMaxItems = 10
             let results: [Result<Void, Error>]
 
             do {
-                results = try await ChatFileUploader.upload(uploads) { index, fractionCompleted in
+                results = try await ChatFileUploader.upload(uploads, maxNetworkWait: Self.maxNetworkWait) { index, fractionCompleted in
                     shareItems[index].uploadProgress = fractionCompleted
                     self.updateHudProgress()
                 }

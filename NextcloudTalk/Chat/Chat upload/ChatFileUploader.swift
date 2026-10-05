@@ -17,21 +17,25 @@ enum ChatFileUploader {
     /// The destination is determined once and every attempt goes into that same destination. A short loss of the
     /// network is waited for (see `ChatFileUploadRetryPolicy`), only the announcement is repeated after the file
     /// arrived, and an announcement that already went through is not repeated.
-    static func upload(_ upload: ChatFileUpload, progress: ((Double) -> Void)? = nil) async throws {
-        let destination = try await self.retrying { try await self.resolveDestination(for: upload) }
+    /// - Parameter maxNetworkWait: How long to wait for the network to come back before giving up.
+    static func upload(_ upload: ChatFileUpload,
+                       maxNetworkWait: TimeInterval = ChatFileUploadRetryPolicy.maxNetworkWait,
+                       progress: ((Double) -> Void)? = nil) async throws {
+        let destination = try await self.retrying(maxNetworkWait: maxNetworkWait) { try await self.resolveDestination(for: upload) }
 
-        try await self.transfer(upload, to: destination, progress: progress)
+        try await self.transfer(upload, to: destination, maxNetworkWait: maxNetworkWait, progress: progress)
     }
 
     /// Uploads the file into the destination and posts it. Each of both steps is repeated on its own.
     private static func transfer(_ upload: ChatFileUpload,
                                  to destination: ChatFileUploadDestination,
+                                 maxNetworkWait: TimeInterval,
                                  progress: ((Double) -> Void)?) async throws {
-        try await self.retrying {
+        try await self.retrying(maxNetworkWait: maxNetworkWait) {
             try await self.put(upload, to: destination, progress: progress, mayCreateAttachmentFolder: true)
         }
 
-        try await self.announceOnce(upload, at: destination)
+        try await self.announceOnce(upload, at: destination, maxNetworkWait: maxNetworkWait)
     }
 
     /// Uploads several files to the server and posts them into the conversation they belong to.
@@ -44,6 +48,7 @@ enum ChatFileUploader {
     /// - Throws: When the draft folder could not be prepared, in which case nothing was uploaded.
     /// - Returns: One result per upload, in the order the uploads were given in.
     static func upload(_ uploads: [ChatFileUpload],
+                       maxNetworkWait: TimeInterval = ChatFileUploadRetryPolicy.maxNetworkWait,
                        progress: ((_ index: Int, _ fractionCompleted: Double) -> Void)? = nil) async throws -> [Result<Void, Error>] {
         guard let firstUpload = uploads.first else { return [] }
 
@@ -53,7 +58,7 @@ enum ChatFileUploader {
 
         if firstUpload.room.supportsConversationSubfolders {
             // All uploads of a batch share the folder, so they share the permission of it as well
-            draftFolder = try await self.retrying {
+            draftFolder = try await self.retrying(maxNetworkWait: maxNetworkWait) {
                 try await self.probeDraftFolder(for: firstUpload.room,
                                                 account: firstUpload.account,
                                                 fileNames: uploads.map { $0.fileName },
@@ -70,10 +75,10 @@ enum ChatFileUploader {
                         if let draftFolder {
                             destination = try await self.draftFolderDestination(in: draftFolder, for: upload)
                         } else {
-                            destination = try await self.retrying { try await self.resolveDestination(for: upload) }
+                            destination = try await self.retrying(maxNetworkWait: maxNetworkWait) { try await self.resolveDestination(for: upload) }
                         }
 
-                        try await self.transfer(upload, to: destination, progress: { progress?(index, $0) })
+                        try await self.transfer(upload, to: destination, maxNetworkWait: maxNetworkWait, progress: { progress?(index, $0) })
 
                         return (index, .success(()))
                     } catch {
@@ -95,7 +100,8 @@ enum ChatFileUploader {
     // MARK: - Retries
 
     /// Runs the operation again after a pause as long as the retry policy says so.
-    private static func retrying<T>(_ operation: () async throws -> T) async throws -> T {
+    private static func retrying<T>(maxNetworkWait: TimeInterval = ChatFileUploadRetryPolicy.maxNetworkWait,
+                                    _ operation: () async throws -> T) async throws -> T {
         var serverErrorCount = 0
         var failureCount = 0
         var networkWaitStart: Date?
@@ -121,7 +127,8 @@ enum ChatFileUploader {
                 guard case .retry(let delay) = ChatFileUploadRetryPolicy.decision(for: failure,
                                                                                  serverErrorCount: serverErrorCount,
                                                                                  failureCount: failureCount,
-                                                                                 networkWait: networkWait)
+                                                                                 networkWait: networkWait,
+                                                                                 maxNetworkWait: maxNetworkWait)
                 else { throw error }
 
                 NCLog.log("Upload request failed, trying again in \(delay) seconds. Error: \(error.localizedDescription)")
@@ -158,20 +165,21 @@ enum ChatFileUploader {
     ///
     /// A request without an answer might have gone through, so the next one for a file in the draft folder is
     /// allowed to find it gone: that means it has been posted already, see `isAlreadyAnnounced`.
-    private static func announceOnce(_ upload: ChatFileUpload, at destination: ChatFileUploadDestination) async throws {
+    private static func announceOnce(_ upload: ChatFileUpload, at destination: ChatFileUploadDestination, maxNetworkWait: TimeInterval) async throws {
         var earlierAttemptMayHaveSucceeded = false
 
         var isDraftFolder = false
         if case .draftFolder = destination { isDraftFolder = true }
 
-        try await self.retrying { () async throws -> Void in
+        // swiftlint:disable:next redundant_void_return
+        try await self.retrying(maxNetworkWait: maxNetworkWait) { () async throws -> Void in
             do {
                 try await self.announce(upload, at: destination)
             } catch {
                 let failure = self.failure(for: error)
 
                 if ChatFileUploadRetryPolicy.isAlreadyAnnounced(failure, viaDraftFolder: isDraftFolder, earlierAttemptMayHaveSucceeded: earlierAttemptMayHaveSucceeded) {
-                    NCLog.log("Announcing \(upload.fileName) was done by an earlier attempt already")
+                    NCLog.log("Announcing \(upload.fileName) was done by an earlier attempt already. Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
                     return
                 }
 
@@ -196,7 +204,29 @@ enum ChatFileUploader {
     /// Like `resolveDestination(for:)`, waiting for the network as long as the retry policy says so.
     static func resolveDestinationWithRetries(in room: NCRoom, account: TalkAccount, fileName: String, allowUpdate: Bool) async throws -> ChatFileUploadDestination {
         return try await self.retrying {
-            try await self.resolveDestination(in: room, account: account, fileName: fileName, allowUpdate: allowUpdate)
+            let destination = try await self.resolveDestination(in: room, account: account, fileName: fileName, allowUpdate: allowUpdate)
+
+            // Nobody is there to create the folder when the transfer runs without the app, so it has to exist
+            // before the transfer is handed over to the system
+            if case .attachmentFolder = destination {
+                try await self.ensureAttachmentFolder(for: account)
+            }
+
+            return destination
+        }
+    }
+
+    /// Makes sure the attachment folder of the user exists, and creates it when it does not.
+    static func ensureAttachmentFolder(for account: TalkAccount) async throws {
+        let statusCode: Int = await withCheckedContinuation { continuation in
+            NCAPIController.sharedInstance().checkOrCreateAttachmentFolder(forAccount: account) { created, statusCode in
+                // The callback reports 0 for a folder that is there already, and false for "not created"
+                continuation.resume(returning: created ? 0 : statusCode)
+            }
+        }
+
+        guard statusCode == 0 else {
+            throw ChatFileUploadError.uploadFailed(errorCode: statusCode, errorDescription: "Could not check or create the attachment folder")
         }
     }
 
