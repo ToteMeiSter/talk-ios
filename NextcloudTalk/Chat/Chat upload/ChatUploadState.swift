@@ -300,6 +300,12 @@ struct ChatUploadState: Codable, Equatable {
     mutating func beginAnnounce() -> Bool {
         guard self.step == .uploaded, self.fileUploaded else { return false }
 
+        // A request that was in flight and never ended (the process died, or the state was read before it was
+        // recovered) might have got through, and the new one must know
+        if self.announceInFlight {
+            self.announceMayHaveSucceeded = true
+        }
+
         self.announceAttempts += 1
         self.announceInFlight = true
         return true

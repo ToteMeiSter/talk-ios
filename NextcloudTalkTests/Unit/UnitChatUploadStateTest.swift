@@ -302,6 +302,27 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertTrue(state.isExpired(now: now + ChatUploadState.maxAge + 1))
     }
 
+    func testBeginAnnounceOnTopOfARequestInFlightRemembersItMayHaveSucceeded() {
+        var state = uploadedState(kind: .draftFolder)
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertFalse(state.announceMayHaveSucceeded)
+
+        // The state of the request that never ended is read again (no `recoverAfterRelaunch` in between)
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertTrue(state.announceMayHaveSucceeded)
+
+        // A 404 of the draft folder then means that the file was moved already
+        XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .finished)
+    }
+
+    func testNotFoundIsNoSuccessWithoutAnEarlierRequest() {
+        var state = uploadedState(kind: .draftFolder)
+        XCTAssertTrue(state.beginAnnounce())
+
+        XCTAssertNotEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .finished)
+        XCTAssertNotEqual(state.step, .announced)
+    }
+
     // MARK: - Pause of the server
 
     func testRetryAfterIsKeptAsEarliestBegin() {

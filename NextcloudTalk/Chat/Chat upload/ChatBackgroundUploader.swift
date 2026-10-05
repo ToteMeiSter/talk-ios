@@ -161,13 +161,16 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// Everything that looks at the stored states or starts work from them calls this first, because the order of
     /// `didBecomeActive` and `protectedDataDidBecomeAvailable` after a launch before the first unlock is not defined.
     /// Else an announcement started in between would be taken for one of the dead process, or the other way round.
+    /// Note that `isProtectedDataAvailable` is `false` whenever the screen is locked, not only before the first unlock,
+    /// so a process of this launch can have announcements in flight when this finally runs: those are skipped here,
+    /// and `ChatUploadState.beginAnnounce` covers the other order.
     /// The call is idempotent and cheap, which is why it is called from every entry and the notification is not waited for.
     private func recoverStoredStates() {
         guard !self.didRecoverStates, UIApplication.shared.isProtectedDataAvailable else { return }
 
         self.didRecoverStates = true
 
-        for var state in self.store.loadAll() {
+        for var state in self.store.loadAll() where !self.announcingIds.contains(state.id) {
             state.recoverAfterRelaunch()
             try? self.store.save(state)
         }
@@ -179,8 +182,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
-    /// Carries on with the states found on disk. Waits for the first unlock of the device, before it the states
-    /// cannot be read, which does not mean they are gone.
+    /// Carries on with the states found on disk. Waits for the data to be available (not locked), before the first
+    /// unlock the states cannot be read, which does not mean they are gone.
     private func processStoredStates() {
         guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
 
