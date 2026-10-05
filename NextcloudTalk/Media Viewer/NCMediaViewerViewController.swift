@@ -6,70 +6,100 @@
 import Foundation
 import UIKit
 
+///
+/// Implemented by the chat that opened the media viewer. Replying and deleting are done by the chat,
+/// without a delegate the viewer offers neither.
+///
+@objc protocol NCMediaViewerViewControllerDelegate: AnyObject {
+    func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestReplyTo message: NCChatMessage)
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage)
+}
+
 @objcMembers class NCMediaViewerViewController: UIViewController,
                                                 UIPageViewControllerDelegate,
                                                 UIPageViewControllerDataSource,
-                                                NCMediaViewerPageViewControllerDelegate {
+                                                NCMediaViewerPageViewControllerDelegate,
+                                                ShareViewControllerDelegate,
+                                                ShareConfirmationViewControllerDelegate {
+
+    public weak var delegate: NCMediaViewerViewControllerDelegate?
+
+    /// The shared items list already is the "all media" view, so it is not offered again from there.
+    /// The shown message is not necessarily stored, so there is no list to swipe through either.
+    public var isOpenedFromSharedItems = false
 
     private let room: NCRoom
     private let account: TalkAccount
     private let pageController = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
     private var initialMessage: NCChatMessage
 
-    private lazy var shareButton = {
-        let shareButton = UIBarButtonItem(title: nil, style: .plain, target: nil, action: nil)
-        shareButton.isEnabled = false
-        shareButton.primaryAction = UIAction(title: "", image: .init(systemName: "square.and.arrow.up"), handler: { [unowned self, unowned shareButton] _ in
-            guard let mediaPageViewController = self.getCurrentPageViewController(),
-                  let placeholderURL = mediaPageViewController.expectedFileURL
-            else { return }
+    private var fileMessagesToken: RLMNotificationToken?
+    private var chatBlocksToken: RLMNotificationToken?
+    private var counterText: String?
 
-            // Only ever the original file, never a preview. The provider waits for the download if
-            // it is not finished yet, while the user picks a destination.
-            let itemProvider = MediaShareItemProvider(placeholderURL: placeholderURL,
-                                                      thumbnail: mediaPageViewController.displayedImage) { [weak mediaPageViewController] completion in
-                guard let mediaPageViewController else {
-                    completion(nil)
-                    return
-                }
+    // Ids of all media the viewer can show, from the oldest to the newest. Kept, so swiping only needs a lookup.
+    private var displayableMessageIds: [Int] = []
+    private var hasOlderHistory = false
 
-                mediaPageViewController.requestSharableFile(completion: completion)
-            }
+    private lazy var counterLabel = {
+        let counterLabel = UILabel()
+        counterLabel.font = .preferredFont(forTextStyle: .headline)
+        counterLabel.adjustsFontForContentSizeCategory = true
+        counterLabel.textAlignment = .center
 
-            let activityViewController = UIActivityViewController(activityItems: [itemProvider], applicationActivities: nil)
-            activityViewController.popoverPresentationController?.barButtonItem = shareButton
-            // didFail stays false when the user simply dismissed the sheet, so no need to look at
-            // whether an activity completed
-            activityViewController.completionWithItemsHandler = { [weak self] _, _, _, _ in
-                guard itemProvider.didFail else { return }
-
-                self?.showSharingFailedAlert()
-            }
-
-            self.present(activityViewController, animated: true)
-        })
-
-        return shareButton
+        return counterLabel
     }()
 
-    private lazy var showMessageButton = {
-        let showMessageButton = UIBarButtonItem(title: nil, style: .plain, target: nil, action: nil)
-        showMessageButton.isEnabled = false
-        showMessageButton.primaryAction = UIAction(title: "", image: .init(systemName: "text.magnifyingglass"), handler: { [unowned self] _ in
-            guard let mediaPageViewController = self.getCurrentPageViewController() else { return }
+    private lazy var fileNameLabel = {
+        let fileNameLabel = UILabel()
+        fileNameLabel.font = .preferredFont(forTextStyle: .caption1)
+        fileNameLabel.adjustsFontForContentSizeCategory = true
+        fileNameLabel.textAlignment = .center
+        fileNameLabel.lineBreakMode = .byTruncatingMiddle
+        fileNameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-            let message = mediaPageViewController.message
+        return fileNameLabel
+    }()
 
-            if let account = message.account, let chatViewController = ContextChatViewController(forRoom: self.room, withAccount: account, withMessage: [], withHighlightId: 0) {
-                chatViewController.showContext(ofMessageId: message.messageId, withLimit: 50, withCloseButton: true)
+    private lazy var titleStackView = {
+        let titleStackView = UIStackView(arrangedSubviews: [counterLabel, fileNameLabel])
+        titleStackView.axis = .vertical
+        titleStackView.alignment = .center
 
-                let navController = NCNavigationController(rootViewController: chatViewController)
-                self.present(navController, animated: true)
-            }
+        return titleStackView
+    }()
 
+    private lazy var moreButton = {
+        // Built when the menu opens, so it always matches the page that is shown
+        let menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
+            completion(self?.makeMenuElements() ?? [])
+        }])
+
+        let moreButton = UIBarButtonItem(title: nil, image: UIImage(systemName: "ellipsis.circle"), primaryAction: nil, menu: menu)
+        moreButton.accessibilityLabel = NSLocalizedString("More", comment: "More menu elements")
+
+        return moreButton
+    }()
+
+    private lazy var forwardButton = {
+        let forwardButton = UIBarButtonItem(title: nil, style: .plain, target: nil, action: nil)
+        forwardButton.primaryAction = UIAction(title: "", image: .init(systemName: "arrowshape.turn.up.right"), handler: { [unowned self] _ in
+            self.forwardCurrentMedia()
         })
+        forwardButton.accessibilityLabel = NSLocalizedString("Forward", comment: "")
 
-        return showMessageButton
+        return forwardButton
+    }()
+
+    private lazy var drawButton = {
+        let drawButton = UIBarButtonItem(title: nil, style: .plain, target: nil, action: nil)
+        drawButton.primaryAction = UIAction(title: "", image: .init(systemName: "pencil.tip.crop.circle"), handler: { [unowned self] _ in
+            self.startDrawingOnCopy()
+        })
+        drawButton.accessibilityLabel = NSLocalizedString("Draw", comment: "")
+
+        return drawButton
     }()
 
     init(initialMessage: NCChatMessage, room: NCRoom, account: TalkAccount) {
@@ -112,13 +142,16 @@ import UIKit
         // Not called by the page controller delegate for the initial view controller
         initialViewController.didBecomeCurrentPage()
 
-        self.navigationItem.title = initialViewController.navigationItem.title
+        self.refreshMediaList()
         self.updateToolbarButtons()
+        self.observeFileMessages()
 
         AllocationTracker.shared.addAllocation("NCMediaViewerViewController")
     }
 
     deinit {
+        self.fileMessagesToken?.invalidate()
+        self.chatBlocksToken?.invalidate()
         AllocationTracker.shared.removeAllocation("NCMediaViewerViewController")
     }
 
@@ -127,7 +160,16 @@ import UIKit
         closeButton.primaryAction = UIAction(title: NSLocalizedString("Close", comment: ""), handler: { [unowned self] _ in
             self.dismiss(animated: true)
         })
-        self.navigationItem.rightBarButtonItems = [closeButton]
+        self.navigationItem.rightBarButtonItems = [closeButton, moreButton]
+        self.navigationItem.titleView = titleStackView
+
+        if #available(iOS 26.0, *) {
+            self.counterLabel.textColor = .label
+            self.fileNameLabel.textColor = .secondaryLabel
+        } else {
+            self.counterLabel.textColor = NCAppBranding.themeTextColor()
+            self.fileNameLabel.textColor = NCAppBranding.themeTextColor()
+        }
 
         self.navigationController?.setToolbarHidden(false, animated: false)
 
@@ -137,15 +179,6 @@ import UIKit
         self.navigationController?.toolbar.standardAppearance = appearance
         self.navigationController?.toolbar.compactAppearance = appearance
         self.navigationController?.toolbar.scrollEdgeAppearance = appearance
-
-        let fixedSpace = UIBarButtonItem(barButtonSystemItem: .fixedSpace, target: nil, action: nil)
-        fixedSpace.width = 20
-        // The message can only be shown when the server supports the context endpoint
-        if self.room.supportsMessageContext {
-            self.toolbarItems = [shareButton, fixedSpace, showMessageButton]
-        } else {
-            self.toolbarItems = [shareButton]
-        }
     }
 
     func getCurrentPageViewController() -> NCMediaViewerPageViewController? {
@@ -163,6 +196,17 @@ import UIKit
         return messages
     }
 
+    // Only pictures and videos the viewer can play itself, everything else is left to the file preview
+    static func canDisplay(_ message: NCChatMessage) -> Bool {
+        guard let file = message.file(), let filePath = file.path else { return false }
+
+        let fileType = file.mimetype ?? ""
+        let isSupportedMedia = NCUtils.isImage(fileType: fileType) || NCUtils.isVideo(fileType: fileType)
+        let isUnsupportedExtension = VLCKitVideoViewController.supportedFileExtensions.contains(URL(fileURLWithPath: filePath).pathExtension.lowercased())
+
+        return isSupportedMedia && !isUnsupportedExtension
+    }
+
     func getPreviousFileMessage(from message: NCChatMessage) -> NCChatMessage? {
         let prevQuery = NSPredicate(format: "messageId < %ld", message.messageId)
 
@@ -170,15 +214,7 @@ import UIKit
         let messageObject = queriedObjects.lastObject()
 
         if let message = messageObject as? NCChatMessage {
-            guard let filePath = message.file().path else {
-                return self.getPreviousFileMessage(from: message)
-            }
-
-            let fileType = message.file()?.mimetype ?? ""
-            let isSupportedMedia = NCUtils.isImage(fileType: fileType) || NCUtils.isVideo(fileType: fileType)
-            let isUnsupportedExtension = VLCKitVideoViewController.supportedFileExtensions.contains(URL(fileURLWithPath: filePath).pathExtension.lowercased())
-
-            if isSupportedMedia && !isUnsupportedExtension {
+            if NCMediaViewerViewController.canDisplay(message) {
                 return message
             }
 
@@ -194,15 +230,7 @@ import UIKit
         guard let messageObject = self.getAllFileMessages()?.objects(with: prevQuery).firstObject() else { return nil }
 
         if let message = messageObject as? NCChatMessage {
-            guard let filePath = message.file().path else {
-                return self.getNextFileMessage(from: message)
-            }
-
-            let fileType = message.file()?.mimetype ?? ""
-            let isSupportedMedia = NCUtils.isImage(fileType: fileType) || NCUtils.isVideo(fileType: fileType)
-            let isUnsupportedExtension = VLCKitVideoViewController.supportedFileExtensions.contains(URL(fileURLWithPath: filePath).pathExtension.lowercased())
-
-            if isSupportedMedia && !isUnsupportedExtension {
+            if NCMediaViewerViewController.canDisplay(message) {
                 return message
             }
 
@@ -213,7 +241,8 @@ import UIKit
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
-        guard let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
+        guard !self.isOpenedFromSharedItems,
+              let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
               let prevMessage = self.getPreviousFileMessage(from: prevMediaPageVC.message)
         else { return nil }
 
@@ -223,7 +252,8 @@ import UIKit
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
-        guard let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
+        guard !self.isOpenedFromSharedItems,
+              let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
               let nextMessage = self.getNextFileMessage(from: prevMediaPageVC.message)
         else { return nil }
 
@@ -233,9 +263,7 @@ import UIKit
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
-        // Update the titel of the currently shown viewController
         guard let mediaPageViewController = self.getCurrentPageViewController() else { return }
-        self.navigationItem.title = mediaPageViewController.navigationItem.title
 
         // On a cancelled swipe the previous view controller is the current one again
         for case let previousPageViewController as NCMediaViewerPageViewController in previousViewControllers
@@ -245,25 +273,432 @@ import UIKit
 
         mediaPageViewController.didBecomeCurrentPage()
 
+        self.updateCounter()
         self.updateToolbarButtons()
+    }
+
+    // MARK: - Title and counter
+
+    private func updateTitleView() {
+        let message = self.getCurrentMessage()
+
+        self.fileNameLabel.text = message?.file()?.name
+        self.counterLabel.text = self.counterText
+        self.counterLabel.isHidden = self.counterText == nil
+        self.navigationItem.title = message?.file()?.name
+
+        self.titleStackView.setNeedsLayout()
+    }
+
+    private func getCurrentMessage() -> NCChatMessage? {
+        guard let message = self.getCurrentPageViewController()?.message, !message.isInvalidated else { return nil }
+
+        return message
+    }
+
+    private var chatBlocksPredicate: NSPredicate {
+        return NSPredicate(format: "internalId = %@ AND threadId = 0", self.room.internalId)
+    }
+
+    ///
+    /// Reads the media list again, which is the expensive part. Needed when the stored messages change.
+    ///
+    private func refreshMediaList() {
+        var messageIds: [Int] = []
+
+        if let fileMessages = self.getAllFileMessages() {
+            // The results are sorted from the oldest to the newest message
+            for case let message as NCChatMessage in fileMessages where NCMediaViewerViewController.canDisplay(message) {
+                messageIds.append(message.messageId)
+            }
+        }
+
+        self.displayableMessageIds = messageIds
+
+        self.refreshHistoryState()
+    }
+
+    private func refreshHistoryState() {
+        // The oldest stored block knows whether there is more history. Without any block there is nothing known to load.
+        let firstBlock = NCChatBlock.objects(with: self.chatBlocksPredicate).sortedResults(usingKeyPath: "newestMessageId", ascending: true).firstObject() as? NCChatBlock
+        self.hasOlderHistory = firstBlock?.hasHistory ?? false
+
+        self.updateCounter()
+    }
+
+    ///
+    /// Counts like Telegram does: the oldest media of the list is "1 of M", the newest is "M of M".
+    /// The "+" after M tells that older media can still be loaded.
+    ///
+    private func updateCounter() {
+        defer {
+            self.updateTitleView()
+        }
+
+        guard !self.isOpenedFromSharedItems,
+              let currentMessageId = self.getCurrentMessage()?.messageId,
+              let index = self.displayableMessageIds.firstIndex(of: currentMessageId)
+        else {
+            self.counterText = nil
+            return
+        }
+
+        var totalText = NumberFormatter.localizedString(from: NSNumber(value: self.displayableMessageIds.count), number: .none)
+
+        if self.hasOlderHistory {
+            totalText += "+"
+        }
+
+        let positionText = NumberFormatter.localizedString(from: NSNumber(value: index + 1), number: .none)
+        let format = NSLocalizedString("%1$@ of %2$@", comment: "Position of the shown media in the media viewer, e.g. '2 of 5'. The second value ends with '+' when older media can still be loaded")
+
+        self.counterText = String(format: format, positionText, totalText)
+    }
+
+    // The page stays the one we show when media is added or removed, only the counter is recalculated
+    private func observeFileMessages() {
+        // The first call only reports what is already there, the list was read when the viewer opened
+        self.fileMessagesToken = self.getAllFileMessages()?.addNotificationBlock { [weak self] _, change, _ in
+            guard let self, change != nil else { return }
+
+            self.refreshMediaList()
+
+            // Forces the page controller to ask for its neighbours again
+            self.pageController.dataSource = nil
+            self.pageController.dataSource = self
+        }
+
+        self.chatBlocksToken = NCChatBlock.objects(with: self.chatBlocksPredicate).addNotificationBlock { [weak self] _, change, _ in
+            guard change != nil else { return }
+
+            self?.refreshHistoryState()
+        }
+    }
+
+    // MARK: - Toolbar
+
+    private func canForward(_ message: NCChatMessage) -> Bool {
+        guard let file = message.file(), file.path != nil else { return false }
+
+        return !message.isDeletedMessage && !self.room.isFederated && !self.room.isClassified
+    }
+
+    private func canDraw(_ message: NCChatMessage) -> Bool {
+        let mimetype = message.file()?.mimetype ?? ""
+        let isDrawable = NCUtils.isImage(fileType: mimetype) && !NCUtils.isGif(fileType: mimetype) && !mimetype.contains("svg")
+
+        return isDrawable && self.room.canChat && self.room.readOnlyState != .readOnly
     }
 
     private func updateToolbarButtons() {
         let mediaPageViewController = self.getCurrentPageViewController()
+        let message = self.getCurrentMessage()
 
-        // Enabled as soon as we know where the file will be, the share itself waits for the download
-        self.shareButton.isEnabled = mediaPageViewController?.expectedFileURL != nil
-        self.showMessageButton.isEnabled = mediaPageViewController != nil
+        var items: [UIBarButtonItem] = []
+
+        if let message, self.canForward(message) {
+            items.append(self.forwardButton)
+        }
+
+        items.append(UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil))
+
+        if let message, self.canDraw(message) {
+            // A copy of the downloaded file is edited, so the file has to be there
+            self.drawButton.isEnabled = mediaPageViewController?.sharableFileURL != nil
+            items.append(self.drawButton)
+        }
+
+        self.setToolbarItems(items, animated: false)
     }
 
-    private func showSharingFailedAlert() {
-        let alert = UIAlertController(title: NSLocalizedString("An error occurred downloading the picture", comment: ""),
+    // MARK: - Menu
+
+    private func makeMenuElements() -> [UIMenuElement] {
+        guard let mediaPageViewController = self.getCurrentPageViewController(), let message = self.getCurrentMessage() else { return [] }
+
+        var actions: [UIMenuElement] = []
+
+        // Enabled as soon as we know where the file will be, saving and sharing wait for the download
+        if mediaPageViewController.expectedFileURL != nil {
+            actions.append(UIAction(title: NSLocalizedString("Save to Photos", comment: "Menu entry in the media viewer to save the shown picture or video to the photo library"), image: .init(systemName: "square.and.arrow.down")) { [weak self] _ in
+                self?.saveCurrentMediaToPhotos()
+            })
+        }
+
+        if !self.isOpenedFromSharedItems {
+            actions.append(UIAction(title: NSLocalizedString("Show all media", comment: "Menu entry in the media viewer to open all pictures and videos of the conversation"), image: .init(systemName: "photo.on.rectangle.angled")) { [weak self] _ in
+                self?.showAllMedia()
+            })
+        }
+
+        // The message can only be shown when the server supports the context endpoint
+        if self.room.supportsMessageContext {
+            actions.append(UIAction(title: NSLocalizedString("Show in chat", comment: "Menu entry in the media viewer to show the message of the shown media in the chat"), image: .init(systemName: "text.magnifyingglass")) { [weak self] _ in
+                self?.showCurrentMessageInChat()
+            })
+        }
+
+        if let delegate = self.delegate, delegate.mediaViewerViewControllerCanReply(self), message.canReply(in: self.room) {
+            actions.append(UIAction(title: NSLocalizedString("Reply", comment: ""), image: .init(systemName: "arrowshape.turn.up.left")) { [weak self] _ in
+                self?.replyToCurrentMessage()
+            })
+        }
+
+        if mediaPageViewController.expectedFileURL != nil {
+            actions.append(UIAction(title: NSLocalizedString("Share media", comment: "Menu entry in the media viewer to share the shown picture or video with other apps"), image: .init(systemName: "square.and.arrow.up")) { [weak self] _ in
+                self?.shareCurrentMedia()
+            })
+        }
+
+        var elements = actions
+
+        if self.delegate != nil, message.canDelete(for: self.account, in: self.room) {
+            let deleteAction = UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                self?.confirmDeletionOfCurrentMessage()
+            }
+
+            elements.append(UIMenu(options: [.displayInline], children: [deleteAction]))
+        }
+
+        return elements
+    }
+
+    // MARK: - Actions
+
+    private func shareCurrentMedia() {
+        guard let mediaPageViewController = self.getCurrentPageViewController(),
+              let placeholderURL = mediaPageViewController.expectedFileURL
+        else { return }
+
+        // Only ever the original file, never a preview. The provider waits for the download if
+        // it is not finished yet, while the user picks a destination.
+        let itemProvider = MediaShareItemProvider(placeholderURL: placeholderURL,
+                                                  thumbnail: mediaPageViewController.displayedImage) { [weak mediaPageViewController] completion in
+            guard let mediaPageViewController else {
+                completion(nil)
+                return
+            }
+
+            mediaPageViewController.requestSharableFile(completion: completion)
+        }
+
+        let activityViewController = UIActivityViewController(activityItems: [itemProvider], applicationActivities: nil)
+        activityViewController.popoverPresentationController?.barButtonItem = self.moreButton
+        // didFail stays false when the user simply dismissed the sheet, so no need to look at
+        // whether an activity completed
+        activityViewController.completionWithItemsHandler = { [weak self] _, _, _, _ in
+            guard itemProvider.didFail else { return }
+
+            self?.showSharingFailedAlert()
+        }
+
+        self.present(activityViewController, animated: true)
+    }
+
+    private func saveCurrentMediaToPhotos() {
+        guard let mediaPageViewController = self.getCurrentPageViewController() else { return }
+
+        let isVideo = NCUtils.isVideo(fileType: mediaPageViewController.message.file()?.mimetype ?? "")
+
+        // Waits for the download when the original is not there yet
+        mediaPageViewController.requestSharableFile { [weak self, weak mediaPageViewController] fileURL in
+            guard let self, let mediaPageViewController else { return }
+
+            guard let fileURL else {
+                // A page we swiped away from gives up its waiting requests, that is not an error
+                if mediaPageViewController === self.getCurrentPageViewController() {
+                    self.showSharingFailedAlert()
+                }
+
+                return
+            }
+
+            MediaPhotoLibrarySaver.save(fileURL: fileURL, isVideo: isVideo) { [weak self] result in
+                switch result {
+                case .success:
+                    NotificationPresenter.shared().present(text: NSLocalizedString("Saved to Photos", comment: "Shown after a picture or video was saved to the photo library"), dismissAfterDelay: 5.0, includedStyle: .success)
+                case .failure(.accessDenied):
+                    self?.showPhotosAccessDeniedAlert()
+                case .failure(.failed):
+                    self?.showSavingFailedAlert()
+                }
+            }
+        }
+    }
+
+    private func showAllMedia() {
+        // Opens on the media tab, as long as the conversation has any media
+        let sharedItemsViewController = RoomSharedItemsTableViewController(room: self.room)
+        sharedItemsViewController.navigationItem.rightBarButtonItem = UIBarButtonItem(title: NSLocalizedString("Close", comment: ""), primaryAction: UIAction { [weak sharedItemsViewController] _ in
+            sharedItemsViewController?.dismiss(animated: true)
+        })
+
+        self.present(NCNavigationController(rootViewController: sharedItemsViewController), animated: true)
+    }
+
+    private func showCurrentMessageInChat() {
+        guard let message = self.getCurrentMessage() else { return }
+
+        if let account = message.account, let chatViewController = ContextChatViewController(forRoom: self.room, withAccount: account, withMessage: [], withHighlightId: 0) {
+            chatViewController.showContext(ofMessageId: message.messageId, withLimit: 50, withCloseButton: true)
+
+            let navController = NCNavigationController(rootViewController: chatViewController)
+            self.present(navController, animated: true)
+        }
+    }
+
+    private func replyToCurrentMessage() {
+        guard let message = self.getCurrentMessage() else { return }
+
+        // The chat shows its reply bar, so the viewer has to get out of the way first
+        self.dismiss(animated: true) { [weak self] in
+            guard let self else { return }
+
+            self.delegate?.mediaViewerViewController(self, didRequestReplyTo: message)
+        }
+    }
+
+    private func confirmDeletionOfCurrentMessage() {
+        guard let message = self.getCurrentMessage() else { return }
+
+        let alert = UIAlertController(title: NSLocalizedString("Delete this message?", comment: "Title of the confirmation shown before a picture or video message is deleted from the media viewer"),
                                       message: nil,
                                       preferredStyle: .alert)
+
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Delete", comment: ""), style: .destructive) { [weak self] _ in
+            self?.dismiss(animated: true) {
+                guard let self else { return }
+
+                self.delegate?.mediaViewerViewController(self, didRequestDelete: message)
+            }
+        })
+
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
+
+        self.present(alert, animated: true)
+    }
+
+    // The file of the message is shared into the chosen conversation, nothing is uploaded again.
+    // The path is read from the message object here, it is never taken from an outside source.
+    private func forwardCurrentMedia() {
+        guard let message = self.getCurrentMessage(), self.canForward(message) else { return }
+
+        let shareViewController = ShareViewController(toForwardFile: message, fromChatViewController: self)
+        shareViewController.delegate = self
+
+        self.present(NCNavigationController(rootViewController: shareViewController), animated: true)
+    }
+
+    // QuickLook and the share controller move and change files, so the downloaded original is never handed over, only a copy
+    private func startDrawingOnCopy() {
+        guard let mediaPageViewController = self.getCurrentPageViewController(),
+              let sourceURL = mediaPageViewController.sharableFileURL
+        else { return }
+
+        let directoryURL = FileManager.default.temporaryDirectory.appendingPathComponent("MediaViewerDraw-\(UUID().uuidString)", isDirectory: true)
+        let copyURL = directoryURL.appendingPathComponent(sourceURL.lastPathComponent)
+
+        do {
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: sourceURL, to: copyURL)
+        } catch {
+            try? FileManager.default.removeItem(at: directoryURL)
+            self.showErrorAlert(title: NSLocalizedString("An error occurred while sharing the file", comment: ""))
+            return
+        }
+
+        guard let serverCapabilities = NCDatabaseManager.sharedInstance().serverCapabilities(forAccountId: self.account.accountId),
+              let shareConfirmationViewController = ShareConfirmationViewController(room: self.room, thread: nil, account: self.account, serverCapabilities: serverCapabilities)
+        else {
+            try? FileManager.default.removeItem(at: directoryURL)
+            return
+        }
+
+        shareConfirmationViewController.delegate = self
+        shareConfirmationViewController.isModal = true
+
+        self.present(NCNavigationController(rootViewController: shareConfirmationViewController), animated: true) {
+            // The item controller moves the file into its own folder
+            shareConfirmationViewController.shareItemController.addItem(with: copyURL)
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+    }
+
+    // MARK: - Alerts
+
+    private func showSharingFailedAlert() {
+        self.showErrorAlert(title: NSLocalizedString("An error occurred downloading the picture", comment: ""))
+    }
+
+    private func showSavingFailedAlert() {
+        self.showErrorAlert(title: NSLocalizedString("Unable to save to Photos", comment: "Title of the error shown when a picture or video could not be saved to the photo library"))
+    }
+
+    private func showErrorAlert(title: String) {
+        let alert = UIAlertController(title: title, message: nil, preferredStyle: .alert)
 
         alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default))
 
         self.present(alert, animated: true)
+    }
+
+    private func showPhotosAccessDeniedAlert() {
+        let alert = UIAlertController(title: NSLocalizedString("Unable to save to Photos", comment: "Title of the error shown when a picture or video could not be saved to the photo library"),
+                                      message: NSLocalizedString("Allow access to your photos in the settings of your device to save pictures and videos", comment: "Message of the error shown when saving to the photo library is not allowed"),
+                                      preferredStyle: .alert)
+
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Settings", comment: ""), style: .default) { _ in
+            if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(settingsURL)
+            }
+        })
+
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
+
+        self.present(alert, animated: true)
+    }
+
+    // MARK: - ShareViewController delegate
+
+    func shareViewControllerDidCancel(_ viewController: ShareViewController) {
+        self.dismissSharingFlow()
+    }
+
+    // MARK: - ShareConfirmationViewController delegate
+
+    func shareConfirmationViewControllerDidFail(_ viewController: ShareConfirmationViewController) {
+        self.dismissSharingFlow { [weak self] in
+            self?.showErrorAlert(title: NSLocalizedString("An error occurred while sharing the file", comment: ""))
+        }
+    }
+
+    func shareConfirmationViewControllerDidFinish(_ viewController: ShareConfirmationViewController) {
+        let isForwarding = viewController.forwardingMessage
+
+        var userInfo: [String: String] = [:]
+        userInfo["token"] = viewController.room.token
+        userInfo["accountId"] = viewController.account.accountId
+
+        // Everything is done, so close the viewer together with the sharing screens
+        (self.presentingViewController ?? self).dismiss(animated: true) {
+            if isForwarding {
+                NotificationCenter.default.post(name: .NCChatViewControllerForwardNotification, object: nil, userInfo: userInfo)
+            }
+        }
+    }
+
+    func shareConfirmationViewControllerDidCancel(_ viewController: ShareConfirmationViewController) {
+        self.dismissSharingFlow()
+    }
+
+    // Only closes what the viewer presented, the viewer itself stays
+    private func dismissSharingFlow(completion: (() -> Void)? = nil) {
+        guard let presentedViewController = self.presentedViewController else {
+            completion?()
+            return
+        }
+
+        presentedViewController.dismiss(animated: true, completion: completion)
     }
 
     // MARK: - NCMediaViewerPageViewController delegate
