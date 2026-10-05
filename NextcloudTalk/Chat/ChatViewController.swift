@@ -2405,6 +2405,17 @@ import SwiftUI
         })
     }
 
+    // MARK: - NCMediaViewerViewController Delegate
+
+    override func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool {
+        // Same as in the message menu, no reply while a message is edited. The message itself is checked by the viewer.
+        return !self.textInputbar.isEditing
+    }
+
+    override func mediaViewerViewControllerCanDelete(_ viewController: NCMediaViewerViewController) -> Bool {
+        return true
+    }
+
     // MARK: - ContextMenu (Long press on message)
 
     func isMessageReplyable(message: NCChatMessage) -> Bool {

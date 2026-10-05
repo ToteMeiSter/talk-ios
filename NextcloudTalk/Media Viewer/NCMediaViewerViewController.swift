@@ -8,10 +8,11 @@ import UIKit
 
 ///
 /// Implemented by the chat that opened the media viewer. Replying and deleting are done by the chat,
-/// without a delegate the viewer offers neither.
+/// without a delegate, or when the chat answers "no", the viewer offers neither.
 ///
 @objc protocol NCMediaViewerViewControllerDelegate: AnyObject {
     func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool
+    func mediaViewerViewControllerCanDelete(_ viewController: NCMediaViewerViewController) -> Bool
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestReplyTo message: NCChatMessage)
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage)
 }
@@ -31,12 +32,17 @@ import UIKit
 
     private let room: NCRoom
     private let account: TalkAccount
+    private let thread: NCThread?
     private let pageController = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
     private var initialMessage: NCChatMessage
 
     private var fileMessagesToken: RLMNotificationToken?
     private var chatBlocksToken: RLMNotificationToken?
     private var counterText: String?
+
+    // Replacing the data source while pages move would break the transition, so it waits
+    private var isTransitioning = false
+    private var needsDataSourceReset = false
 
     // Ids of all media the viewer can show, from the oldest to the newest. Kept, so swiping only needs a lookup.
     private var displayableMessageIds: [Int] = []
@@ -102,10 +108,11 @@ import UIKit
         return drawButton
     }()
 
-    init(initialMessage: NCChatMessage, room: NCRoom, account: TalkAccount) {
+    init(initialMessage: NCChatMessage, room: NCRoom, account: TalkAccount, thread: NCThread? = nil) {
         self.room = room
         self.initialMessage = initialMessage
         self.account = account
+        self.thread = thread
 
         super.init(nibName: nil, bundle: nil)
     }
@@ -243,6 +250,7 @@ import UIKit
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
         guard !self.isOpenedFromSharedItems,
               let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
+              !prevMediaPageVC.message.isInvalidated,
               let prevMessage = self.getPreviousFileMessage(from: prevMediaPageVC.message)
         else { return nil }
 
@@ -254,6 +262,7 @@ import UIKit
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
         guard !self.isOpenedFromSharedItems,
               let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
+              !prevMediaPageVC.message.isInvalidated,
               let nextMessage = self.getNextFileMessage(from: prevMediaPageVC.message)
         else { return nil }
 
@@ -262,7 +271,14 @@ import UIKit
         return mediaPageViewController
     }
 
+    func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
+        self.isTransitioning = true
+    }
+
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
+        self.isTransitioning = false
+        self.resetDataSourceIfNeeded()
+
         guard let mediaPageViewController = self.getCurrentPageViewController() else { return }
 
         // On a cancelled swipe the previous view controller is the current one again
@@ -335,7 +351,8 @@ import UIKit
             self.updateTitleView()
         }
 
-        guard !self.isOpenedFromSharedItems,
+        // In a thread the list is not known to match the thread, so no counter there
+        guard !self.isOpenedFromSharedItems, self.thread == nil,
               let currentMessageId = self.getCurrentMessage()?.messageId,
               let index = self.displayableMessageIds.firstIndex(of: currentMessageId)
         else {
@@ -357,15 +374,20 @@ import UIKit
 
     // The page stays the one we show when media is added or removed, only the counter is recalculated
     private func observeFileMessages() {
+        // Nothing is listed there, so there is nothing to follow
+        guard !self.isOpenedFromSharedItems else { return }
+
         // The first call only reports what is already there, the list was read when the viewer opened
         self.fileMessagesToken = self.getAllFileMessages()?.addNotificationBlock { [weak self] _, change, _ in
-            guard let self, change != nil else { return }
+            guard let self, let change else { return }
 
             self.refreshMediaList()
 
-            // Forces the page controller to ask for its neighbours again
-            self.pageController.dataSource = nil
-            self.pageController.dataSource = self
+            // Only added or removed messages can change the neighbours of the shown page
+            if !change.insertions.isEmpty || !change.deletions.isEmpty {
+                self.needsDataSourceReset = true
+                self.resetDataSourceIfNeeded()
+            }
         }
 
         self.chatBlocksToken = NCChatBlock.objects(with: self.chatBlocksPredicate).addNotificationBlock { [weak self] _, change, _ in
@@ -373,6 +395,15 @@ import UIKit
 
             self?.refreshHistoryState()
         }
+    }
+
+    // Forces the page controller to ask for its neighbours again
+    private func resetDataSourceIfNeeded() {
+        guard self.needsDataSourceReset, !self.isTransitioning else { return }
+
+        self.needsDataSourceReset = false
+        self.pageController.dataSource = nil
+        self.pageController.dataSource = self
     }
 
     // MARK: - Toolbar
@@ -452,7 +483,7 @@ import UIKit
 
         var elements = actions
 
-        if self.delegate != nil, message.canDelete(for: self.account, in: self.room) {
+        if let delegate = self.delegate, delegate.mediaViewerViewControllerCanDelete(self), message.canDelete(for: self.account, in: self.room) {
             let deleteAction = UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { [weak self] _ in
                 self?.confirmDeletionOfCurrentMessage()
             }
@@ -496,9 +527,9 @@ import UIKit
     }
 
     private func saveCurrentMediaToPhotos() {
-        guard let mediaPageViewController = self.getCurrentPageViewController() else { return }
+        guard let mediaPageViewController = self.getCurrentPageViewController(), let message = self.getCurrentMessage() else { return }
 
-        let isVideo = NCUtils.isVideo(fileType: mediaPageViewController.message.file()?.mimetype ?? "")
+        let isVideo = NCUtils.isVideo(fileType: message.file()?.mimetype ?? "")
 
         // Waits for the download when the original is not there yet
         mediaPageViewController.requestSharableFile { [weak self, weak mediaPageViewController] fileURL in
@@ -548,28 +579,31 @@ import UIKit
     }
 
     private func replyToCurrentMessage() {
-        guard let message = self.getCurrentMessage() else { return }
+        // The chat gets a copy, the stored message may be gone or replaced after the viewer is closed
+        guard let message = self.getCurrentMessage(), let delegate = self.delegate else { return }
+
+        let messageCopy = NCChatMessage(value: message)
 
         // The chat shows its reply bar, so the viewer has to get out of the way first
-        self.dismiss(animated: true) { [weak self] in
-            guard let self else { return }
-
-            self.delegate?.mediaViewerViewController(self, didRequestReplyTo: message)
+        self.dismiss(animated: true) {
+            delegate.mediaViewerViewController(self, didRequestReplyTo: messageCopy)
         }
     }
 
     private func confirmDeletionOfCurrentMessage() {
-        guard let message = self.getCurrentMessage() else { return }
+        guard let message = self.getCurrentMessage(), let delegate = self.delegate else { return }
+
+        let messageCopy = NCChatMessage(value: message)
 
         let alert = UIAlertController(title: NSLocalizedString("Delete this message?", comment: "Title of the confirmation shown before a picture or video message is deleted from the media viewer"),
                                       message: nil,
                                       preferredStyle: .alert)
 
         alert.addAction(UIAlertAction(title: NSLocalizedString("Delete", comment: ""), style: .destructive) { [weak self] _ in
-            self?.dismiss(animated: true) {
-                guard let self else { return }
+            guard let self else { return }
 
-                self.delegate?.mediaViewerViewController(self, didRequestDelete: message)
+            self.dismiss(animated: true) {
+                delegate.mediaViewerViewController(self, didRequestDelete: messageCopy)
             }
         })
 
@@ -608,7 +642,7 @@ import UIKit
         }
 
         guard let serverCapabilities = NCDatabaseManager.sharedInstance().serverCapabilities(forAccountId: self.account.accountId),
-              let shareConfirmationViewController = ShareConfirmationViewController(room: self.room, thread: nil, account: self.account, serverCapabilities: serverCapabilities)
+              let shareConfirmationViewController = ShareConfirmationViewController(room: self.room, thread: self.thread, account: self.account, serverCapabilities: serverCapabilities)
         else {
             try? FileManager.default.removeItem(at: directoryURL)
             return
