@@ -144,6 +144,59 @@ final class UnitChatUploadStoreTest: XCTestCase {
         XCTAssertTrue(store.fileExists(for: makeState(id: "unreadable", localFileName: name)))
     }
 
+    func testAnUnreadableStateDoesNotStopTheCleaning() throws {
+        let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("source-\(UUID().uuidString).txt")
+        try Data("content".utf8).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let keptName = try store.copyFile(at: sourceURL, id: "unreadable")
+        let orphanName = try store.copyFile(at: sourceURL, id: "orphan")
+        try store.save(makeState(id: "good"))
+        try Data("not json".utf8).write(to: directory.appendingPathComponent("state/unreadable.json"))
+
+        store.removeOrphanedFiles(isProtectedDataAvailable: true, now: Date().addingTimeInterval(24 * 60 * 60))
+
+        XCTAssertTrue(store.fileExists(for: makeState(id: "unreadable", localFileName: keptName)))
+        XCTAssertFalse(store.fileExists(for: makeState(id: "orphan", localFileName: orphanName)))
+    }
+
+    func testAnUnreadableStateIsDroppedWhenItIsOldEnough() throws {
+        let stateURL = directory.appendingPathComponent("state/broken.json")
+        try store.save(makeState(id: "good"))
+        try Data("not json".utf8).write(to: stateURL)
+
+        store.removeOrphanedFiles(isProtectedDataAvailable: true, now: Date().addingTimeInterval(ChatUploadStore.unreadableStateRetention - 60))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateURL.path))
+
+        // Not before the first unlock: the state might be fine then
+        store.removeOrphanedFiles(isProtectedDataAvailable: false, now: Date().addingTimeInterval(ChatUploadStore.unreadableStateRetention + 60))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateURL.path))
+
+        store.removeOrphanedFiles(isProtectedDataAvailable: true, now: Date().addingTimeInterval(ChatUploadStore.unreadableStateRetention + 60))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.path))
+        XCTAssertNotNil(store.load(id: "good"))
+        XCTAssertFalse(store.loadAllReport().hasUnreadable)
+    }
+
+    func testTheCopyOfAFileIsNewEvenWhenTheSourceIsOld() throws {
+        let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("source-\(UUID().uuidString).txt")
+        try Data("content".utf8).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let old = Date().addingTimeInterval(-2 * 24 * 60 * 60)
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: sourceURL.path)
+
+        let name = try store.copyFile(at: sourceURL, id: "new")
+        let copyURL = store.fileURL(for: makeState(id: "new", localFileName: name))
+        let modified = try XCTUnwrap(try copyURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+
+        XCTAssertLessThan(abs(modified.timeIntervalSinceNow), 60)
+
+        // Which is what keeps the copy of a file whose state is not stored yet
+        store.removeOrphanedFiles(isProtectedDataAvailable: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: copyURL.path))
+    }
+
     func testOrphanedFilesAreKeptBeforeTheFirstUnlock() throws {
         let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("source-\(UUID().uuidString).txt")
         try Data("content".utf8).write(to: sourceURL)

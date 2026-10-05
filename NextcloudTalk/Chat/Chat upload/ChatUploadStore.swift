@@ -64,21 +64,29 @@ final class ChatUploadStore {
         return nil
     }
 
-    /// - Returns: The states that could be read, and whether there are files of states that could not.
-    func loadAllReport() -> (states: [ChatUploadState], hasUnreadable: Bool) {
-        let urls = (try? self.fileManager.contentsOfDirectory(at: self.stateDirectory, includingPropertiesForKeys: nil)) ?? []
+    struct Report {
+        /// The states that could be read.
         var states: [ChatUploadState] = []
-        var hasUnreadable = false
+
+        /// Files of states that could not be read.
+        var unreadableURLs: [URL] = []
+
+        var hasUnreadable: Bool { return !self.unreadableURLs.isEmpty }
+    }
+
+    func loadAllReport() -> Report {
+        let urls = (try? self.fileManager.contentsOfDirectory(at: self.stateDirectory, includingPropertiesForKeys: nil)) ?? []
+        var report = Report()
 
         for url in urls where url.pathExtension == "json" {
             if let data = try? Data(contentsOf: url), let state = try? JSONDecoder().decode(ChatUploadState.self, from: data) {
-                states.append(state)
+                report.states.append(state)
             } else {
-                hasUnreadable = true
+                report.unreadableURLs.append(url)
             }
         }
 
-        return (states, hasUnreadable)
+        return report
     }
 
     func loadAll() -> [ChatUploadState] {
@@ -105,6 +113,10 @@ final class ChatUploadStore {
         }
 
         try self.fileManager.copyItem(at: sourceURL, to: destinationURL)
+
+        // The copy keeps the date of the source. The age of the copy is what protects it from `removeOrphanedFiles`
+        // while its state is not stored yet.
+        try? self.fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: destinationURL.path)
 
         // Neither needed in a backup nor worth the quota of the user
         var values = URLResourceValues()
@@ -143,10 +155,16 @@ final class ChatUploadStore {
         self.removeState(id: state.id)
     }
 
+    /// A state that cannot be read is dropped after this long, when the data is available. Waiting is for a state
+    /// of a newer version of the app, which an older one has to leave alone for a while after a downgrade.
+    static let unreadableStateRetention: TimeInterval = 7 * 24 * 60 * 60
+
     /// Files without a state, e.g. because the app died between copying the file and storing the state.
     ///
-    /// Does nothing when a state cannot be read, because then the files of that state would look like orphans,
-    /// and only touches files that are older than `minimumAge`, because a file is copied before its state exists.
+    /// Keeps the file of a state that cannot be read, which is found by the name (`localFileName` is made from
+    /// the id, like the name of the state). Drops a state that cannot be read for `unreadableStateRetention`,
+    /// so one broken file does not stop the cleaning for good. Only touches files that are older than
+    /// `minimumAge`, because a file is copied before its state exists.
     ///
     /// - Parameter isProtectedDataAvailable: Whether the files protected until the first unlock can be read.
     func removeOrphanedFiles(isProtectedDataAvailable: Bool, minimumAge: TimeInterval = 6 * 60 * 60, now: Date = Date()) {
@@ -154,12 +172,22 @@ final class ChatUploadStore {
 
         let report = self.loadAllReport()
 
-        guard !report.hasUnreadable else { return }
-
         let knownNames = Set(report.states.map { $0.localFileName })
+        var unreadableBaseNames = Set<String>()
+
+        for url in report.unreadableURLs {
+            unreadableBaseNames.insert(url.deletingPathExtension().lastPathComponent)
+
+            if let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+               now.timeIntervalSince(modified) > Self.unreadableStateRetention {
+                NCLog.log("Removing the state \(url.lastPathComponent) of an upload, it cannot be read for long")
+                try? self.fileManager.removeItem(at: url)
+            }
+        }
+
         let urls = (try? self.fileManager.contentsOfDirectory(at: self.filesDirectory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
 
-        for url in urls where !knownNames.contains(url.lastPathComponent) {
+        for url in urls where !knownNames.contains(url.lastPathComponent) && !unreadableBaseNames.contains(url.deletingPathExtension().lastPathComponent) {
             guard let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
                   now.timeIntervalSince(modified) > minimumAge
             else { continue }
