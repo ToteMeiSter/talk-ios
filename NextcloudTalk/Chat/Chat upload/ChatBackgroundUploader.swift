@@ -301,7 +301,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             // The name was free when it was chosen, see `retry`
             self.resolveAgain(state)
         } else {
-            self.startTransfer(state, after: 0)
+            // The pause the server asked for, e.g. with `Retry-After`, is not over because the app was away
+            self.startTransfer(state, after: state.remainingPause(now: Date().timeIntervalSince1970))
         }
     }
 
@@ -718,6 +719,14 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
               state.step == .uploaded,
               let destination = state.destination
         else { return }
+
+        // The chain of a process that is gone is not there anymore. Do not ask before the pause of the server is over.
+        let pause = state.remainingPause(now: Date().timeIntervalSince1970)
+
+        if pause > 0 {
+            self.announce(id: id, after: pause)
+            return
+        }
 
         guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: state.accountId) else {
             self.interrupt(state, reason: "account is gone")

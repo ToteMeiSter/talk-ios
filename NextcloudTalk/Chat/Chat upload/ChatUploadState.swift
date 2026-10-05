@@ -91,7 +91,7 @@ struct ChatUploadState: Codable, Equatable {
         case id, accountId, roomToken, fileName, localFileName, destinationKind, draftPath, serverPath, serverURL
         case allowUpdate, metadata, step, fileUploaded, serverErrorCount, failureCount, announceAttempts
         case announceInFlight, announceMayHaveSucceeded, createdAt, failureReason, attachmentFolderRecreated
-        case startedInBackground, expectedCancel, suspendedBySystem, announcedAt
+        case startedInBackground, expectedCancel, suspendedBySystem, announcedAt, earliestBeginAt
     }
 
     /// A failed upload is dropped after this long, with its file.
@@ -177,6 +177,11 @@ struct ChatUploadState: Codable, Equatable {
     /// Time the file was posted. The state of a posted file is kept for a while, see `announcedRetention`.
     var announcedAt: TimeInterval?
 
+    /// Time before which the next attempt must not start, seconds since 1970. Set when a failure asks for a pause
+    /// (backoff, `Retry-After`), so a restart of the attempt from the foreground or in a new process does not
+    /// shorten the pause and does not use up attempts with answers like 429.
+    var earliestBeginAt: TimeInterval?
+
     /// The upload is older than a temporary message lives, see `maxAge`.
     func isExpired(now: TimeInterval) -> Bool {
         return now - self.createdAt > Self.maxAge
@@ -185,6 +190,13 @@ struct ChatUploadState: Codable, Equatable {
     /// The state of a posted file is not needed anymore.
     func isAnnouncedRetentionOver(now: TimeInterval) -> Bool {
         return now - (self.announcedAt ?? 0) > Self.announcedRetention
+    }
+
+    /// What is left of the pause the last failure asked for.
+    func remainingPause(now: TimeInterval) -> TimeInterval {
+        guard let earliestBeginAt else { return 0 }
+
+        return max(0, earliestBeginAt - now)
     }
 
     var isDraftFolder: Bool {
@@ -233,6 +245,7 @@ struct ChatUploadState: Codable, Equatable {
             self.step = .uploaded
             self.serverErrorCount = 0
             self.failureCount = 0
+            self.earliestBeginAt = nil
             return .announce(after: 0)
         }
 
@@ -243,6 +256,12 @@ struct ChatUploadState: Codable, Equatable {
             if self.expectedCancel {
                 self.expectedCancel = false
                 self.startedInBackground = false
+
+                // What is left of the pause the server asked for, e.g. with `Retry-After`
+                if self.earliestBeginAt != nil {
+                    return .startTransfer(after: self.remainingPause(now: now))
+                }
+
                 return .startTransfer(after: self.failureCount > 0 ? ChatFileUploadRetryPolicy.delay(forFailureCount: self.failureCount) : 0)
             }
 
@@ -297,6 +316,7 @@ struct ChatUploadState: Codable, Equatable {
         guard let failure else {
             self.step = .announced
             self.announcedAt = now
+            self.earliestBeginAt = nil
             return .finished
         }
 
@@ -339,6 +359,7 @@ struct ChatUploadState: Codable, Equatable {
         self.serverErrorCount = 0
         self.failureCount = 0
         self.failureReason = nil
+        self.earliestBeginAt = nil
         self.suspendedBySystem = false
         self.attachmentFolderRecreated = false
         self.createdAt = now
@@ -371,6 +392,8 @@ struct ChatUploadState: Codable, Equatable {
             self.fail(reason: "http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0)")
             return .failed
         }
+
+        self.earliestBeginAt = now + delay
 
         return next(delay)
     }
@@ -411,6 +434,7 @@ extension ChatUploadState {
         self.expectedCancel = try container.decodeIfPresent(Bool.self, forKey: .expectedCancel) ?? false
         self.suspendedBySystem = try container.decodeIfPresent(Bool.self, forKey: .suspendedBySystem) ?? false
         self.announcedAt = try container.decodeIfPresent(TimeInterval.self, forKey: .announcedAt)
+        self.earliestBeginAt = try container.decodeIfPresent(TimeInterval.self, forKey: .earliestBeginAt)
     }
 }
 

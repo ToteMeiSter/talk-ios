@@ -302,6 +302,81 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertTrue(state.isExpired(now: now + ChatUploadState.maxAge + 1))
     }
 
+    // MARK: - Pause of the server
+
+    func testRetryAfterIsKeptAsEarliestBegin() {
+        var state = makeState()
+        let failure = ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 600)
+
+        XCTAssertEqual(state.transferFinished(failure: failure, now: now), .startTransfer(after: 600))
+        XCTAssertEqual(state.earliestBeginAt, now + 600)
+        XCTAssertEqual(state.remainingPause(now: now + 60), 540)
+        XCTAssertEqual(state.remainingPause(now: now + 601), 0)
+    }
+
+    func testRestartFromForegroundKeepsTheRestOfThePause() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 600), now: now)
+        state.transferStarted(inBackground: true)
+        state.prepareRestartFromForeground()
+
+        // The user opens the app a minute later and the task is cancelled by the app
+        let action = state.transferFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled), now: now + 60)
+
+        XCTAssertEqual(action, .startTransfer(after: 540))
+        // No attempt was made, so nothing was used up
+        XCTAssertEqual(state.serverErrorCount, 1)
+    }
+
+    func testRestartFromForegroundAfterThePauseStartsAtOnce() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 503), now: now)
+        state.prepareRestartFromForeground()
+
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled), now: now + 3600), .startTransfer(after: 0))
+    }
+
+    func testRestartWithoutAKnownPauseUsesTheBackoffOfOldStates() {
+        var state = makeState()
+        state.failureCount = 2
+        state.prepareRestartFromForeground()
+
+        XCTAssertNil(state.earliestBeginAt)
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled), now: now), .startTransfer(after: ChatFileUploadRetryPolicy.delay(forFailureCount: 2)))
+    }
+
+    func testEarliestBeginIsClearedByResultAndByRetry() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 60), now: now)
+        XCTAssertNotNil(state.earliestBeginAt)
+
+        _ = state.transferFinished(failure: nil, now: now + 60)
+        XCTAssertNil(state.earliestBeginAt)
+
+        XCTAssertTrue(state.beginAnnounce())
+        _ = state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 503, retryAfter: 30), now: now + 61)
+        XCTAssertEqual(state.earliestBeginAt, now + 91)
+
+        state.fail(reason: "test")
+        _ = state.prepareRetry(now: now + 100)
+        XCTAssertNil(state.earliestBeginAt)
+    }
+
+    func testStateWithoutEarliestBeginIsReadable() throws {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 60), now: now)
+
+        let data = try JSONEncoder().encode(state)
+        XCTAssertEqual(try JSONDecoder().decode(ChatUploadState.self, from: data).earliestBeginAt, now + 60)
+
+        var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        json.removeValue(forKey: "earliestBeginAt")
+        let old = try JSONDecoder().decode(ChatUploadState.self, from: JSONSerialization.data(withJSONObject: json))
+
+        XCTAssertNil(old.earliestBeginAt)
+        XCTAssertEqual(old.remainingPause(now: now), 0)
+    }
+
     // MARK: - Posted uploads
 
     func testPostedUploadKeepsAMarkWithTheTime() {
