@@ -192,11 +192,12 @@ struct ChatUploadState: Codable, Equatable {
         return now - (self.announcedAt ?? 0) > Self.announcedRetention
     }
 
-    /// What is left of the pause the last failure asked for.
+    /// What is left of the pause the last failure asked for. Never more than the longest pause there is: the time
+    /// is the one of the wall clock, which can be set back, and the pause must not grow by that.
     func remainingPause(now: TimeInterval) -> TimeInterval {
         guard let earliestBeginAt else { return 0 }
 
-        return max(0, earliestBeginAt - now)
+        return min(max(0, earliestBeginAt - now), ChatFileUploadRetryPolicy.maxRetryAfter)
     }
 
     var isDraftFolder: Bool {

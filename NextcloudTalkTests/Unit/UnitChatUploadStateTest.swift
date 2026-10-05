@@ -335,6 +335,17 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertEqual(state.remainingPause(now: now + 601), 0)
     }
 
+    func testRemainingPauseIsCappedWhenTheClockWasSetBack() {
+        var state = makeState()
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 600), now: now)
+
+        // The clock jumped back by a day
+        XCTAssertEqual(state.remainingPause(now: now - 24 * 60 * 60), ChatFileUploadRetryPolicy.maxRetryAfter)
+
+        state.earliestBeginAt = now + 10_000
+        XCTAssertEqual(state.remainingPause(now: now), ChatFileUploadRetryPolicy.maxRetryAfter)
+    }
+
     func testRestartFromForegroundKeepsTheRestOfThePause() {
         var state = makeState()
         _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 429, retryAfter: 600), now: now)
