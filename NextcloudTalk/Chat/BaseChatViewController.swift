@@ -28,6 +28,7 @@ import Toast
                                                   QLPreviewControllerDelegate,
                                                   QLPreviewControllerDataSource,
                                                   ShareConfirmationViewControllerDelegate,
+                                                  NCMediaViewerViewControllerDelegate,
                                                   AVAudioRecorderDelegate,
                                                   AVAudioPlayerDelegate,
                                                   SystemMessageTableViewCellDelegate,
@@ -1710,6 +1711,25 @@ import Toast
         let navigationController = NCNavigationController(rootViewController: shareConfirmationVC)
 
         return (shareConfirmationVC, navigationController)
+    }
+
+    // MARK: - NCMediaViewerViewController Delegate
+
+    // Only the real chat replies and deletes, the other chats (context, scheduled messages) say no
+    func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool {
+        return false
+    }
+
+    func mediaViewerViewControllerCanDelete(_ viewController: NCMediaViewerViewController) -> Bool {
+        return false
+    }
+
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestReplyTo message: NCChatMessage) {
+        self.didPressReply(for: message)
+    }
+
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage) {
+        self.didPressDelete(for: message)
     }
 
     // MARK: - ShareViewController Delegate
@@ -3994,7 +4014,8 @@ import Toast
 
     public func cellWants(toDownloadFile fileParameter: NCMessageFileParameter, for message: NCChatMessage) {
         if NCUtils.isImage(fileType: fileParameter.mimetype ?? "") {
-            let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account)
+            let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account, thread: self.thread)
+            mediaViewController.delegate = self
             let navController = CustomPresentableNavigationController(rootViewController: mediaViewController)
 
             // Hiding the keyboard due to a UIKit issue where the reported keyboard height
@@ -4013,7 +4034,8 @@ import Toast
         if NCUtils.isVideo(fileType: fileParameter.mimetype ?? "") {
             // Skip unsupported formats here ("webm" and "mkv") and use VLC later
             if !fileExtension.isEmpty, !VLCKitVideoViewController.supportedFileExtensions.contains(fileExtension) {
-                let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account)
+                let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account, thread: self.thread)
+                mediaViewController.delegate = self
                 let navController = CustomPresentableNavigationController(rootViewController: mediaViewController)
 
                 // Hiding the keyboard due to a UIKit issue where the reported keyboard height
