@@ -508,7 +508,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             return
         }
 
-        self.startTransfer(current, after: 0)
+        // The pause the server asked for is not over because the destination was asked for again
+        self.startTransfer(current, after: current.remainingPause(now: Date().timeIntervalSince1970))
     }
 
     private func startTransfer(_ state: ChatUploadState, after delay: TimeInterval) {
