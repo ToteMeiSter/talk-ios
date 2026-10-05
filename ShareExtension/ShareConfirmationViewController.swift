@@ -846,7 +846,8 @@ let kShareConfirmationMaxItems = 10
     func sendFileShare() {
         // The path comes from the message object that was handed to us in process, never from outside.
         // It is the path of the cached message and can be outdated, e.g. when the file was moved or
-        // deleted since. Then the server refuses the share and the error is shown.
+        // deleted since. Then the server refuses the share and the error is shown. If another file lies
+        // at the old path now, the server shares that one.
         // The path only means something for the account of the message, so never send it for another one.
         guard let fileMessage = self.fileShareMessage,
               fileMessage.accountId == self.account.accountId,

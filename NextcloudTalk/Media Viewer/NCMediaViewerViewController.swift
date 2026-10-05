@@ -197,7 +197,13 @@ import UIKit
     func getAllFileMessages() -> RLMResults<AnyObject>? {
         guard let accountId = self.initialMessage.accountId else { return nil }
 
-        let query = NSPredicate(format: "accountId = %@ AND token = %@ AND messageParametersJSONString contains[cd] %@", accountId, self.initialMessage.token, "\"file\":")
+        var query = NSPredicate(format: "accountId = %@ AND token = %@ AND messageParametersJSONString contains[cd] %@", accountId, self.initialMessage.token, "\"file\":")
+
+        // Like the thread chat does, so paging and replying stay inside the thread
+        if let thread = self.thread {
+            let threadQuery = NSPredicate(format: "threadId = %ld", thread.threadId)
+            query = NSCompoundPredicate(andPredicateWithSubpredicates: [query, threadQuery])
+        }
         let messages = NCChatMessage.objects(with: query).sortedResults(usingKeyPath: "messageId", ascending: true)
 
         return messages
@@ -351,7 +357,8 @@ import UIKit
             self.updateTitleView()
         }
 
-        // In a thread the list is not known to match the thread, so no counter there
+        // No counter in a thread: the history blocks of a thread are not read here, and the original
+        // message of a thread can be stored with threadId 0, so the total would be wrong
         guard !self.isOpenedFromSharedItems, self.thread == nil,
               let currentMessageId = self.getCurrentMessage()?.messageId,
               let index = self.displayableMessageIds.firstIndex(of: currentMessageId)
@@ -409,7 +416,7 @@ import UIKit
     // MARK: - Toolbar
 
     private func canForward(_ message: NCChatMessage) -> Bool {
-        guard let file = message.file(), file.path != nil else { return false }
+        guard let file = message.file(), file.path != nil, message.accountId == self.account.accountId else { return false }
 
         return !message.isDeletedMessage && !self.room.isFederated && !self.room.isClassified
     }
@@ -497,7 +504,8 @@ import UIKit
     // MARK: - Actions
 
     private func shareCurrentMedia() {
-        guard let mediaPageViewController = self.getCurrentPageViewController(),
+        guard self.getCurrentMessage() != nil,
+              let mediaPageViewController = self.getCurrentPageViewController(),
               let placeholderURL = mediaPageViewController.expectedFileURL
         else { return }
 
@@ -617,7 +625,8 @@ import UIKit
     private func forwardCurrentMedia() {
         guard let message = self.getCurrentMessage(), self.canForward(message) else { return }
 
-        let shareViewController = ShareViewController(toForwardFile: message, fromChatViewController: self)
+        // The share screen stays open for a while, the stored message may be gone by then
+        let shareViewController = ShareViewController(toForwardFile: NCChatMessage(value: message), fromChatViewController: self)
         shareViewController.delegate = self
 
         self.present(NCNavigationController(rootViewController: shareViewController), animated: true)

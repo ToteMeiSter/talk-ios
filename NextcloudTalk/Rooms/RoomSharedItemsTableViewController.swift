@@ -351,7 +351,12 @@ import PassKit
     func presentMediaViewer(for message: NCChatMessage) {
         guard let account = self.room.account else { return }
 
-        let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: account)
+        // Shared items are parsed without an account, but forwarding and "Show in chat" need the account of the message
+        let accountMessage = NCChatMessage(value: message)
+        accountMessage.accountId = account.accountId
+        accountMessage.internalId = "\(account.accountId)@\(self.room.token)@\(message.messageId)"
+
+        let mediaViewController = NCMediaViewerViewController(initialMessage: accountMessage, room: self.room, account: account)
         mediaViewController.isOpenedFromSharedItems = true
 
         let navController = CustomPresentableNavigationController(rootViewController: mediaViewController)
