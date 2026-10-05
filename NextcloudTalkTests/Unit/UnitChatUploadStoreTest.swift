@@ -119,9 +119,50 @@ final class UnitChatUploadStoreTest: XCTestCase {
         let orphanName = try store.copyFile(at: sourceURL, id: "orphan")
         try store.save(makeState(id: "kept", localFileName: keptName))
 
-        store.removeOrphanedFiles()
+        // A copy that was just made may be the one of a state that is stored right now
+        store.removeOrphanedFiles(isProtectedDataAvailable: true)
+        XCTAssertTrue(store.fileExists(for: makeState(id: "orphan", localFileName: orphanName)))
+
+        let later = Date().addingTimeInterval(24 * 60 * 60)
+        store.removeOrphanedFiles(isProtectedDataAvailable: true, now: later)
 
         XCTAssertTrue(store.fileExists(for: makeState(id: "kept", localFileName: keptName)))
         XCTAssertFalse(store.fileExists(for: makeState(id: "orphan", localFileName: orphanName)))
+    }
+
+    func testOrphanedFilesAreKeptWhenAStateCannotBeRead() throws {
+        let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("source-\(UUID().uuidString).txt")
+        try Data("content".utf8).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let name = try store.copyFile(at: sourceURL, id: "unreadable")
+        try store.save(makeState(id: "good"))
+        try Data("not json".utf8).write(to: directory.appendingPathComponent("state/unreadable.json"))
+
+        store.removeOrphanedFiles(isProtectedDataAvailable: true, now: Date().addingTimeInterval(24 * 60 * 60))
+
+        XCTAssertTrue(store.fileExists(for: makeState(id: "unreadable", localFileName: name)))
+    }
+
+    func testOrphanedFilesAreKeptBeforeTheFirstUnlock() throws {
+        let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("source-\(UUID().uuidString).txt")
+        try Data("content".utf8).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let name = try store.copyFile(at: sourceURL, id: "orphan")
+
+        store.removeOrphanedFiles(isProtectedDataAvailable: false, now: Date().addingTimeInterval(24 * 60 * 60))
+
+        XCTAssertTrue(store.fileExists(for: makeState(id: "orphan", localFileName: name)))
+    }
+
+    func testLoadResultTellsMissingFromUnreadable() throws {
+        try store.save(makeState(id: "good"))
+        try Data("not json".utf8).write(to: directory.appendingPathComponent("state/broken.json"))
+
+        guard case .found = store.loadResult(id: "good") else { return XCTFail("good") }
+        guard case .unreadable = store.loadResult(id: "broken") else { return XCTFail("broken") }
+        guard case .missing = store.loadResult(id: "nothing") else { return XCTFail("nothing") }
+        XCTAssertTrue(store.loadAllReport().hasUnreadable)
     }
 }

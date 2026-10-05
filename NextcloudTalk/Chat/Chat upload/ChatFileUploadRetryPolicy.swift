@@ -17,10 +17,14 @@ struct ChatFileUploadFailure: Equatable {
     /// Seconds the server asked us to wait, if it did.
     var retryAfter: TimeInterval?
 
-    init(httpStatusCode: Int? = nil, urlErrorCode: Int? = nil, retryAfter: TimeInterval? = nil) {
+    /// Why the system cancelled a background transfer (`NSURLErrorBackgroundTaskCancelledReasonKey`), if it did.
+    var backgroundCancelReason: Int?
+
+    init(httpStatusCode: Int? = nil, urlErrorCode: Int? = nil, retryAfter: TimeInterval? = nil, backgroundCancelReason: Int? = nil) {
         self.httpStatusCode = httpStatusCode
         self.urlErrorCode = urlErrorCode
         self.retryAfter = retryAfter
+        self.backgroundCancelReason = backgroundCancelReason
     }
 
     /// Looks through the error (and the errors it wraps) for an HTTP status code or an URL error code.
@@ -34,7 +38,9 @@ struct ChatFileUploadFailure: Equatable {
             urlErrorCode = nil
         }
 
-        self.init(httpStatusCode: httpStatusCode, urlErrorCode: urlErrorCode)
+        self.init(httpStatusCode: httpStatusCode,
+                  urlErrorCode: urlErrorCode,
+                  backgroundCancelReason: ChatFileUploadRetryPolicy.backgroundCancelReason(of: error))
     }
 }
 
@@ -132,14 +138,17 @@ enum ChatFileUploadRetryPolicy {
              NSURLErrorCallIsActive,                      // -1019
              NSURLErrorDataNotAllowed,                    // -1020
              NSURLErrorBackgroundSessionInUseByAnotherProcess,   // -996
-             NSURLErrorBackgroundSessionWasDisconnected:  // -997
+             NSURLErrorBackgroundSessionWasDisconnected,  // -997
+             NSURLErrorSecureConnectionFailed:            // -1200
+            // A TLS handshake that breaks when the network changes or a portal interferes. The errors about
+            // the certificate itself (-1201 to -1206) are not in this list and stay permanent.
             return .network
         case NSURLErrorBadServerResponse,                 // -1011
              NSURLErrorCannotParseResponse,               // -1017
              NSURLErrorResourceUnavailable:               // -1008
             return .server
         default:
-            // Includes -999 (cancelled), -1200 to -1206 (TLS and certificate problems) and
+            // Includes -999 (cancelled), -1201 to -1206 (certificate problems) and
             // local problems like a missing file
             return .permanent
         }
@@ -164,21 +173,70 @@ enum ChatFileUploadRetryPolicy {
     ///   - serverErrorCount: Errors answered by the server so far, including the one being decided on.
     ///   - failureCount: Failures in a row so far, including the one being decided on. Only used for the pause.
     ///   - networkWait: How long the upload has been waiting for the network. `nil` for no limit.
+    ///   - maxNetworkWait: How long the caller is willing to wait for the network.
     static func decision(for failure: ChatFileUploadFailure,
                          serverErrorCount: Int,
                          failureCount: Int,
-                         networkWait: TimeInterval? = nil) -> Decision {
+                         networkWait: TimeInterval? = nil,
+                         maxNetworkWait: TimeInterval = ChatFileUploadRetryPolicy.maxNetworkWait) -> Decision {
         let delay = self.delay(forFailureCount: failureCount, retryAfter: failure.retryAfter)
 
         switch self.classify(failure) {
         case .network:
-            if let networkWait, networkWait > self.maxNetworkWait { return .fail }
+            if let networkWait, networkWait > maxNetworkWait { return .fail }
             return .retry(after: delay)
         case .server:
             return serverErrorCount < self.maxServerErrors ? .retry(after: delay) : .fail
         case .permanent:
             return .fail
         }
+    }
+
+    // MARK: - Cancelled background transfers
+
+    /// What a cancelled background transfer means.
+    enum Cancellation: Equatable {
+        /// The user terminated the app: iOS cancels all its background transfers, and they do not come back.
+        case userForceQuit
+        /// The system stopped the transfer, e.g. because background updates are off (Low Power Mode) or it ran
+        /// short of resources. Sending again once the app is in front works.
+        case system
+        /// No reason given.
+        case unknown
+    }
+
+    /// - Parameter reason: Value of `NSURLErrorBackgroundTaskCancelledReasonKey`:
+    ///   0 `NSURLErrorCancelledReasonUserForceQuitApplication`, 1 `…BackgroundUpdatesDisabled`,
+    ///   2 `…InsufficientSystemResources`.
+    static func cancellation(forReason reason: Int?) -> Cancellation {
+        switch reason {
+        case 0: return .userForceQuit
+        case 1, 2: return .system
+        default: return .unknown
+        }
+    }
+
+    static func backgroundCancelReason(of error: Error) -> Int? {
+        for link in self.chain(of: error) {
+            guard let value = link.nsError?.userInfo["NSURLErrorBackgroundTaskCancelledReasonKey"] else { continue }
+
+            if let number = value as? NSNumber { return number.intValue }
+        }
+
+        return nil
+    }
+
+    /// The beginning of the body an error response had, to be logged.
+    static func responseBody(of error: Error, maxLength: Int = 300) -> String? {
+        for link in self.chain(of: error) {
+            guard let data = link.nsError?.userInfo["com.alamofire.serialization.response.error.data"] as? Data,
+                  let body = String(data: data, encoding: .utf8)
+            else { continue }
+
+            return String(body.prefix(maxLength))
+        }
+
+        return nil
     }
 
     // MARK: - Duplicates

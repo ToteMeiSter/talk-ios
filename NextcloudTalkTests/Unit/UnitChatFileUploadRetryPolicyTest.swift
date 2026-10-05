@@ -18,13 +18,41 @@ final class UnitChatFileUploadRetryPolicyTest: XCTestCase {
         }
     }
 
+    func testBrokenTlsHandshakeIsANetworkError() {
+        XCTAssertEqual(ChatFileUploadRetryPolicy.classify(urlErrorCode: NSURLErrorSecureConnectionFailed), .network)
+    }
+
     func testCertificateAndCancelErrorsAreNotRetried() {
-        for code in -1206 ... -1200 {
+        for code in -1206 ... -1201 {
             XCTAssertEqual(ChatFileUploadRetryPolicy.classify(urlErrorCode: code), .permanent, "code \(code)")
         }
 
         XCTAssertEqual(ChatFileUploadRetryPolicy.classify(urlErrorCode: NSURLErrorCancelled), .permanent)
         XCTAssertEqual(ChatFileUploadRetryPolicy.classify(urlErrorCode: NSURLErrorFileDoesNotExist), .permanent)
+    }
+
+    func testCancellationReasons() {
+        XCTAssertEqual(ChatFileUploadRetryPolicy.cancellation(forReason: 0), .userForceQuit)
+        XCTAssertEqual(ChatFileUploadRetryPolicy.cancellation(forReason: 1), .system)
+        XCTAssertEqual(ChatFileUploadRetryPolicy.cancellation(forReason: 2), .system)
+        XCTAssertEqual(ChatFileUploadRetryPolicy.cancellation(forReason: nil), .unknown)
+        XCTAssertEqual(ChatFileUploadRetryPolicy.cancellation(forReason: 42), .unknown)
+    }
+
+    func testCancellationReasonIsReadFromTheError() {
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: ["NSURLErrorBackgroundTaskCancelledReasonKey": 1])
+        let failure = ChatFileUploadFailure(error: error)
+
+        XCTAssertEqual(failure.urlErrorCode, NSURLErrorCancelled)
+        XCTAssertEqual(failure.backgroundCancelReason, 1)
+        XCTAssertNil(ChatFileUploadFailure(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)).backgroundCancelReason)
+    }
+
+    func testCallerCanLimitTheWaitForTheNetwork() {
+        let failure = ChatFileUploadFailure(urlErrorCode: NSURLErrorNotConnectedToInternet)
+
+        XCTAssertEqual(ChatFileUploadRetryPolicy.decision(for: failure, serverErrorCount: 0, failureCount: 1, networkWait: 31, maxNetworkWait: 30), .fail)
+        XCTAssertNotEqual(ChatFileUploadRetryPolicy.decision(for: failure, serverErrorCount: 0, failureCount: 1, networkWait: 31), .fail)
     }
 
     func testHttpStatusCodes() {

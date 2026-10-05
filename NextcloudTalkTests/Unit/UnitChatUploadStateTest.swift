@@ -208,6 +208,114 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertEqual(state.announceFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .failed)
     }
 
+    // MARK: - Attachment folder
+
+    func testMissingAttachmentFolderIsCreatedOnce() {
+        for status in [404, 409] {
+            var state = makeState(kind: .attachmentFolder)
+            let failure = ChatFileUploadFailure(httpStatusCode: status)
+
+            XCTAssertEqual(state.transferFinished(failure: failure, now: now), .recreateAttachmentFolder, "status \(status)")
+            XCTAssertTrue(state.attachmentFolderRecreated)
+
+            // Still missing after it was created: the failure is the one of any other
+            XCTAssertEqual(state.transferFinished(failure: failure, now: now), .failed, "status \(status)")
+        }
+    }
+
+    func testDraftFolderDoesNotCreateTheAttachmentFolder() {
+        var state = makeState(kind: .draftFolder)
+
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 409), now: now), .failed)
+    }
+
+    func testRetryByTheUserMayCreateTheFolderAgain() {
+        var state = makeState(kind: .attachmentFolder)
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now)
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now)
+
+        XCTAssertEqual(state.prepareRetry(now: now), .startTransfer(after: 0))
+        XCTAssertEqual(state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 404), now: now), .recreateAttachmentFolder)
+    }
+
+    // MARK: - Cancelled by the system
+
+    private func cancellation(reason: Int?) -> ChatFileUploadFailure {
+        return ChatFileUploadFailure(urlErrorCode: NSURLErrorCancelled, backgroundCancelReason: reason)
+    }
+
+    func testCancelByUserForceQuitFails() {
+        var state = makeState()
+
+        XCTAssertEqual(state.transferFinished(failure: cancellation(reason: 0), now: now), .failed)
+        XCTAssertEqual(state.step, .failed)
+    }
+
+    func testCancelByTheSystemWaitsForTheApp() {
+        for reason in [1, 2] {
+            var state = makeState()
+
+            XCTAssertEqual(state.transferFinished(failure: cancellation(reason: reason), now: now), .suspended)
+            XCTAssertEqual(state.step, .uploading)
+            XCTAssertTrue(state.suspendedBySystem)
+
+            state.transferStarted(inBackground: false)
+            XCTAssertFalse(state.suspendedBySystem)
+        }
+    }
+
+    func testCancelWithoutReasonFails() {
+        var state = makeState()
+
+        XCTAssertEqual(state.transferFinished(failure: cancellation(reason: nil), now: now), .failed)
+    }
+
+    func testCancelByTheAppItselfStartsAgain() {
+        var state = makeState()
+        state.transferStarted(inBackground: true)
+        XCTAssertTrue(state.startedInBackground)
+
+        state.prepareRestartFromForeground()
+
+        XCTAssertEqual(state.transferFinished(failure: cancellation(reason: 0), now: now), .startTransfer(after: 0))
+        XCTAssertEqual(state.step, .uploading)
+        XCTAssertFalse(state.expectedCancel)
+        XCTAssertFalse(state.startedInBackground)
+
+        // The planned cancellation is used up: the next one is not the app's own
+        XCTAssertEqual(state.transferFinished(failure: cancellation(reason: 0), now: now), .failed)
+    }
+
+    func testPlannedCancelIsForgottenWhenAnotherResultCameFirst() {
+        var state = makeState()
+        state.prepareRestartFromForeground()
+
+        _ = state.transferFinished(failure: ChatFileUploadFailure(httpStatusCode: 503), now: now)
+
+        XCTAssertFalse(state.expectedCancel)
+    }
+
+    // MARK: - Posted uploads
+
+    func testPostedUploadKeepsAMarkWithTheTime() {
+        var state = uploadedState(kind: .draftFolder)
+
+        XCTAssertTrue(state.beginAnnounce())
+        XCTAssertEqual(state.announceFinished(failure: nil, now: now), .finished)
+        XCTAssertEqual(state.step, .announced)
+        XCTAssertEqual(state.announcedAt, now)
+    }
+
+    func testAPostedUploadCannotBeSentAgain() {
+        var state = uploadedState(kind: .draftFolder)
+        _ = state.beginAnnounce()
+        _ = state.announceFinished(failure: nil, now: now)
+
+        XCTAssertEqual(state.prepareRetry(now: now), .none)
+        state.fail(reason: "late")
+        XCTAssertEqual(state.step, .announced)
+    }
+
     // MARK: - Retry by the user
 
     func testRetryAfterFailedTransferUploadsAgain() {
@@ -285,6 +393,34 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertEqual(decoded, state)
         XCTAssertEqual(decoded.metadata.uploadMetadata.asDictionary()["caption"] as? String, "Hello")
         XCTAssertEqual(decoded.metadata.uploadMetadata.asDictionary()["replyTo"] as? Int, 42)
+    }
+
+    func testStateWithoutTheNewerKeysCanBeRead() throws {
+        // What the first version wrote, before the keys for the folder, the system and the posted time existed
+        let json = """
+        {"id": "ref-1", "accountId": "account-1", "roomToken": "token1", "fileName": "photo.jpg",
+         "localFileName": "ref-1.jpg", "createdAt": 1700000000, "step": "uploaded", "fileUploaded": true,
+         "metadata": {"caption": "Hi"}}
+        """
+
+        let state = try JSONDecoder().decode(ChatUploadState.self, from: Data(json.utf8))
+
+        XCTAssertEqual(state.id, "ref-1")
+        XCTAssertEqual(state.step, .uploaded)
+        XCTAssertTrue(state.fileUploaded)
+        XCTAssertEqual(state.metadata.caption, "Hi")
+        XCTAssertFalse(state.metadata.silent)
+        XCTAssertFalse(state.attachmentFolderRecreated)
+        XCTAssertFalse(state.startedInBackground)
+        XCTAssertFalse(state.suspendedBySystem)
+        XCTAssertNil(state.announcedAt)
+        XCTAssertEqual(state.failureCount, 0)
+    }
+
+    func testStateWithoutTheBasicKeysIsRefused() {
+        let json = "{\"id\": \"ref-1\"}"
+
+        XCTAssertThrowsError(try JSONDecoder().decode(ChatUploadState.self, from: Data(json.utf8)))
     }
 
     func testStateNeverContainsCredentials() throws {

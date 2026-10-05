@@ -37,20 +37,52 @@ final class ChatUploadStore {
         try data.write(to: self.stateURL(for: state.id), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
-    func load(id: String) -> ChatUploadState? {
-        guard let data = try? Data(contentsOf: self.stateURL(for: id)) else { return nil }
+    enum LoadResult {
+        case found(ChatUploadState)
+        /// There is no state with this id.
+        case missing
+        /// There is a file, but it cannot be read or decoded. Before the first unlock of the device the
+        /// protection of the file is the reason, so this is no proof that the upload is gone.
+        case unreadable
+    }
 
-        return try? JSONDecoder().decode(ChatUploadState.self, from: data)
+    func loadResult(id: String) -> LoadResult {
+        let url = self.stateURL(for: id)
+
+        guard self.fileManager.fileExists(atPath: url.path) else { return .missing }
+
+        guard let data = try? Data(contentsOf: url),
+              let state = try? JSONDecoder().decode(ChatUploadState.self, from: data)
+        else { return .unreadable }
+
+        return .found(state)
+    }
+
+    func load(id: String) -> ChatUploadState? {
+        if case .found(let state) = self.loadResult(id: id) { return state }
+
+        return nil
+    }
+
+    /// - Returns: The states that could be read, and whether there are files of states that could not.
+    func loadAllReport() -> (states: [ChatUploadState], hasUnreadable: Bool) {
+        let urls = (try? self.fileManager.contentsOfDirectory(at: self.stateDirectory, includingPropertiesForKeys: nil)) ?? []
+        var states: [ChatUploadState] = []
+        var hasUnreadable = false
+
+        for url in urls where url.pathExtension == "json" {
+            if let data = try? Data(contentsOf: url), let state = try? JSONDecoder().decode(ChatUploadState.self, from: data) {
+                states.append(state)
+            } else {
+                hasUnreadable = true
+            }
+        }
+
+        return (states, hasUnreadable)
     }
 
     func loadAll() -> [ChatUploadState] {
-        let urls = (try? self.fileManager.contentsOfDirectory(at: self.stateDirectory, includingPropertiesForKeys: nil)) ?? []
-
-        return urls.filter { $0.pathExtension == "json" }.compactMap { url in
-            guard let data = try? Data(contentsOf: url) else { return nil }
-
-            return try? JSONDecoder().decode(ChatUploadState.self, from: data)
-        }
+        return self.loadAllReport().states
     }
 
     func removeState(id: String) {
@@ -65,8 +97,7 @@ final class ChatUploadStore {
     func copyFile(at sourceURL: URL, id: String) throws -> String {
         try self.createDirectoryIfNeeded(self.filesDirectory)
 
-        let fileExtension = sourceURL.pathExtension
-        let localFileName = self.safeName(id) + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
+        let localFileName = self.localFileName(forId: id, sourceURL: sourceURL)
         var destinationURL = self.filesDirectory.appendingPathComponent(localFileName)
 
         if self.fileManager.fileExists(atPath: destinationURL.path) {
@@ -81,6 +112,17 @@ final class ChatUploadStore {
         try? destinationURL.setResourceValues(values)
 
         return localFileName
+    }
+
+    /// Name `copyFile` gives the copy of a file.
+    func localFileName(forId id: String, sourceURL: URL) -> String {
+        let fileExtension = sourceURL.pathExtension
+        return self.safeName(id) + (fileExtension.isEmpty ? "" : ".\(fileExtension)")
+    }
+
+    /// Where the copy of a file is going to be, before it exists.
+    func plannedFileURL(forId id: String, sourceURL: URL) -> URL {
+        return self.filesDirectory.appendingPathComponent(self.localFileName(forId: id, sourceURL: sourceURL))
     }
 
     func fileURL(for state: ChatUploadState) -> URL {
@@ -102,11 +144,26 @@ final class ChatUploadStore {
     }
 
     /// Files without a state, e.g. because the app died between copying the file and storing the state.
-    func removeOrphanedFiles() {
-        let knownNames = Set(self.loadAll().map { $0.localFileName })
-        let urls = (try? self.fileManager.contentsOfDirectory(at: self.filesDirectory, includingPropertiesForKeys: nil)) ?? []
+    ///
+    /// Does nothing when a state cannot be read, because then the files of that state would look like orphans,
+    /// and only touches files that are older than `minimumAge`, because a file is copied before its state exists.
+    ///
+    /// - Parameter isProtectedDataAvailable: Whether the files protected until the first unlock can be read.
+    func removeOrphanedFiles(isProtectedDataAvailable: Bool, minimumAge: TimeInterval = 6 * 60 * 60, now: Date = Date()) {
+        guard isProtectedDataAvailable else { return }
+
+        let report = self.loadAllReport()
+
+        guard !report.hasUnreadable else { return }
+
+        let knownNames = Set(report.states.map { $0.localFileName })
+        let urls = (try? self.fileManager.contentsOfDirectory(at: self.filesDirectory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
 
         for url in urls where !knownNames.contains(url.lastPathComponent) {
+            guard let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+                  now.timeIntervalSince(modified) > minimumAge
+            else { continue }
+
             try? self.fileManager.removeItem(at: url)
         }
     }
