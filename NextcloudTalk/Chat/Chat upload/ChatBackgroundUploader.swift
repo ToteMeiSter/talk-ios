@@ -140,14 +140,6 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     @objc private func protectedDataDidBecomeAvailable() {
         self.recoverStoredStates()
-
-        let events = self.deferredTransferEvents
-        self.deferredTransferEvents = []
-
-        for event in events {
-            self.transferFinished(id: event.id, failure: event.failure)
-        }
-
         self.processStoredStates()
     }
 
@@ -167,7 +159,13 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
-    /// Prepares the stored states for a new process. Needs the states to be readable.
+    /// Prepares the stored states for a new process, and handles the results of transfers that came in before
+    /// the states were readable. Needs the states to be readable, and does nothing before that and after the first time.
+    ///
+    /// Everything that looks at the stored states or starts work from them calls this first, because the order of
+    /// `didBecomeActive` and `protectedDataDidBecomeAvailable` after a launch before the first unlock is not defined.
+    /// Else an announcement started in between would be taken for one of the dead process, or the other way round.
+    /// The call is idempotent and cheap, which is why it is called from every entry and the notification is not waited for.
     private func recoverStoredStates() {
         guard !self.didRecoverStates, UIApplication.shared.isProtectedDataAvailable else { return }
 
@@ -177,12 +175,21 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             state.recoverAfterRelaunch()
             try? self.store.save(state)
         }
+
+        let events = self.deferredTransferEvents
+        self.deferredTransferEvents = []
+
+        for event in events {
+            self.transferFinished(id: event.id, failure: event.failure)
+        }
     }
 
     /// Carries on with the states found on disk. Waits for the first unlock of the device, before it the states
     /// cannot be read, which does not mean they are gone.
     private func processStoredStates() {
         guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        self.recoverStoredStates()
 
         let now = Date().timeIntervalSince1970
         let report = self.store.loadAllReport()
@@ -274,6 +281,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     }
 
     private func restart(from tasks: [URLSessionTask]) {
+        self.recoverStoredStates()
+
         for state in self.store.loadAll() where state.step == .uploading {
             let task = tasks.first { $0.taskDescription == state.id && ($0.state == .running || $0.state == .suspended) }
 
@@ -344,6 +353,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     /// Posts the files that are on the server but not in the conversation.
     private func announcePendingUploads() {
+        self.recoverStoredStates()
+
         for state in self.store.loadAll() where state.step == .uploaded {
             self.announce(id: state.id)
         }
@@ -713,6 +724,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
 
         self.scheduledAnnounceIds.remove(id)
+
+        self.recoverStoredStates()
 
         guard !self.announcingIds.contains(id),
               var state = self.store.load(id: id),
