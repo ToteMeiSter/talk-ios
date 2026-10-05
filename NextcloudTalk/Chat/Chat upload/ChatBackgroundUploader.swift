@@ -155,8 +155,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
-    /// Prepares the stored states for a new process, and handles the results of transfers that came in before
-    /// the states were readable. Needs the states to be readable, and does nothing before that and after the first time.
+    /// Prepares the stored states for a new process. Needs the states to be readable, and does nothing before that
+    /// and after the first time.
     ///
     /// Everything that looks at the stored states or starts work from them calls this first, because the order of
     /// `didBecomeActive` and `protectedDataDidBecomeAvailable` after a launch before the first unlock is not defined.
@@ -175,7 +175,17 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             try? self.store.save(state)
         }
 
-        // Results that came in before the states were readable, maybe in an earlier process
+    }
+
+    /// Handles the results of transfers that came in before the states were readable, maybe in an earlier process.
+    ///
+    /// Waits for the tasks of the session to be known: the result of a failure starts the transfer again, and
+    /// `startTransfer` only leaves out a transfer that is running already when it knows the tasks. Else an event that
+    /// was handled before the process died would start a second chain of attempts. Called before any other work on
+    /// the states.
+    private func handleStoredEvents() {
+        guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
         for event in self.store.loadEvents() {
             self.transferFinished(id: event.id, failure: event.failure)
             self.store.removeEvent(event)
@@ -188,6 +198,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
 
         self.recoverStoredStates()
+        self.handleStoredEvents()
 
         let now = Date().timeIntervalSince1970
         let report = self.store.loadAllReport()
@@ -283,6 +294,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     private func restart(from tasks: [URLSessionTask]) {
         self.recoverStoredStates()
+        self.handleStoredEvents()
 
         for state in self.store.loadAll() where state.step == .uploading {
             let task = tasks.first { $0.taskDescription == state.id && ($0.state == .running || $0.state == .suspended) }
