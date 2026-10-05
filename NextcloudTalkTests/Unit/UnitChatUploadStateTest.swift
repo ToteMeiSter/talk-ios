@@ -323,6 +323,25 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertEqual(state.step, .announced)
     }
 
+    func testPostedMarkOutlivesTheTimeAMessageCanBeResent() {
+        var state = uploadedState(kind: .draftFolder)
+        state.step = .announced
+        state.announcedAt = now
+
+        // A voice message is resent from the recording, which stays: the mark must outlive the 48 hours of old
+        XCTAssertFalse(state.isAnnouncedRetentionOver(now: now + 3 * 24 * 60 * 60))
+        XCTAssertFalse(state.isAnnouncedRetentionOver(now: now + ChatUploadState.failedRetention))
+        XCTAssertTrue(state.isAnnouncedRetentionOver(now: now + ChatUploadState.failedRetention + 1))
+        XCTAssertGreaterThanOrEqual(ChatUploadState.announcedRetention, ChatUploadState.failedRetention)
+    }
+
+    func testPostedMarkWithoutTimeIsOver() {
+        var state = uploadedState(kind: .draftFolder)
+        state.step = .announced
+
+        XCTAssertTrue(state.isAnnouncedRetentionOver(now: now))
+    }
+
     // MARK: - Retry by the user
 
     func testRetryAfterFailedTransferUploadsAgain() {

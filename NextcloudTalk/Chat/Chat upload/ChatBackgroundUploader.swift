@@ -213,7 +213,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                 // The file is not needed anymore. The state stays for a while, see `isAnnounced`.
                 self.store.removeFile(for: state)
 
-                if now - (state.announcedAt ?? 0) > ChatUploadState.announcedRetention {
+                if state.isAnnouncedRetentionOver(now: now) {
                     self.store.removeState(id: state.id)
                 }
             }

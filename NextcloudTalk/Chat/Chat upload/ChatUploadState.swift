@@ -94,12 +94,16 @@ struct ChatUploadState: Codable, Equatable {
         case startedInBackground, expectedCancel, suspendedBySystem, announcedAt
     }
 
-    /// A posted upload is kept this long without its file. A message that was not replaced by the one of
-    /// the server and is sent again then is known to be posted already.
-    static let announcedRetention: TimeInterval = 48 * 60 * 60
-
     /// A failed upload is dropped after this long, with its file.
     static let failedRetention: TimeInterval = 7 * 24 * 60 * 60
+
+    /// A posted upload is kept this long without its file. A message that was not replaced by the one of
+    /// the server and is sent again then is known to be posted already.
+    ///
+    /// Not shorter than `failedRetention`: the file of a voice message is the recording itself, which is not
+    /// deleted with the state, so "Resend" finds it as long as the message can be resent, and posts it twice
+    /// if the state of the posted upload is gone by then.
+    static let announcedRetention: TimeInterval = failedRetention
 
     /// Reference id of the temporary message. Also the key of the upload.
     var id: String
@@ -176,6 +180,11 @@ struct ChatUploadState: Codable, Equatable {
     /// The upload is older than a temporary message lives, see `maxAge`.
     func isExpired(now: TimeInterval) -> Bool {
         return now - self.createdAt > Self.maxAge
+    }
+
+    /// The state of a posted file is not needed anymore.
+    func isAnnouncedRetentionOver(now: TimeInterval) -> Bool {
+        return now - (self.announcedAt ?? 0) > Self.announcedRetention
     }
 
     var isDraftFolder: Bool {
