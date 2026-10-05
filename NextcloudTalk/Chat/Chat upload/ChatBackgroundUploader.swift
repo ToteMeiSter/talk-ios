@@ -162,13 +162,24 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     /// Takes over the upload of a file, which has a temporary message in the chat already.
     ///
-    /// The file is copied, so the caller may delete it, and the destination is determined while the user
-    /// is looking at the app. A failure marks the temporary message as failed.
+    /// Returns when the upload is done or failed. Use `stage` and `begin` separately when the file must be
+    /// safe, so the caller can delete it, before the network is involved.
     @MainActor
     func enqueue(_ upload: ChatFileUpload) async {
+        guard self.stage(upload), let referenceId = upload.referenceId else { return }
+
+        await self.begin(referenceId: referenceId, room: upload.room, account: upload.account)
+    }
+
+    /// Copies the file into the store and stores the state, which makes the upload survive the app being killed.
+    /// A failure marks the temporary message as failed.
+    ///
+    /// - Returns: Whether the upload is stored.
+    @MainActor
+    func stage(_ upload: ChatFileUpload) -> Bool {
         guard let referenceId = upload.referenceId else {
             NCLog.log("Upload of \(upload.fileName) has no reference id")
-            return
+            return false
         }
 
         let localFileName: String
@@ -178,7 +189,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         } catch {
             NCLog.log("Could not copy \(upload.fileName) for the upload. Error: \(error.localizedDescription)")
             self.markMessageAsFailed(referenceId: referenceId)
-            return
+            return false
         }
 
         var state = ChatUploadState(id: referenceId,
@@ -193,10 +204,17 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         guard self.persist(state) else {
             self.store.remove(state)
             self.markMessageAsFailed(referenceId: referenceId)
-            return
+            return false
         }
 
-        await self.resolveDestinationAndTransfer(id: referenceId, room: upload.room, account: upload.account)
+        return true
+    }
+
+    /// Determines where to upload the staged file to, while the user is looking at the app, and starts
+    /// the transfer. A failure marks the temporary message as failed.
+    @MainActor
+    func begin(referenceId: String, room: NCRoom, account: TalkAccount) async {
+        await self.resolveDestinationAndTransfer(id: referenceId, room: room, account: account)
     }
 
     /// The user wants to send a failed upload again.
@@ -230,7 +248,11 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                 self.interrupt(state, reason: "room or account is gone")
             }
         default:
-            break
+            // Still going, nothing to do. A file that is waiting to be posted might have been left alone by
+            // an expired message, so ask for it.
+            if state.step == .uploaded {
+                self.announce(id: referenceId)
+            }
         }
 
         return true

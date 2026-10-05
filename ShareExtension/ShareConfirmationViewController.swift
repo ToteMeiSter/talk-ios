@@ -41,6 +41,13 @@ let kShareConfirmationMaxItems = 10
 
     public weak var delegate: ShareConfirmationViewControllerDelegate?
 
+    /// Takes over sending the files, once they are compressed. Set by the chat in the app, which shows a message
+    /// for each file and uploads in the background. The share extension has nobody to hand over to: it shows
+    /// the progress itself and uploads while it is open.
+    ///
+    /// Must be done with the files when it returns, the temporary copies are deleted right after.
+    var uploadHandler: (([ChatFileUpload]) -> Void)?
+
     public lazy var shareItemController: ShareItemController = {
         let controller = ShareItemController()
         controller.delegate = self
@@ -925,6 +932,12 @@ let kShareConfirmationMaxItems = 10
             defer { bgTask.stopBackgroundTask() }
 
             let uploads = await self.uploads(for: shareItems, quality: self.imageQuality)
+
+            if let uploadHandler = self.uploadHandler {
+                uploadHandler(uploads)
+                self.finishUploads(withErrors: [], succeededItems: shareItems)
+                return
+            }
 
             self.hud?.mode = .annularDeterminate
 

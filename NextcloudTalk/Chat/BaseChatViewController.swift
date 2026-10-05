@@ -225,6 +225,7 @@ import Toast
 
         NotificationCenter.default.addObserver(self, selector: #selector(willShowKeyboard(notification:)), name: UIWindow.keyboardWillShowNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willHideKeyboard(notification:)), name: UIWindow.keyboardWillHideNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(chatUploadDidFail(notification:)), name: .NCChatUploadDidFail, object: nil)
 
         AllocationTracker.shared.addAllocation("ChatViewController")
     }
@@ -578,7 +579,18 @@ import Toast
 
     // MARK: - Temporary messages
 
-    internal func createTemporaryMessage(message: String, replyTo parentMessage: NCChatMessage?, messageParameters: String, silently: Bool, isVoiceMessage: Bool) -> NCChatMessage? {
+    /// - Parameters:
+    ///   - message: The text of the message. For voice messages and files the name of the file.
+    ///   - messageParameters: The message parameters. For voice messages and files the local path of the file.
+    ///   - isFileMessage: The message is a file other than a voice message, shown with `caption` as text.
+    internal func createTemporaryMessage(message: String,
+                                         replyTo parentMessage: NCChatMessage?,
+                                         messageParameters: String,
+                                         silently: Bool,
+                                         isVoiceMessage: Bool,
+                                         isFileMessage: Bool = false,
+                                         caption: String? = nil,
+                                         mimeType: String? = nil) -> NCChatMessage? {
         let temporaryMessage = NCChatMessage()
 
         temporaryMessage.accountId = self.account.accountId
@@ -596,14 +608,20 @@ import Toast
         temporaryMessage.isTemporary = true
         temporaryMessage.parentId = parentMessage?.internalId
 
-        if isVoiceMessage {
+        if isVoiceMessage || isFileMessage {
             var messageParametersDict = [String: Any]()
             let parameterId = UUID().uuidString
 
-            temporaryMessage.message = message
-            temporaryMessage.messageType = kMessageTypeVoiceMessage
+            if isVoiceMessage {
+                temporaryMessage.message = message
+                temporaryMessage.messageType = kMessageTypeVoiceMessage
+            } else {
+                // Like the server does it: the text of a file is its caption, without one there is a placeholder
+                let trimmedCaption = caption?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                temporaryMessage.message = trimmedCaption.isEmpty ? "{file}" : trimmedCaption
+            }
 
-            let fileParameterDict: [String: Any] = [
+            var fileParameterDict: [String: Any] = [
                 "id": parameterId,
                 "type": "file",
                 "name": message,
@@ -613,6 +631,10 @@ import Toast
                 "filePath": messageParameters,
                 "fileLocalPath": messageParameters
             ]
+
+            if let mimeType {
+                fileParameterDict["mimetype"] = mimeType
+            }
 
             messageParametersDict["file"] = fileParameterDict
 
@@ -1300,7 +1322,11 @@ import Toast
 
         guard let originalMessage = message.sendingMessageWithDisplayNames else { return }
 
-        if message.messageType != kMessageTypeVoiceMessage {
+        // Voice messages and files are sent again by uploading them
+        let localFilePath = message.file()?.fileStatus?.fileLocalPath
+        let isVoiceMessage = message.messageType == kMessageTypeVoiceMessage
+
+        if !isVoiceMessage, localFilePath == nil {
             self.sendChatMessage(message: originalMessage, withParentMessage: message.parent, messageParameters: message.messageParametersJSONString ?? "", silently: message.isSilent)
         } else {
             // Show and store the message as sending again, so it can be marked as failed again
@@ -1315,9 +1341,19 @@ import Toast
                 self.appendTemporaryMessage(temporaryMessage: message)
             }
 
+            // A stored upload goes on where it stopped. A file that is on the server is not uploaded again.
+            if let referenceId = message.referenceId, ChatBackgroundUploader.shared.retry(referenceId: referenceId) {
+                return
+            }
+
             var metaData = ChatFileUploadMetadata()
-            metaData.isVoiceMessage = true
+            metaData.isVoiceMessage = isVoiceMessage
+            metaData.silent = message.isSilent
             metaData.threadId = self.thread?.threadId
+
+            if !isVoiceMessage, message.message != "{file}" {
+                metaData.caption = message.message
+            }
 
             if message.parentMessageId > 0 {
                 metaData.replyTo = message.parentMessageId
@@ -1328,8 +1364,8 @@ import Toast
                 metaData.replyToToken = replyToToken
             }
 
-            var upload = ChatFileUpload(localPath: message.file().fileStatus!.fileLocalPath!,
-                                        fileName: originalMessage,
+            var upload = ChatFileUpload(localPath: localFilePath ?? "",
+                                        fileName: message.file()?.fileStatus?.fileName ?? originalMessage,
                                         room: self.room,
                                         account: self.account)
             upload.metadata = metaData
@@ -1422,6 +1458,11 @@ import Toast
 
     func didPressDelete(for message: NCChatMessage) {
         if message.sendingFailed || message.isOfflineMessage {
+            if let referenceId = message.referenceId {
+                // Nothing is left to send, so the stored copy of the file is not needed anymore
+                ChatBackgroundUploader.shared.discard(referenceId: referenceId)
+            }
+
             self.removePermanentlyTemporaryMessage(temporaryMessage: message)
             return
         }
@@ -1708,6 +1749,9 @@ import Toast
         let shareConfirmationVC = ShareConfirmationViewController(room: self.room, thread: self.thread, account: self.account, serverCapabilities: serverCapabilities!)!
         shareConfirmationVC.delegate = self
         shareConfirmationVC.isModal = true
+        shareConfirmationVC.uploadHandler = { [weak self] uploads in
+            self?.sendFiles(uploads)
+        }
         let navigationController = NCNavigationController(rootViewController: shareConfirmationVC)
 
         return (shareConfirmationVC, navigationController)
@@ -2196,21 +2240,19 @@ import Toast
             replyMessageView.dismiss()
         }
 
-        var temporaryMessage: NCChatMessage?
+        // Recordings of videos are files like any other and show their state in the chat the same way
+        let temporaryMessage = self.createTemporaryMessage(
+            message: fileName,
+            replyTo: replyToMessage,
+            messageParameters: "\(destinationFilePath)",
+            silently: false,
+            isVoiceMessage: isVoiceMessage,
+            isFileMessage: !isVoiceMessage
+        )
 
-        if isVoiceMessage {
-            temporaryMessage = self.createTemporaryMessage(
-                message: fileName,
-                replyTo: replyToMessage,
-                messageParameters: "\(destinationFilePath)",
-                silently: false,
-                isVoiceMessage: true
-            )
-
-            if temporaryMessage == nil {
-                print("Temporary message could not be created")
-                return
-            }
+        if temporaryMessage == nil {
+            print("Temporary message could not be created")
+            return
         }
 
         let movedFileToTemporaryDirectory = chatFileController.moveFileToTemporaryDirectory(
@@ -2248,17 +2290,67 @@ import Toast
     }
 
     func upload(_ upload: ChatFileUpload) {
+        // Uploads with a temporary message are carried on by the system when the app is suspended, and the
+        // temporary message shows how they are doing
+        if upload.referenceId != nil {
+            Task {
+                await ChatBackgroundUploader.shared.enqueue(upload)
+            }
+
+            return
+        }
+
         Task {
             do {
                 try await ChatFileUploader.upload(upload)
                 NCLog.log("Successfully uploaded and shared \(upload.fileName)")
             } catch {
-                if let referenceId = upload.referenceId {
-                    self.markTemporaryMessageAsFailed(referenceId: referenceId)
-                }
-
                 self.presentUploadError(error, for: upload)
             }
+        }
+    }
+
+    /// Sends the files of the share confirmation. Every file gets a temporary message in the chat, which shows
+    /// how its upload is doing, and is uploaded in a way that survives the app being suspended.
+    internal func sendFiles(_ uploads: [ChatFileUpload]) {
+        var stagedUploads: [ChatFileUpload] = []
+
+        for var upload in uploads {
+            guard let temporaryMessage = self.createTemporaryMessage(message: upload.fileName,
+                                                                     replyTo: nil,
+                                                                     messageParameters: upload.localPath,
+                                                                     silently: upload.metadata.silent,
+                                                                     isVoiceMessage: false,
+                                                                     isFileMessage: true,
+                                                                     caption: upload.metadata.caption)
+            else { continue }
+
+            upload.referenceId = temporaryMessage.referenceId
+
+            if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: self.room) {
+                self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
+            }
+
+            // The file is copied here, the caller may delete it right after this returns
+            if ChatBackgroundUploader.shared.stage(upload) {
+                stagedUploads.append(upload)
+            }
+        }
+
+        for upload in stagedUploads {
+            guard let referenceId = upload.referenceId else { continue }
+
+            Task {
+                await ChatBackgroundUploader.shared.begin(referenceId: referenceId, room: upload.room, account: upload.account)
+            }
+        }
+    }
+
+    @objc private func chatUploadDidFail(notification: Notification) {
+        guard let referenceId = notification.userInfo?["referenceId"] as? String else { return }
+
+        DispatchQueue.main.async {
+            self.markTemporaryMessageAsFailed(referenceId: referenceId)
         }
     }
 
@@ -4013,6 +4105,9 @@ import Toast
     // MARK: - FileMessageTableViewCellDelegate
 
     public func cellWants(toDownloadFile fileParameter: NCMessageFileParameter, for message: NCChatMessage) {
+        // The file of a message that is still sent is not on the server (yet)
+        guard !message.isTemporary else { return }
+
         if NCUtils.isImage(fileType: fileParameter.mimetype ?? "") {
             let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account, thread: self.thread)
             mediaViewController.delegate = self
