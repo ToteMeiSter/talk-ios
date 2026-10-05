@@ -22,6 +22,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
     // MARK: - Public var
     public let kReceivedChatMessagesLimit = 100
 
+    /// What `checkOrCreateAttachmentFolder` reports when the account has no attachment folder URL. 0 is "the folder
+    /// is there" for its callers. An `NSURLErrorDomain` code that the retry policy sees as permanent, so waiting and
+    /// asking again does not happen.
+    static let attachmentFolderUnknownCode = NSURLErrorBadURL
+
     // MARK: - Private var
     private let kDavEndpoint = "/remote.php/dav"
     private let kNCOCSAPIVersion = "/ocs/v2.php"
@@ -3202,10 +3207,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
 
         guard let attachmentFolderServerURL = self.attachmentFolderServerURL(forAccount: account)
         else {
-            // 0 means "the folder is there" for the callers. Not knowing where the folder is, is an error.
-            // The code is `ChatFileUploadRetryPolicy.attachmentFolderUnknownCode`, which is not visible in every
-            // target this file is compiled into.
-            completionBlock(false, NSURLErrorBadURL)
+            // Not knowing where the folder is, is an error
+            completionBlock(false, NCAPIController.attachmentFolderUnknownCode)
             return
         }
 

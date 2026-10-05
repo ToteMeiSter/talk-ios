@@ -161,7 +161,7 @@ final class UnitChatFileUploadRetryPolicyTest: XCTestCase {
     }
 
     func testUnknownAttachmentFolderIsAnErrorThatIsNotRetried() {
-        let code = ChatFileUploadRetryPolicy.attachmentFolderUnknownCode
+        let code = NCAPIController.attachmentFolderUnknownCode
 
         // 0 is "the folder is there", so it must not be the code of an error. It is an URL error as the
         // uploader hands codes below 100 to the policy as such.

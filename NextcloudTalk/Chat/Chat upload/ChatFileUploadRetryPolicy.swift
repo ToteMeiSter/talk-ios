@@ -65,11 +65,6 @@ enum ChatFileUploadRetryPolicy {
     /// Longest pause we accept when the server sends a `Retry-After` header.
     static let maxRetryAfter: TimeInterval = 10 * 60
 
-    /// What `NCAPIController.checkOrCreateAttachmentFolder` reports when the account has no attachment folder
-    /// URL (the value is written out there, keep both the same). An `NSURLErrorDomain` code that is permanent,
-    /// so waiting and asking again does not happen.
-    static let attachmentFolderUnknownCode = NSURLErrorBadURL
-
     private static let firstDelay: TimeInterval = 2
 
     /// The key AFNetworking stores the response under in the user info of its errors.
