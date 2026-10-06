@@ -26,6 +26,19 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         XCTAssertEqual(capabilities?.externalSignalingServerVersion, testVersionUpdated)
     }
 
+    func testAccountIdsWithRoomToken() throws {
+        addRoom(withToken: "shared")
+        addRoom(withToken: "shared", withAccountId: "otherAccountId")
+        addRoom(withToken: "unrelated")
+
+        let accountIds = NCDatabaseManager.sharedInstance().accountIds(withRoomToken: "shared")
+
+        XCTAssertEqual(Set(accountIds), [TestBaseRealm.fakeAccountId, "otherAccountId"])
+        XCTAssertEqual(accountIds.count, 2)
+        XCTAssertEqual(NCDatabaseManager.sharedInstance().accountIds(withRoomToken: "unrelated"), [TestBaseRealm.fakeAccountId])
+        XCTAssertTrue(NCDatabaseManager.sharedInstance().accountIds(withRoomToken: "missing").isEmpty)
+    }
+
     func testRoomsForAccount() throws {
         let nonFavOld = addRoom(withToken: "NonFavOld") { room in
             room.lastActivity = 100

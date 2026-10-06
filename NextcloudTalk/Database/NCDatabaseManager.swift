@@ -392,6 +392,15 @@ public extension Notification.Name {
         return nil
     }
 
+    /// Ids of all accounts that have a conversation with the given token
+    public func accountIds(withRoomToken token: String) -> [String] {
+        var accountIds: [String] = []
+        for case let managedRoom as NCRoom in NCRoom.objects(with: NSPredicate(format: "token = %@", token)) {
+            accountIds.append(managedRoom.accountId)
+        }
+        return accountIds
+    }
+
     public func room(withInternalId internalId: String) -> NCRoom? {
         let query = NSPredicate(format: "internalId = %@", internalId)
         if let managedRoom = NCRoom.objects(with: query).firstObject() as? NCRoom {
