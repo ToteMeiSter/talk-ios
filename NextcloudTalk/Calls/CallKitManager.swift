@@ -683,6 +683,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         }
     }
 
+    public func endAnsweredCall(withToken token: String) {
+        guard let call = self.call(forToken: token) else { return }
+
+        // The user accepted the call but we were not able to show it, so make sure the user is informed (also when in background)
+        self.endCallWithMissedCallNotification(for: call)
+    }
+
     private func endCall(withUUID uuid: UUID?) {
         guard let uuid, let call = self.calls[uuid], let callUUID = call.uuid else { return }
 
