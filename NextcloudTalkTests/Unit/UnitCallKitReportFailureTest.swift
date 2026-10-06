@@ -13,9 +13,12 @@ final class UnitCallKitReportFailureTest: XCTestCase {
         return NSError(domain: CXErrorDomainIncomingCall, code: code.rawValue)
     }
 
-    func testFilteredCallsAreReportedToTheUser() {
+    func testDoNotDisturbCallIsReportedToTheUser() {
         XCTAssertTrue(CallKitReportFailure.shouldNotifyUser(about: incomingCallError(.filteredByDoNotDisturb)))
-        XCTAssertTrue(CallKitReportFailure.shouldNotifyUser(about: incomingCallError(.filteredByBlockList)))
+    }
+
+    func testBlockedCallIsNotReported() {
+        XCTAssertFalse(CallKitReportFailure.shouldNotifyUser(about: incomingCallError(.filteredByBlockList)))
     }
 
     func testDuplicateCallIsNotReported() {
