@@ -760,6 +760,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
             self.pendingAnsweredCallTimeout?.cancel()
         }
 
+        if self.pendingToStartCallToken == notification.userInfo?[stringForKey: "roomToken"] {
+            self.pendingToStartCallToken = nil
+            self.pendingToStartCallAccountId = nil
+        }
+
         guard let upgradeCallToken, let upgradeCallAccountId else { return }
         let token = upgradeCallToken
         let accountId = upgradeCallAccountId
@@ -804,6 +809,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     private func answerCall(withToken token: String, withAccountId accountId: String, withVideo video: Bool) {
+        guard CallKitManager.sharedInstance().hasCall(forToken: token) else {
+            NCLog.log("Not showing the call screen for room \(token), the CallKit call is gone")
+            return
+        }
+
         let shownCallToken = self.callViewController?.room.token
 
         switch AnsweredCallPolicy.action(appState: NCConnectionController.shared.appState, shownCallToken: shownCallToken, answeredToken: token) {
@@ -843,6 +853,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 return
             }
 
+            guard CallKitManager.sharedInstance().hasCall(forToken: token) else {
+                NCLog.log("Not showing the call screen for room \(token), the CallKit call is gone")
+                return
+            }
+
             // A call screen might have been presented while the room was requested
             switch AnsweredCallPolicy.action(appState: .ready, shownCallToken: self.callViewController?.room.token, answeredToken: token) {
             case .fail:
@@ -865,7 +880,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     func appStateHasChanged(notification: Notification) {
-        guard NCConnectionController.shared.appState == .ready, let pending = self.pendingAnsweredCall else { return }
+        // Read the state from the notification, accessing NCConnectionController.shared here would be recursive while it is initializing
+        guard let pending = self.pendingAnsweredCall,
+              let rawAppState = (notification.userInfo?["appState"] as? NSNumber)?.intValue,
+              AppState(rawValue: rawAppState) == .ready
+        else { return }
 
         self.pendingAnsweredCall = nil
         self.pendingAnsweredCallTimeout?.cancel()
@@ -1327,9 +1346,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 if let error {
                     userInfo["error"] = error
                     NCLog.log("Could not exit room. Error: \(error.localizedDescription)")
-                } else {
-                    self.checkForPendingToStartCalls()
                 }
+
+                // Leaving the old room is not needed to join the answered call, so don't leave it hanging in CallKit on errors
+                self.checkForPendingToStartCalls()
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidLeaveRoom, object: self, userInfo: userInfo)
             })

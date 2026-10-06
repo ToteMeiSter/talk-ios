@@ -105,6 +105,10 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         return nil
     }
 
+    public func hasCall(forToken token: String) -> Bool {
+        return self.call(forToken: token) != nil
+    }
+
     // MARK: - Actions
 
     public func setIncludeInRecents(toValue value: Bool) {
