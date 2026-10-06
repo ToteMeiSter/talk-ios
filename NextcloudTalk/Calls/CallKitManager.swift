@@ -168,6 +168,16 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // The call is not shown by CallKit (e.g. Focus or block list), so tell the user about the missed call
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    if let room = NCDatabaseManager.sharedInstance().room(withToken: token, forAccountId: accountId) {
+                        call.displayName = room.displayName
+                    }
+
+                    self.presentMissedCallNotification(for: call)
+                }
+
                 return
             }
 
@@ -207,6 +217,18 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // Without CallKit the user would not see why the call was cancelled, show the notification directly
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    let userInfo: [String: Any] = [
+                        "roomToken": token,
+                        "localNotificationType": notificationType.rawValue,
+                        "accountId": accountId
+                    ]
+
+                    NCNotificationController.sharedInstance().show(notificationType, withUserInfo: userInfo)
+                }
+
                 return
             }
 
@@ -239,6 +261,12 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for non-callkit devices for token \(pushNotification.roomToken ?? "Unknown") for account \(pushNotification.accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // Show the incoming call as a plain local notification instead
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    NCNotificationController.sharedInstance().showLocalNotificationForIncomingCall(withPushNotificaion: pushNotification)
+                }
+
                 return
             }
 
@@ -264,6 +292,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for old account with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // There is no data about the call (the push could not be decrypted), only tell the user that a call was received
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    let userInfo: [String: Any] = ["localNotificationType": NCLocalNotificationType.callFromOldAccount.rawValue]
+                    NCNotificationController.sharedInstance().show(.callFromOldAccount, withUserInfo: userInfo)
+                }
+
                 return
             }
 
