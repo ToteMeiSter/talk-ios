@@ -76,7 +76,8 @@ public class NCPeerConnection: NSObject {
     private var recoveryWatchdogWorkItem: DispatchWorkItem?
     private var lastOfferWasPublisherOffer = false
 
-    // Checks the certificate of TURNS servers against the system trust store, must live as long as the peer connection
+    // Checks the certificate of TURNS servers against the system trust store. The property keeps the verifier
+    // to make its ownership explicit.
     private var turnCertificateVerifier: NCTurnCertificateVerifier?
 
     init(sessionId: String, sid: String?, andICEServers iceServers: [Any]?, forAudioOnlyCall audioOnly: Bool) {

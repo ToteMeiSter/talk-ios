@@ -101,8 +101,8 @@ final class UnitNCTurnCertificateVerifierTest: XCTestCase {
 
     // MARK: - Certificates that must not be trusted
 
-    // The leaf is signed by a certificate with basicConstraints CA:FALSE
-    func testLeafSignedByNonCaIsNotTrusted() {
+    // The leaf is signed by a certificate with basicConstraints CA:FALSE, which is not trusted by the system
+    func testLeafSignedByUntrustedNonCaIsNotTrusted() {
         XCTAssertFalse(makeVerifier(hosts: ["turn.fixture.test"]).verify(Self.nonCaSignedLeaf))
     }
 
@@ -126,6 +126,71 @@ final class UnitNCTurnCertificateVerifierTest: XCTestCase {
         XCTAssertFalse(verifier.verify(Data([0x00, 0x01, 0x02, 0x03])))
         XCTAssertFalse(verifier.verify(Data("-----BEGIN CERTIFICATE-----".utf8)))
         XCTAssertFalse(verifier.verify(Self.letsencryptOrgLeaf.prefix(100)))
+    }
+
+    // MARK: - Non-CA signer with a trusted root (anchors are replaced by the fixture root, only for tests)
+
+    private func makeCertificate(_ data: Data) -> SecCertificate {
+        return SecCertificateCreateWithData(nil, data as CFData)!
+    }
+
+    private func makeAnchoredVerifier(hosts: [String], additional: [Data] = []) -> NCTurnCertificateVerifier {
+        return NCTurnCertificateVerifier(
+            hosts: hosts,
+            verifyDate: verifyDate,
+            allowsNetworkFetch: false,
+            anchors: [makeCertificate(Self.testRootCertificate)],
+            additionalCertificates: additional.map { makeCertificate($0) }
+        )
+    }
+
+    // Control check: the anchors seam works
+    func testLeafOfTestRootIsTrustedWithTestAnchor() {
+        XCTAssertTrue(makeAnchoredVerifier(hosts: ["turn.fixture.test"]).verify(Self.rootSignedNonCaLeaf))
+    }
+
+    func testLeafOfTestRootIsNotTrustedForOtherHost() {
+        XCTAssertFalse(makeAnchoredVerifier(hosts: ["other.fixture.test"]).verify(Self.rootSignedNonCaLeaf))
+    }
+
+    // The signer is available for the path and has a trusted root, but is CA:FALSE
+    func testLeafSignedByNonCaLeafIsNotTrustedWithTrustedRoot() {
+        let verifier = makeAnchoredVerifier(hosts: ["turn.fixture.test"], additional: [Self.rootSignedNonCaLeaf])
+
+        XCTAssertFalse(verifier.verify(Self.leafSignedByNonCaLeaf))
+    }
+
+    // MARK: - Evaluation order and online rate limit
+
+    // The first host does not match, the second does: the offline evaluation of all hosts comes before the online one
+    func testOfflineEvaluationOfAllHostsComesBeforeOnline() {
+        let verifier = NCTurnCertificateVerifier(hosts: ["turn.example.com", "letsencrypt.org"], verifyDate: verifyDate, allowsNetworkFetch: true)
+
+        XCTAssertTrue(verifier.verify(Self.letsencryptOrgLeaf))
+        XCTAssertEqual(verifier.onlineEvaluationCount, 0)
+    }
+
+    // Different certificates must not bypass the limit. The test anchors are set, so no system trust or network is needed
+    // to refuse them; the counter shows how many online evaluations were started.
+    func testOnlineEvaluationIsLimitedPerVerifier() {
+        let verifier = NCTurnCertificateVerifier(
+            hosts: ["turn.fixture.test"],
+            verifyDate: verifyDate,
+            allowsNetworkFetch: true,
+            anchors: [makeCertificate(Self.testRootCertificate)]
+        )
+
+        XCTAssertFalse(verifier.verify(Self.selfSignedLeaf))
+        XCTAssertFalse(verifier.verify(Self.fakeLetsEncryptIssuerLeaf))
+        XCTAssertFalse(verifier.verify(Self.nonCaSignedLeaf))
+        XCTAssertEqual(verifier.onlineEvaluationCount, 1)
+    }
+
+    func testOnlineEvaluationIsNotStartedWithoutNetworkPermission() {
+        let verifier = makeAnchoredVerifier(hosts: ["turn.fixture.test"])
+
+        XCTAssertFalse(verifier.verify(Self.selfSignedLeaf))
+        XCTAssertEqual(verifier.onlineEvaluationCount, 0)
     }
 
     // MARK: - Built-in intermediates
@@ -230,5 +295,43 @@ final class UnitNCTurnCertificateVerifierTest: XCTestCase {
         "/8Yn6Xmp5Ra1KIg4mDAPBgNVHRMBAf8EBTADAQH/MBwGA1UdEQQVMBOCEXR1cm4uZml4dHVyZS50",
         "ZXN0MAoGCCqGSM49BAMCA0cAMEQCIGwNqEpsaT4SwI8BQVKFqu3cRJL5Ur8thNCvW3IkuIk/AiAq",
         "FGaSmBSwx5nNbhcQb5w9IRJvE9r4mKx7hq5Llpawcg=="
+    ].joined())!
+
+    // Fixture root CA (CA:TRUE), used as the only anchor in some tests
+    private static let testRootCertificate = Data(base64Encoded: [
+        "MIIBnDCCAUOgAwIBAgIUQlf0NVDxwNCwQrFT0q1Ljhe20OAwCgYIKoZIzj0EAwIwHDEaMBgGA1UE",
+        "AwwRRml4dHVyZSBUZXN0IFJvb3QwHhcNMjYxMDA2MjA0ODM4WhcNMzYxMDAzMjA0ODM4WjAcMRow",
+        "GAYDVQQDDBFGaXh0dXJlIFRlc3QgUm9vdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMF99M+X",
+        "5tM1jkIO+55n3bz+e3tgNToSUHF6oeOx4XuyEgRPPRbN5Lc1YWfWehCCbTzLEniMYFg5Tt2TDKf7",
+        "20ijYzBhMB0GA1UdDgQWBBR1LjGt1A2NZancqZk9Qit8VIIN3TAfBgNVHSMEGDAWgBR1LjGt1A2N",
+        "ZancqZk9Qit8VIIN3TAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQD",
+        "AgNHADBEAiBngYA/Jam2HfOhOoegzxRqv33X8rchJVn3BKQRIzBG2gIgL3zNoPRTP82c7lc8Pv0E",
+        "uVMQJLDgmtI6x+oylKyAC4M="
+    ].joined())!
+
+    // turn.fixture.test, CA:FALSE (with keyCertSign), signed by the fixture root
+    private static let rootSignedNonCaLeaf = Data(base64Encoded: [
+        "MIIByjCCAW+gAwIBAgIURcQOqU8eXEftRZPpJK8Xa6dtbfMwCgYIKoZIzj0EAwIwHDEaMBgGA1UE",
+        "AwwRRml4dHVyZSBUZXN0IFJvb3QwHhcNMjYxMDA2MjA0ODQyWhcNMjcwODAyMjA0ODQyWjAcMRow",
+        "GAYDVQQDDBF0dXJuLmZpeHR1cmUudGVzdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABDpywyYg",
+        "yaS5wBCyEvmDy1e8c3Z1gGP2qQhPyOM6vy7Q3Gn3WuAu//VEZ1j5wcC7cSroB+elUYBHEdOy24B+",
+        "ToSjgY4wgYswHAYDVR0RBBUwE4IRdHVybi5maXh0dXJlLnRlc3QwCQYDVR0TBAIwADATBgNVHSUE",
+        "DDAKBggrBgEFBQcDATALBgNVHQ8EBAMCAoQwHQYDVR0OBBYEFMZ5WtNveZzJGj6t5QYaOhLvXRdK",
+        "MB8GA1UdIwQYMBaAFHUuMa3UDY1lqdypmT1CK3xUgg3dMAoGCCqGSM49BAMCA0kAMEYCIQCcMPu9",
+        "eedU1fs8QlamBG2khrauqtxKZscZW/TWUunflQIhAImwc04cVmbyMqVrc4vozldYYa+kCuf54xCJ",
+        "+WS60sXX"
+    ].joined())!
+
+    // turn.fixture.test, signed by rootSignedNonCaLeaf
+    private static let leafSignedByNonCaLeaf = Data(base64Encoded: [
+        "MIIByTCCAW+gAwIBAgIUX+gzFmJcZrjSTNr6uT0mVTRSXrMwCgYIKoZIzj0EAwIwHDEaMBgGA1UE",
+        "AwwRdHVybi5maXh0dXJlLnRlc3QwHhcNMjYxMDA2MjA0ODQyWhcNMjcwODAyMjA0ODQyWjAcMRow",
+        "GAYDVQQDDBF0dXJuLmZpeHR1cmUudGVzdDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABDkrKdhy",
+        "3mf+I8BxYpUydm29HHIb/0yIwAAmVnx5TUEgJb9jVTdPI83n2OwH+rZmrkMAoUBukdEm1wcSyRhI",
+        "gHOjgY4wgYswHAYDVR0RBBUwE4IRdHVybi5maXh0dXJlLnRlc3QwCQYDVR0TBAIwADATBgNVHSUE",
+        "DDAKBggrBgEFBQcDATALBgNVHQ8EBAMCB4AwHQYDVR0OBBYEFBSQwkBiXEzmM+hsX9gFt2VBZKTq",
+        "MB8GA1UdIwQYMBaAFMZ5WtNveZzJGj6t5QYaOhLvXRdKMAoGCCqGSM49BAMCA0gAMEUCIQDi4+k9",
+        "W7Q8yfu1doaIJrrFCWDSsLnW8Vah33rnfd9J1wIgF//zvrH1XOjTCBon1n+AZx7+WgKprkMi/nXs",
+        "RaPgBOk="
     ].joined())!
 }

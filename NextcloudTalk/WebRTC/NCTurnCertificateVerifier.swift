@@ -20,6 +20,11 @@ import WebRTC
 /// store as the only source of trust. The built-in Let's Encrypt intermediates are only a hint to build the path:
 /// they are never trust anchors, and the anchors are never changed. If the system does not trust the chain, the
 /// result is `false`, as it was without this verifier.
+///
+/// The evaluation without network runs first, for all hosts. The evaluation with network (fetching of missing
+/// intermediates via AIA) is a reserve for a rotation of the Let's Encrypt intermediates and for CAs without built-in
+/// intermediates. WebRTC calls `verify` synchronously on its shared network thread, so the online evaluation runs
+/// only if the offline one failed for all hosts, and at most once per minute per verifier, whatever the certificate is.
 final class NCTurnCertificateVerifier: NSObject, RTCSSLCertificateVerifier {
 
     private struct CacheKey: Hashable {
@@ -29,10 +34,12 @@ final class NCTurnCertificateVerifier: NSObject, RTCSSLCertificateVerifier {
 
     private struct CacheEntry {
         let isTrusted: Bool
-        let expiresAt: Date?
+        let expiresAt: Date
     }
 
+    private static let positiveCacheLifetime: TimeInterval = 60 * 60
     private static let negativeCacheLifetime: TimeInterval = 60
+    private static let onlineEvaluationInterval: TimeInterval = 60
     private static let maxCacheEntries = 64
 
     /// Used only to build the certification path, see `NCTurnIntermediateCertificates`
@@ -45,17 +52,27 @@ final class NCTurnCertificateVerifier: NSObject, RTCSSLCertificateVerifier {
 
     private let verifyDate: Date?
     private let isNetworkFetchAllowed: Bool
+    private let testAnchors: [SecCertificate]?
+    private let testAdditionalCertificates: [SecCertificate]
     private let lock = NSLock()
     private var cache: [CacheKey: CacheEntry] = [:]
+    private var lastOnlineEvaluation: Date?
+
+    /// Number of started online evaluations. For tests.
+    private(set) var onlineEvaluationCount = 0
 
     /// - Parameters:
     ///   - hosts: Host names (or IP addresses) of the TURNS servers. Without hosts nothing is trusted.
-    ///   - verifyDate: Date to evaluate the chain at. `nil` means now. For tests.
-    ///   - allowsNetworkFetch: Allows a second evaluation with fetching of missing intermediates (AIA). For tests.
-    init(hosts: [String], verifyDate: Date? = nil, allowsNetworkFetch: Bool = true) {
+    ///   - verifyDate: Date to evaluate the chain at. `nil` means now. Only for tests.
+    ///   - allowsNetworkFetch: Allows the rate-limited online evaluation. Only for tests.
+    ///   - anchors: Replaces the system trust store with these anchors. Only for tests, never set it in production code.
+    ///   - additionalCertificates: Untrusted certificates for building the path, like the intermediates. Only for tests.
+    init(hosts: [String], verifyDate: Date? = nil, allowsNetworkFetch: Bool = true, anchors: [SecCertificate]? = nil, additionalCertificates: [SecCertificate] = []) {
         self.hosts = hosts
         self.verifyDate = verifyDate
         self.isNetworkFetchAllowed = allowsNetworkFetch
+        self.testAnchors = anchors
+        self.testAdditionalCertificates = additionalCertificates
 
         super.init()
     }
@@ -118,8 +135,35 @@ final class NCTurnCertificateVerifier: NSObject, RTCSSLCertificateVerifier {
             return false
         }
 
-        for host in hosts where isTrusted(certificate, derCertificate: derCertificate, host: host) {
+        var uncachedHosts: [String] = []
+
+        for host in hosts {
+            switch cachedResult(for: CacheKey(derCertificate: derCertificate, host: host)) {
+            case .some(true): return true
+            case .none: uncachedHosts.append(host)
+            case .some(false): break
+            }
+        }
+
+        // All hosts have a cached refusal, nothing new to log
+        guard !uncachedHosts.isEmpty else { return false }
+
+        // Offline evaluation for all hosts first
+        for host in uncachedHosts where evaluate(certificate, host: host, networkFetchAllowed: false) {
+            store(true, for: CacheKey(derCertificate: derCertificate, host: host))
             return true
+        }
+
+        // Online evaluation only if the offline one failed for all hosts, and rate limited
+        if reserveOnlineEvaluation() {
+            for host in uncachedHosts where evaluate(certificate, host: host, networkFetchAllowed: true) {
+                store(true, for: CacheKey(derCertificate: derCertificate, host: host))
+                return true
+            }
+        }
+
+        for host in uncachedHosts {
+            store(false, for: CacheKey(derCertificate: derCertificate, host: host))
         }
 
         NCLog.log("NCTurnCertificateVerifier: Certificate of the TURNS server is not trusted by the system (\(hosts.count) host(s))")
@@ -129,37 +173,22 @@ final class NCTurnCertificateVerifier: NSObject, RTCSSLCertificateVerifier {
 
     // MARK: - Private
 
-    private func isTrusted(_ certificate: SecCertificate, derCertificate: Data, host: String) -> Bool {
-        let key = CacheKey(derCertificate: derCertificate, host: host)
-
-        if let cached = cachedResult(for: key) {
-            return cached
-        }
-
-        // First without the network, as WebRTC calls us synchronously on its network thread. A second evaluation
-        // with the network (AIA) is only a reserve for a rotation of the Let's Encrypt intermediates.
-        var result = evaluate(certificate, host: host, networkFetchAllowed: false)
-
-        if !result, isNetworkFetchAllowed {
-            result = evaluate(certificate, host: host, networkFetchAllowed: true)
-        }
-
-        store(result, for: key)
-
-        return result
-    }
-
     private func evaluate(_ certificate: SecCertificate, host: String, networkFetchAllowed: Bool) -> Bool {
         let policy = SecPolicyCreateSSL(true, host as CFString)
         var createdTrust: SecTrust?
 
-        let certificates = [certificate] + NCTurnCertificateVerifier.intermediateCertificates
+        let certificates = [certificate] + testAdditionalCertificates + NCTurnCertificateVerifier.intermediateCertificates
 
         guard SecTrustCreateWithCertificates(certificates as CFArray, policy, &createdTrust) == errSecSuccess, let trust = createdTrust else {
             return false
         }
 
-        // No anchors are set: only the system trust store is used
+        // Without test anchors no anchors are set: only the system trust store is used
+        if let testAnchors {
+            _ = SecTrustSetAnchorCertificates(trust, testAnchors as CFArray)
+            _ = SecTrustSetAnchorCertificatesOnly(trust, true)
+        }
+
         if let verifyDate {
             _ = SecTrustSetVerifyDate(trust, verifyDate as CFDate)
         }
@@ -169,13 +198,32 @@ final class NCTurnCertificateVerifier: NSObject, RTCSSLCertificateVerifier {
         return SecTrustEvaluateWithError(trust, nil)
     }
 
+    /// Allows an online evaluation at most once per `onlineEvaluationInterval`, whatever the certificate is
+    private func reserveOnlineEvaluation() -> Bool {
+        guard isNetworkFetchAllowed else { return false }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        let now = Date()
+
+        if let lastOnlineEvaluation, now.timeIntervalSince(lastOnlineEvaluation) < NCTurnCertificateVerifier.onlineEvaluationInterval {
+            return false
+        }
+
+        lastOnlineEvaluation = now
+        onlineEvaluationCount += 1
+
+        return true
+    }
+
     private func cachedResult(for key: CacheKey) -> Bool? {
         lock.lock()
         defer { lock.unlock() }
 
         guard let entry = cache[key] else { return nil }
 
-        if let expiresAt = entry.expiresAt, expiresAt < Date() {
+        if entry.expiresAt < Date() {
             cache[key] = nil
             return nil
         }
@@ -191,7 +239,7 @@ final class NCTurnCertificateVerifier: NSObject, RTCSSLCertificateVerifier {
             cache.removeAll()
         }
 
-        let expiresAt = isTrusted ? nil : Date().addingTimeInterval(NCTurnCertificateVerifier.negativeCacheLifetime)
-        cache[key] = CacheEntry(isTrusted: isTrusted, expiresAt: expiresAt)
+        let lifetime = isTrusted ? NCTurnCertificateVerifier.positiveCacheLifetime : NCTurnCertificateVerifier.negativeCacheLifetime
+        cache[key] = CacheEntry(isTrusted: isTrusted, expiresAt: Date().addingTimeInterval(lifetime))
     }
 }
