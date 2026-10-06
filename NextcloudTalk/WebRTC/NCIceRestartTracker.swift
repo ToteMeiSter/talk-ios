@@ -14,6 +14,11 @@ struct NCIceRestartTracker {
     /// Time in seconds a peer needs to stay "disconnected" before ICE is restarted
     static let disconnectedDelay: TimeInterval = 5
 
+    /// Time in seconds after a failed ICE connection, in which the connection needs to be established again
+    /// (by an ICE restart of us or of the other side). A restart usually takes a few seconds, so 15s leaves room
+    /// for slow networks, but is still short enough to not leave the user in a silent call.
+    static let recoveryTimeout: TimeInterval = 15
+
     private(set) var attempts = 0
 
     var isExhausted: Bool {
@@ -30,6 +35,18 @@ struct NCIceRestartTracker {
 
         attempts += 1
         return true
+    }
+
+    /// The recovery watchdog is armed on the first failure and stays armed until the connection is established again
+    static func shouldArmRecoveryWatchdog(hasMCU: Bool, isFailed: Bool, isAlreadyArmed: Bool) -> Bool {
+        return !hasMCU && isFailed && !isAlreadyArmed
+    }
+
+    /// When the watchdog fires and the connection is still not established, the ICE restart did not help
+    /// (we are not the offerer, the limit was reached, or the offer or its answer got lost).
+    /// Then we fall back to joining the call again, which is what happened before ICE restarts.
+    static func shouldFallBackToRejoin(hasMCU: Bool, isConnected: Bool) -> Bool {
+        return !hasMCU && !isConnected
     }
 
     /// To be called when the connection (re-)established

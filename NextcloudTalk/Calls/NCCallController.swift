@@ -1985,10 +1985,23 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         }
     }
 
-    /// Only the connection of our own publisher (with a MCU) tells if the call works, a failed publisher is what rejoins
-    /// the call. The publisher of a screen share says nothing about the camera and the microphone.
+    func peerConnectionIceRecoveryTimedOut(_ peerConnection: NCPeerConnection) {
+        // Without a MCU the ICE restart did not bring the peer back. With the external signaling the call is joined
+        // again with a new session, like it happened before ICE restarts. The internal signaling never reacted on
+        // failed peers, so nothing is done there.
+        guard externalSignalingController != nil else { return }
+
+        NCLog.log("ICE of peer \(peerConnection.peerId) did not recover")
+        self.rejoinAfterIceFailure()
+    }
+
+    /// With a MCU the connection of our own publisher tells if the call works, without a MCU the connections to the
+    /// other participants do. The state of the others says nothing about the publisher and vice versa.
     private func isPeerDecidingIceRecovery(_ peerConnection: NCPeerConnection) -> Bool {
-        return peerConnection.isMCUPublisherPeer && !peerConnection.isOwnScreensharePeer
+        let hasMCU = self.externalSignalingController?.hasMCU ?? false
+
+        // The publisher of a screen share is a publisher too, but it says nothing about the camera and the microphone
+        return hasMCU ? (peerConnection.isMCUPublisherPeer && !peerConnection.isOwnScreensharePeer) : !peerConnection.isDummyPeer
     }
 
     /// Joins the call again with a new session after ICE failed for good. A connection which fails again and again
