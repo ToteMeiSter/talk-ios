@@ -23,6 +23,7 @@ public class CallKitCall: NSObject {
     public var token: String?
     public var displayName: String?
     public var accountId: String?
+    public var notificationId: Int = 0
     public var update: CXCallUpdate?
     public var reportedWhileInCall: Bool = false
     public var isRinging: Bool = false
@@ -52,6 +53,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     private lazy var callController = CXCallController()
 
     private var startCallRetried: Bool = false
+    private var deletedNotifications = CallKitDeletedNotifications()
 
     override init() {
         let configuration = CXProviderConfiguration()
@@ -109,7 +111,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         self.provider.configuration.includesCallsInRecents = value
     }
 
-    public func reportIncomingCall(_ token: String, withDisplayName displayName: String, forAccountId accountId: String) {
+    public func reportIncomingCall(_ token: String, withDisplayName displayName: String, forAccountId accountId: String, notificationId: Int = 0) {
         var protectedDataAvailable = "available"
 
         if !UIApplication.shared.isProtectedDataAvailable {
@@ -159,6 +161,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         call.token = token
         call.displayName = displayName
         call.accountId = accountId
+        call.notificationId = notificationId
         call.update = update
         call.reportedWhileInCall = ongoingCalls
         call.isRinging = true
@@ -184,6 +187,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             // Add call to calls array
             self.calls[callUUID] = call
 
+            // The "delete" push for this call arrived before the VoIP push (answered elsewhere / dismissed)
+            if notificationId != 0, self.deletedNotifications.contains(notificationId, accountId: accountId) {
+                NCLog.log("Incoming call for token \(token) was already deleted on the server, ending it")
+                self.endCall(withUUID: callUUID)
+                return
+            }
+
             // Add hangUpTimer to timers array
             let hangUpTimer = Timer.scheduledTimer(withTimeInterval: CallKitManager.maxRingingTimeSeconds, repeats: false) { [weak self] _ in
                 self?.endCallWithMissedCallNotification(for: call)
@@ -198,6 +208,35 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             // Get call info from server
             self.getCallInfo(for: call)
+        }
+    }
+
+    /// Ends ringing calls whose server notification was removed (`delete`, `delete-multiple`, `delete-all` push).
+    /// The reason can't be told from the push (answered on another device, dismissed, ...), so this ends the call
+    /// like the call state polling does. Calls that were already answered are not touched.
+    public func cancelIncomingCalls(forDeletePushNotification pushNotification: NCPushNotification) {
+        let notificationIds: [Int]?
+
+        switch pushNotification.type {
+        case .delete:
+            notificationIds = [pushNotification.notificationId]
+        case .deleteMultiple:
+            notificationIds = (pushNotification.notificationIds as? [NSNumber])?.map { $0.intValue } ?? []
+        case .deleteAll:
+            notificationIds = nil
+        default:
+            return
+        }
+
+        let accountId = pushNotification.accountId
+
+        if let notificationIds {
+            self.deletedNotifications.record(notificationIds, accountId: accountId)
+        }
+
+        for uuid in CallKitCallCancellation.uuidsToCancel(in: self.calls, accountId: accountId, notificationIds: notificationIds) {
+            NCLog.log("Ending incoming call \(uuid) for account \(accountId) because of a delete push notification")
+            self.endCall(withUUID: uuid)
         }
     }
 

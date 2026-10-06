@@ -61,6 +61,9 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
             return
         }
 
+        // Delete pushes also remove a still ringing incoming call (e.g. answered on another device)
+        CallKitManager.sharedInstance().cancelIncomingCalls(forDeletePushNotification: pushNotification)
+
         switch pushNotification.type {
         case .delete:
             self.removeNotification(withNotificationIds: [NSNumber(value: pushNotification.notificationId)], forAccountId: pushNotification.accountId, withCompletionBlock: nil)
@@ -145,7 +148,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
 
     public func showIncomingCall(forPushNotification pushNotification: NCPushNotification) {
         if CallKitManager.isCallKitAvailable() {
-            CallKitManager.sharedInstance().reportIncomingCall(pushNotification.roomToken, withDisplayName: NSLocalizedString("Incoming call", comment: ""), forAccountId: pushNotification.accountId)
+            CallKitManager.sharedInstance().reportIncomingCall(pushNotification.roomToken, withDisplayName: NSLocalizedString("Incoming call", comment: ""), forAccountId: pushNotification.accountId, notificationId: pushNotification.notificationId)
         } else {
             CallKitManager.sharedInstance().reportIncomingCallForNonCallKitDevices(withPushNotification: pushNotification)
         }
