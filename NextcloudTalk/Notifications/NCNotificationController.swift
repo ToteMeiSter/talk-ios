@@ -310,7 +310,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
                     return
                 }
 
-                NCAPIController.sharedInstance().checkNotificationExistance(withIds: notificationIdsOnDevice.map { $0.intValue }, forAccount: account) { notificationIds, error in
+                let existanceTask = NCAPIController.sharedInstance().checkNotificationExistance(withIds: notificationIdsOnDevice.map { $0.intValue }, forAccount: account) { notificationIds, error in
                     if error != nil {
                         notificationsGroup.leave()
                         return
@@ -332,6 +332,11 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
                     self.removeNotification(withNotificationIds: notificationIdsOnDevice, forAccountId: account.accountId) {
                         notificationsGroup.leave()
                     }
+                }
+
+                // No request was created (e.g. no API session for the account), so the completion block above will never be called
+                if existanceTask == nil {
+                    notificationsGroup.leave()
                 }
             }
         }
