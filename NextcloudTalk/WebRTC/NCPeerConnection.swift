@@ -75,6 +75,9 @@ public class NCPeerConnection: NSObject {
     private var remoteDataChannel: RTCDataChannel?
     private var remoteStream: RTCMediaStream?
 
+    // Checks the certificate of TURNS servers against the system trust store, must live as long as the peer connection
+    private var turnCertificateVerifier: NCTurnCertificateVerifier?
+
     init(sessionId: String, sid: String?, andICEServers iceServers: [Any]?, forAudioOnlyCall audioOnly: Bool) {
         WebRTCCommon.shared.assertQueue()
 
@@ -93,7 +96,13 @@ public class NCPeerConnection: NSObject {
         super.init()
 
         let peerConnectionFactory = WebRTCCommon.shared.peerConnectionFactory
-        self.peerConnection = peerConnectionFactory.peerConnection(with: config, constraints: constraints, delegate: self)
+
+        if let verifier = NCTurnCertificateVerifier(iceServers: config.iceServers) {
+            self.turnCertificateVerifier = verifier
+            self.peerConnection = peerConnectionFactory.peerConnection(with: config, constraints: constraints, certificateVerifier: verifier, delegate: self)
+        } else {
+            self.peerConnection = peerConnectionFactory.peerConnection(with: config, constraints: constraints, delegate: self)
+        }
     }
 
     convenience init?(forPublisherWithSessionId sessionId: String, andICEServers iceServers: [Any]?, forAudioOnlyCall audioOnly: Bool) {
