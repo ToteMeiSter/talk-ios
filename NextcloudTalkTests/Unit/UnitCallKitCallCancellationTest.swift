@@ -86,4 +86,29 @@ final class UnitCallKitCallCancellationTest: XCTestCase {
         XCTAssertFalse(deleted.contains(10, accountId: "a1", at: now.addingTimeInterval(CallKitDeletedNotifications.retentionSeconds + 6)))
         XCTAssertTrue(deleted.contains(11, accountId: "a1", at: now.addingTimeInterval(CallKitDeletedNotifications.retentionSeconds + 6)))
     }
+
+    func testRecalledCallDeleteDoesNotTouchNewCallOrRunningCall() {
+        // Caller called again: old ringing call (nid 10), new ringing call (nid 11) and an already answered call
+        let (oldUUID, old) = makeCall(accountId: "a1", notificationId: 10)
+        let (newUUID, new) = makeCall(accountId: "a1", notificationId: 11)
+        let (runningUUID, running) = makeCall(accountId: "a1", notificationId: 11, isRinging: false)
+        let calls = [oldUUID: old, newUUID: new, runningUUID: running]
+
+        XCTAssertEqual(CallKitCallCancellation.uuidsToCancel(in: calls, accountId: "a1", notificationIds: [10]), [oldUUID])
+    }
+
+    func testDeleteMultiplePushIsParsedToNotificationIds() {
+        let json = "{\"delete-multiple\":true,\"nids\":[10,12]}"
+        let pushNotification = NCPushNotification(fromDecryptedString: json, withAccountId: "a1")
+
+        XCTAssertEqual(pushNotification?.type, .deleteMultiple)
+        XCTAssertEqual((pushNotification?.notificationIds as? [NSNumber])?.map { $0.intValue }, [10, 12])
+    }
+
+    func testDeletePushIsParsedToNotificationId() {
+        let pushNotification = NCPushNotification(fromDecryptedString: "{\"delete\":true,\"nid\":10}", withAccountId: "a1")
+
+        XCTAssertEqual(pushNotification?.type, .delete)
+        XCTAssertEqual(pushNotification?.notificationId, 10)
+    }
 }
