@@ -139,11 +139,9 @@ public enum NCExternalSignalingSendMessageStatus {
         wsRequest.setValue(NCAppBranding.userAgent(), forHTTPHeaderField: "User-Agent")
 
         if self.resumeId != nil {
-            let currentTimestamp = Date().timeIntervalSince1970
-
-            // We are only allowed to resume a session 30s after disconnect
-            if self.disconnectTime == nil || (currentTimestamp - (self.disconnectTime ?? 0)) >= 30 {
-                NCLog.log("We have a resumeId, but we disconnected outside of the 30s resume window. Connecting without resumeId.")
+            // We are only allowed to resume a session shortly after the connection was lost
+            if !NCSignalingResumePolicy.canResume(resumeId: self.resumeId, connectionLostTime: self.disconnectTime, now: Date().timeIntervalSince1970) {
+                NCLog.log("We have a resumeId, but the connection was lost outside of the resume window. Connecting without resumeId.")
                 self.resumeId = nil
             }
         }
@@ -162,6 +160,10 @@ public enum NCExternalSignalingSendMessageStatus {
         guard self.reconnectTimer == nil else { return }
 
         NCLog.log("Reconnecting to: \(self.serverUrl)")
+
+        // Remember when the connection was lost, so we can try to resume the session (like the web client does).
+        // Keep the first moment, as failed reconnect attempts end up here again.
+        self.disconnectTime = NCSignalingResumePolicy.connectionLostTime(existing: self.disconnectTime, now: Date().timeIntervalSince1970)
 
         self.resetWebSocket()
 
@@ -342,6 +344,9 @@ public enum NCExternalSignalingSendMessageStatus {
         }
 
         self.resumeId = helloDict["resumeid"] as? String
+
+        // We are connected again, the next connection loss starts a new resume window
+        self.disconnectTime = nil
 
         let sessionChanged = self.sessionId != newSessionId
         self.sessionId = newSessionId
