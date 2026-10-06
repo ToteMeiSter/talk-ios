@@ -726,6 +726,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
     public func providerDidReset(_ provider: CXProvider) {
         NSLog("Provider:didReset")
+
+        // CallKit dropped all calls, so our state must not keep timers and calls that no longer exist
+        self.hangUpTimers.values.forEach { $0.invalidate() }
+        self.hangUpTimers.removeAll()
+        self.callStateTimers.values.forEach { $0.invalidate() }
+        self.callStateTimers.removeAll()
+        self.calls.removeAll()
     }
 
     public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
