@@ -205,9 +205,11 @@ public enum NCExternalSignalingSendMessageStatus {
     func disconnect() {
         NCLog.log("Disconnecting from: \(self.serverUrl)")
 
-        self.disconnectTime = Date().timeIntervalSince1970
-
         DispatchQueue.main.async {
+            // Keep an earlier moment of a lost connection, so the resume window is not extended.
+            // `disconnectTime` is only accessed on the main thread.
+            self.disconnectTime = NCSignalingResumePolicy.connectionLostTime(existing: self.disconnectTime, now: Date().timeIntervalSince1970)
+
             self.invalidateReconnectionTimer()
             self.resetWebSocket()
         }
@@ -346,7 +348,9 @@ public enum NCExternalSignalingSendMessageStatus {
         self.resumeId = helloDict["resumeid"] as? String
 
         // We are connected again, the next connection loss starts a new resume window
-        self.disconnectTime = nil
+        DispatchQueue.main.async {
+            self.disconnectTime = nil
+        }
 
         let sessionChanged = self.sessionId != newSessionId
         self.sessionId = newSessionId
