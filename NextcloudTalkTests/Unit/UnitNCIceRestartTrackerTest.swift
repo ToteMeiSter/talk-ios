@@ -61,4 +61,22 @@ final class UnitNCIceRestartTrackerTest: XCTestCase {
         XCTAssertTrue(tracker.startRestart(hasMCU: false, isOfferer: true, isSignalingStable: true))
         XCTAssertEqual(tracker.attempts, 1)
     }
+
+    func testWatchdogIsArmedOnceOnFailureWithoutMCU() {
+        XCTAssertTrue(NCIceRestartTracker.shouldArmRecoveryWatchdog(hasMCU: false, isFailed: true, isAlreadyArmed: false))
+        XCTAssertFalse(NCIceRestartTracker.shouldArmRecoveryWatchdog(hasMCU: false, isFailed: true, isAlreadyArmed: true))
+        XCTAssertFalse(NCIceRestartTracker.shouldArmRecoveryWatchdog(hasMCU: false, isFailed: false, isAlreadyArmed: false))
+        XCTAssertFalse(NCIceRestartTracker.shouldArmRecoveryWatchdog(hasMCU: true, isFailed: true, isAlreadyArmed: false))
+    }
+
+    func testWatchdogFallsBackToRejoinOnlyIfStillNotConnected() {
+        // A restart that succeeded in time must not trigger a rejoin
+        XCTAssertFalse(NCIceRestartTracker.shouldFallBackToRejoin(hasMCU: false, isConnected: true))
+        XCTAssertTrue(NCIceRestartTracker.shouldFallBackToRejoin(hasMCU: false, isConnected: false))
+        XCTAssertFalse(NCIceRestartTracker.shouldFallBackToRejoin(hasMCU: true, isConnected: false))
+    }
+
+    func testRecoveryTimeoutIsLongerThanARestartAndTheDisconnectDelay() {
+        XCTAssertGreaterThan(NCIceRestartTracker.recoveryTimeout, NCIceRestartTracker.disconnectedDelay)
+    }
 }
