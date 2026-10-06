@@ -736,7 +736,19 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         self.hangUpTimers.removeAll()
         self.callStateTimers.values.forEach { $0.invalidate() }
         self.callStateTimers.removeAll()
+
+        // Inform the others (call screen, pending calls) like a regular end of the call
+        let droppedCalls = Array(self.calls.values)
         self.calls.removeAll()
+
+        for call in droppedCalls {
+            call.isRinging = false
+
+            if let token = call.token {
+                let userInfo: [String: Any] = ["roomToken": token]
+                NotificationCenter.default.post(name: .CallKitManagerDidEndCall, object: self, userInfo: userInfo)
+            }
+        }
     }
 
     public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
