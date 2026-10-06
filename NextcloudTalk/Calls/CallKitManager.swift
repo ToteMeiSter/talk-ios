@@ -147,6 +147,8 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             }
         }
 
+        CallAccountMemory.remember(token: token, accountId: accountId)
+
         let update = self.defaultCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: token)
         update.localizedCallerName = displayName
@@ -471,6 +473,8 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             NCNotificationController.sharedInstance().show(.endToEndEncryptionUnsupported, withUserInfo: userInfo)
             return
         }
+
+        CallAccountMemory.remember(token: token, accountId: accountId)
 
         if !CallKitManager.isCallKitAvailable() {
             let userInfo: [String: Any] = [

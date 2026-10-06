@@ -283,7 +283,8 @@ public typealias PresentCallControllerCompletionBlock = () -> Void
     }
 
     func presentCallKitCallInRoom(_ token: String, withVideoEnabled video: Bool) {
-        var userInfo: [String: Any] = ["roomToken": token]
+        // Select (and switch to) the account before waiting for the app state, so we wait for the right account
+        var userInfo: [String: Any] = ["roomToken": token, "accountId": accountIdForCallKitCall(inRoom: token)]
         userInfo["isVideoEnabled"] = video
         if NCConnectionController.shared.appState != .ready {
             waitingForServerCapabilities = true
@@ -296,22 +297,27 @@ public typealias PresentCallControllerCompletionBlock = () -> Void
     func startCallKitCall(_ callDict: [String: Any]) {
         guard let roomToken = callDict["roomToken"] as? String else { return }
         let video = (callDict["isVideoEnabled"] as? Bool) ?? false
-        let activeAccountId = NCDatabaseManager.sharedInstance().activeAccount().accountId
-        var accountId = activeAccountId
+        let accountId = (callDict["accountId"] as? String) ?? NCDatabaseManager.sharedInstance().activeAccount().accountId
+        NCRoomsManager.shared.joinCall(withCallToken: roomToken, withAccountId: accountId, withVideo: video, asInitiator: true, silently: false, recordingConsent: false)
+    }
 
-        // Calls from Recents only carry the token, so use the account that owns the conversation (see #2588)
-        let resolution = CallAccountResolver.resolve(activeAccountId: activeAccountId, accountIdsWithToken: NCDatabaseManager.sharedInstance().accountIds(withRoomToken: roomToken))
+    /// Calls from Recents only carry the token, so use the account that owns the conversation (see #2588)
+    /// and make it the active account.
+    private func accountIdForCallKitCall(inRoom token: String) -> String {
+        let activeAccountId = NCDatabaseManager.sharedInstance().activeAccount().accountId
+        let resolution = CallAccountResolver.resolve(activeAccountId: activeAccountId,
+                                                     accountIdsWithToken: NCDatabaseManager.sharedInstance().accountIds(withRoomToken: token),
+                                                     rememberedAccountId: CallAccountMemory.rememberedAccountId(forToken: token))
         if resolution.isAmbiguous {
             NCLog.log("Call from Recents: token is known by multiple accounts, using \(resolution.accountId)")
         }
 
         // Don't change the account while another call is ongoing
-        if resolution.accountId != activeAccountId, CallKitManager.sharedInstance().calls.isEmpty {
-            NCRoomsManager.shared.checkForAccountChange(resolution.accountId)
-            accountId = resolution.accountId
-        }
+        let isCallOngoing = !CallKitManager.shared.calls.isEmpty || NCRoomsManager.shared.callViewController != nil
+        guard resolution.accountId != activeAccountId, !isCallOngoing else { return activeAccountId }
 
-        NCRoomsManager.shared.joinCall(withCallToken: roomToken, withAccountId: accountId, withVideo: video, asInitiator: true, silently: false, recordingConsent: false)
+        NCRoomsManager.shared.checkForAccountChange(resolution.accountId)
+        return resolution.accountId
     }
 
     func presentChatForURL(_ urlComponents: NSURLComponents) {
