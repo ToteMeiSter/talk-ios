@@ -105,6 +105,10 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         return nil
     }
 
+    public func hasCall(forToken token: String) -> Bool {
+        return self.call(forToken: token) != nil
+    }
+
     // MARK: - Actions
 
     public func setIncludeInRecents(toValue value: Bool) {
@@ -683,6 +687,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         }
     }
 
+    public func endAnsweredCall(withToken token: String) {
+        guard let call = self.call(forToken: token) else { return }
+
+        // The user accepted the call but we were not able to show it, so make sure the user is informed (also when in background)
+        self.endCallWithMissedCallNotification(for: call)
+    }
+
     private func endCall(withUUID uuid: UUID?) {
         guard let uuid, let call = self.calls[uuid], let callUUID = call.uuid else { return }
 
@@ -719,6 +730,25 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
     public func providerDidReset(_ provider: CXProvider) {
         NSLog("Provider:didReset")
+
+        // CallKit dropped all calls, so our state must not keep timers and calls that no longer exist
+        self.hangUpTimers.values.forEach { $0.invalidate() }
+        self.hangUpTimers.removeAll()
+        self.callStateTimers.values.forEach { $0.invalidate() }
+        self.callStateTimers.removeAll()
+
+        // Inform the others (call screen, pending calls) like a regular end of the call
+        let droppedCalls = Array(self.calls.values)
+        self.calls.removeAll()
+
+        for call in droppedCalls {
+            call.isRinging = false
+
+            if let token = call.token {
+                let userInfo: [String: Any] = ["roomToken": token]
+                NotificationCenter.default.post(name: .CallKitManagerDidEndCall, object: self, userInfo: userInfo)
+            }
+        }
     }
 
     public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {

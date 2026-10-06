@@ -35,6 +35,13 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private static let statusCodeFailedToJoinExternal = 997
     private static let statusCodeShouldIgnoreAttemptButJoinedSuccessfully = 998
     private static let statusCodeIgnoreJoinAttempt = 999
+    private static let answeredCallReadyTimeoutSeconds: TimeInterval = 30
+
+    private struct PendingAnsweredCall {
+        let token: String
+        let accountId: String
+        let hasVideo: Bool
+    }
 
     public var chatViewController: ChatViewController?
     public var callViewController: CallViewController?
@@ -52,6 +59,8 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private var pendingToStartCallToken: String?
     private var pendingToStartCallAccountId: String?
     private var pendingToStartCallHasVideo: Bool = false
+    private var pendingAnsweredCall: PendingAnsweredCall?
+    private var pendingAnsweredCallTimeout: DispatchWorkItem?
     private var highlightMessageDict: [AnyHashable: Any]?
     private var showThreadPushNotification: NCPushNotification?
     private var pendingPrivateReplyInternalId: String?
@@ -75,6 +84,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(joinOrCreateChatWithURL(notification:)), name: NSNotification.Name.NCURLWantsToOpenConversation, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(joinChatHighlightingMessage(notification:)), name: NSNotification.Name.NCPresentChatHighlightingMessage, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(connectionStateHasChanged(notification:)), name: NSNotification.Name.NCConnectionStateHasChangedNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appStateHasChanged(notification:)), name: NSNotification.Name.NCAppStateHasChangedNotification, object: nil)
     }
 
     deinit {
@@ -644,7 +654,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         if let pendingToStartCallToken = self.pendingToStartCallToken, let pendingToStartCallAccountId = self.pendingToStartCallAccountId {
             // Pending calls can only happen when answering a new call. That's why we start with video disabled at start and in voice chat mode.
             // We also can start call silently because we are joining an already started call so no need to notify.
-            self.startCall(withToken: pendingToStartCallToken, withAccountId: pendingToStartCallAccountId, withVideo: pendingToStartCallHasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true)
+            self.answerCall(withToken: pendingToStartCallToken, withAccountId: pendingToStartCallAccountId, withVideo: pendingToStartCallHasVideo)
             self.pendingToStartCallToken = nil
         }
     }
@@ -744,6 +754,17 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // MARK: - Notifications
 
     func checkForCallUpgrades(notification: Notification) {
+        // The user ended the CallKit call while we were still waiting to show it
+        if let pending = self.pendingAnsweredCall, pending.token == notification.userInfo?[stringForKey: "roomToken"] {
+            self.pendingAnsweredCall = nil
+            self.pendingAnsweredCallTimeout?.cancel()
+        }
+
+        if self.pendingToStartCallToken == notification.userInfo?[stringForKey: "roomToken"] {
+            self.pendingToStartCallToken = nil
+            self.pendingToStartCallAccountId = nil
+        }
+
         guard let upgradeCallToken, let upgradeCallAccountId else { return }
         let token = upgradeCallToken
         let accountId = upgradeCallAccountId
@@ -779,13 +800,95 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         let activeCalls = self.areThereActiveCalls
 
         if !waitForcallEnd || (!activeCalls && leaveRoomTask == nil) {
-            // Calls that have been answered start with video disabled by default, in voice chat mode and silently (without notification).
-            self.startCall(withToken: roomToken, withAccountId: accountId, withVideo: hasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true)
+            self.answerCall(withToken: roomToken, withAccountId: accountId, withVideo: hasVideo)
         } else {
             self.pendingToStartCallToken = roomToken
             self.pendingToStartCallHasVideo = hasVideo
             self.pendingToStartCallAccountId = accountId
         }
+    }
+
+    private func answerCall(withToken token: String, withAccountId accountId: String, withVideo video: Bool) {
+        guard CallKitManager.sharedInstance().hasCall(forToken: token) else {
+            NCLog.log("Not showing the call screen for room \(token), the CallKit call is gone")
+            return
+        }
+
+        let shownCallToken = self.callViewController?.room.token
+
+        switch AnsweredCallPolicy.action(appState: NCConnectionController.shared.appState, shownCallToken: shownCallToken, answeredToken: token) {
+        case .keep:
+            // The call screen of this room is already shown, the CallKit call belongs to it
+            return
+        case .fail:
+            self.failAnsweredCall(withToken: token, reason: "another call is shown")
+        case .wait:
+            // The app was probably started by the VoIP push and is not ready yet, so wait for it like the other CallKit entry points
+            NCLog.log("Answered call for token \(token) is waiting for the app to become ready")
+            self.pendingAnsweredCall = PendingAnsweredCall(token: token, accountId: accountId, hasVideo: video)
+            self.pendingAnsweredCallTimeout?.cancel()
+
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, let pending = self.pendingAnsweredCall else { return }
+                self.pendingAnsweredCall = nil
+                self.failAnsweredCall(withToken: pending.token, reason: "app is not ready")
+            }
+
+            self.pendingAnsweredCallTimeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.answeredCallReadyTimeoutSeconds, execute: timeout)
+        case .start:
+            self.startAnsweredCall(withToken: token, withAccountId: accountId, withVideo: video)
+        }
+    }
+
+    private func startAnsweredCall(withToken token: String, withAccountId accountId: String, withVideo video: Bool) {
+        guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: accountId) else {
+            self.failAnsweredCall(withToken: token, reason: "account not found")
+            return
+        }
+
+        NCAPIController.sharedInstance().getRoom(forAccount: account, withToken: token) { roomDict, error in
+            guard error == nil, let room = NCRoom(dictionary: roomDict, andAccountId: account.accountId) else {
+                self.failAnsweredCall(withToken: token, reason: "room could not be retrieved")
+                return
+            }
+
+            guard CallKitManager.sharedInstance().hasCall(forToken: token) else {
+                NCLog.log("Not showing the call screen for room \(token), the CallKit call is gone")
+                return
+            }
+
+            // A call screen might have been presented while the room was requested
+            switch AnsweredCallPolicy.action(appState: .ready, shownCallToken: self.callViewController?.room.token, answeredToken: token) {
+            case .fail:
+                self.failAnsweredCall(withToken: token, reason: "another call is shown")
+                return
+            case .keep, .wait:
+                return
+            case .start:
+                break
+            }
+
+            // Calls that have been answered start with video disabled by default, in voice chat mode and silently (without notification).
+            self.startCall(withVideo: video, inRoom: room, withVideoEnabled: false, asInitiator: false, silently: true, withRecordingConsent: false, withVoiceChatMode: true)
+        }
+    }
+
+    private func failAnsweredCall(withToken token: String, reason: String) {
+        NCLog.log("Failed to show the call screen for the answered call in room \(token): \(reason)")
+        CallKitManager.sharedInstance().endAnsweredCall(withToken: token)
+    }
+
+    func appStateHasChanged(notification: Notification) {
+        // Read the state from the notification, accessing NCConnectionController.shared here would be recursive while it is initializing
+        guard let pending = self.pendingAnsweredCall,
+              let rawAppState = (notification.userInfo?["appState"] as? NSNumber)?.intValue,
+              AppState(rawValue: rawAppState) == .ready
+        else { return }
+
+        self.pendingAnsweredCall = nil
+        self.pendingAnsweredCallTimeout?.cancel()
+        self.answerCall(withToken: pending.token, withAccountId: pending.accountId, withVideo: pending.hasVideo)
     }
 
     func startCallForRoom(notification: Notification) {
@@ -1243,9 +1346,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 if let error {
                     userInfo["error"] = error
                     NCLog.log("Could not exit room. Error: \(error.localizedDescription)")
-                } else {
-                    self.checkForPendingToStartCalls()
                 }
+
+                // Leaving the old room is not needed to join the answered call, so don't leave it hanging in CallKit on errors
+                self.checkForPendingToStartCalls()
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidLeaveRoom, object: self, userInfo: userInfo)
             })
