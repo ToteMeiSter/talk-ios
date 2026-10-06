@@ -1743,6 +1743,9 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         }
 
         if !peerConnection.isMCUPublisherPeer {
+            // Without a MCU a lost connection to another participant is recovered by an ICE restart
+            peerConnection.handleIceConnectionStateChange(newState, hasMCU: externalSignalingController?.hasMCU ?? false)
+
             self.delegate?.callController(self, iceStatusChanged: newState, ofPeer: peerConnection)
         }
     }
