@@ -29,6 +29,9 @@ import WebRTC
     /// Called when a peer connection creates a session description.
     func peerConnection(_ peerConnection: NCPeerConnection, needsToSend sessionDescription: RTCSessionDescription)
 
+    /// Called when a peer without a MCU did not recover from a failed ICE connection in time.
+    func peerConnectionIceRecoveryTimedOut(_ peerConnection: NCPeerConnection)
+
     /// Called when the first video packet of the remote peer was received.
     func peerConnectionDidReceiveFirstVideoPacket(_ peerConnection: NCPeerConnection)
 }
@@ -68,6 +71,10 @@ public class NCPeerConnection: NSObject {
     private var localDataChannel: RTCDataChannel?
     private var remoteDataChannel: RTCDataChannel?
     private var remoteStream: RTCMediaStream?
+    private var iceRestartTracker = NCIceRestartTracker()
+    private var disconnectedRestartWorkItem: DispatchWorkItem?
+    private var recoveryWatchdogWorkItem: DispatchWorkItem?
+    private var lastOfferWasPublisherOffer = false
 
     init(sessionId: String, sid: String?, andICEServers iceServers: [Any]?, forAudioOnlyCall audioOnly: Bool) {
         WebRTCCommon.shared.assertQueue()
@@ -170,10 +177,12 @@ public class NCPeerConnection: NSObject {
     }
 
     func sendOffer() {
+        lastOfferWasPublisherOffer = false
         sendOffer(with: defaultOfferConstraints())
     }
 
     func sendPublisherOffer() {
+        lastOfferWasPublisherOffer = true
         sendOffer(with: publisherOfferConstraints())
     }
 
@@ -195,6 +204,80 @@ public class NCPeerConnection: NSObject {
                 self?.peerConnectionDidCreateLocalSessionDescription(sdp, error: error)
             }
         }
+    }
+
+    /// Restarts ICE without a MCU: right away when the connection failed and after a short delay when it stays disconnected.
+    /// Only the side that sent the offer restarts, the other side answers the new offer.
+    func handleIceConnectionStateChange(_ newState: RTCIceConnectionState, hasMCU: Bool) {
+        WebRTCCommon.shared.assertQueue()
+
+        disconnectedRestartWorkItem?.cancel()
+        disconnectedRestartWorkItem = nil
+
+        switch newState {
+        case .connected, .completed:
+            iceRestartTracker.reset()
+            cancelRecoveryWatchdog()
+        case .failed:
+            armRecoveryWatchdogIfNeeded(hasMCU: hasMCU)
+            restartIceIfNeeded(hasMCU: hasMCU)
+        case .disconnected:
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self, self.peerConnection?.iceConnectionState == .disconnected else { return }
+
+                self.restartIceIfNeeded(hasMCU: hasMCU)
+            }
+
+            disconnectedRestartWorkItem = workItem
+            WebRTCCommon.shared.dispatch(after: NCIceRestartTracker.disconnectedDelay, workItem)
+        default:
+            break
+        }
+    }
+
+    // Safety net, if the ICE restart does not bring the connection back: Fall back to joining the call again
+    private func armRecoveryWatchdogIfNeeded(hasMCU: Bool) {
+        guard NCIceRestartTracker.shouldArmRecoveryWatchdog(hasMCU: hasMCU, isFailed: true, isAlreadyArmed: recoveryWatchdogWorkItem != nil) else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, let peerConnection = self.peerConnection else { return }
+
+            self.recoveryWatchdogWorkItem = nil
+
+            let isConnected = peerConnection.iceConnectionState == .connected || peerConnection.iceConnectionState == .completed
+            guard NCIceRestartTracker.shouldFallBackToRejoin(hasMCU: hasMCU, isConnected: isConnected) else { return }
+
+            NCLog.log("Peer \(self.peerId) did not recover from a failed ICE connection")
+            self.delegate?.peerConnectionIceRecoveryTimedOut(self)
+        }
+
+        recoveryWatchdogWorkItem = workItem
+        WebRTCCommon.shared.dispatch(after: NCIceRestartTracker.recoveryTimeout, workItem)
+    }
+
+    private func cancelRecoveryWatchdog() {
+        recoveryWatchdogWorkItem?.cancel()
+        recoveryWatchdogWorkItem = nil
+    }
+
+    private func restartIceIfNeeded(hasMCU: Bool) {
+        WebRTCCommon.shared.assertQueue()
+
+        guard let peerConnection else { return }
+
+        let isOfferer = peerConnection.localDescription?.type == .offer
+        let isSignalingStable = peerConnection.signalingState == .stable
+
+        guard iceRestartTracker.startRestart(hasMCU: hasMCU, isOfferer: isOfferer, isSignalingStable: isSignalingStable) else {
+            if iceRestartTracker.isExhausted, !hasMCU {
+                NCLog.log("ICE restart limit reached for peer \(peerId)")
+            }
+
+            return
+        }
+
+        NCLog.log("Restarting ICE for peer \(peerId), attempt \(iceRestartTracker.attempts)")
+        sendOffer(with: iceRestartOfferConstraints())
     }
 
     func setStatusForDataChannelMessageType(_ type: String, withPayload payload: Any?) {
@@ -236,6 +319,10 @@ public class NCPeerConnection: NSObject {
 
     func close() {
         WebRTCCommon.shared.assertQueue()
+
+        disconnectedRestartWorkItem?.cancel()
+        disconnectedRestartWorkItem = nil
+        cancelRecoveryWatchdog()
 
         if let localStream = peerConnection?.localStreams.first {
             peerConnection?.remove(localStream)
@@ -463,31 +550,40 @@ public class NCPeerConnection: NSObject {
     }
 
     private func defaultOfferConstraints() -> RTCMediaConstraints {
-        let mandatoryConstraints = [
-            "OfferToReceiveAudio": "true",
-            "OfferToReceiveVideo": isAudioOnly ? "false" : "true"
-        ]
-
-        let optionalConstraints = [
-            "internalSctpDataChannels": "true",
-            "DtlsSrtpKeyAgreement": "true"
-        ]
-
-        return RTCMediaConstraints(mandatoryConstraints: mandatoryConstraints, optionalConstraints: optionalConstraints)
+        return RTCMediaConstraints(mandatoryConstraints: offerMandatoryConstraints(forPublisher: false), optionalConstraints: offerOptionalConstraints)
     }
 
     private func publisherOfferConstraints() -> RTCMediaConstraints {
-        let mandatoryConstraints = [
-            "OfferToReceiveAudio": "false",
-            "OfferToReceiveVideo": "false"
-        ]
+        return RTCMediaConstraints(mandatoryConstraints: offerMandatoryConstraints(forPublisher: true), optionalConstraints: offerOptionalConstraints)
+    }
 
-        let optionalConstraints = [
+    // Use the constraints of the original offer of this peer (publisher or not), but ask for new ICE credentials
+    private func iceRestartOfferConstraints() -> RTCMediaConstraints {
+        var mandatoryConstraints = offerMandatoryConstraints(forPublisher: lastOfferWasPublisherOffer)
+        mandatoryConstraints["IceRestart"] = "true"
+
+        return RTCMediaConstraints(mandatoryConstraints: mandatoryConstraints, optionalConstraints: offerOptionalConstraints)
+    }
+
+    private func offerMandatoryConstraints(forPublisher publisher: Bool) -> [String: String] {
+        if publisher {
+            return [
+                "OfferToReceiveAudio": "false",
+                "OfferToReceiveVideo": "false"
+            ]
+        }
+
+        return [
+            "OfferToReceiveAudio": "true",
+            "OfferToReceiveVideo": isAudioOnly ? "false" : "true"
+        ]
+    }
+
+    private var offerOptionalConstraints: [String: String] {
+        return [
             "internalSctpDataChannels": "true",
             "DtlsSrtpKeyAgreement": "true"
         ]
-
-        return RTCMediaConstraints(mandatoryConstraints: mandatoryConstraints, optionalConstraints: optionalConstraints)
     }
 
     private func stringForSignalingState(_ state: RTCSignalingState) -> String {

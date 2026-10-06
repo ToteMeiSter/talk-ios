@@ -1743,8 +1743,21 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         }
 
         if !peerConnection.isMCUPublisherPeer {
+            // Without a MCU a lost connection to another participant is recovered by an ICE restart
+            peerConnection.handleIceConnectionStateChange(newState, hasMCU: externalSignalingController?.hasMCU ?? false)
+
             self.delegate?.callController(self, iceStatusChanged: newState, ofPeer: peerConnection)
         }
+    }
+
+    func peerConnectionIceRecoveryTimedOut(_ peerConnection: NCPeerConnection) {
+        // Without a MCU the ICE restart did not bring the peer back. With the external signaling the call is joined
+        // again with a new session, like it happened before ICE restarts. The internal signaling never reacted on
+        // failed peers, so nothing is done there.
+        guard externalSignalingController != nil else { return }
+
+        NCLog.log("Force reconnect, because ICE of peer \(peerConnection.peerId) did not recover")
+        self.forceReconnect()
     }
 
     func peerConnection(_ peerConnection: NCPeerConnection, didGenerate candidate: RTCIceCandidate) {
