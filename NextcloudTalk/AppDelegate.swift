@@ -283,6 +283,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
         let signature = userInfo["signature"] as? String
 
         guard let message, let signature else {
+            // Not a push we can handle, but iOS still expects the completion handler to be called
+            completionHandler(.noData)
             return
         }
 
