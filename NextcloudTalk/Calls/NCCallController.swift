@@ -1570,9 +1570,23 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                     // Clear usersInRoom array if incall == false
                     usersInRoom = []
                 }
+            } else {
+                // The update can name only some of the sessions, the others keep their state
+                usersInRoom = CallUsersMerge.merging(usersInRoom, into: self.usersInRoom)
             }
 
             self.processUsersInRoom(usersInRoom)
+        }
+    }
+
+    func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceiveLeaveOfSessions sessionIds: [String]) {
+        WebRTCCommon.shared.dispatch {
+            // A session can leave the room without an update with inCall 0 before, it then also left the call
+            let remainingUsers = CallUsersMerge.removing(sessionIds: sessionIds, from: self.usersInRoom)
+
+            guard remainingUsers.count != self.usersInRoom.count else { return }
+
+            self.processUsersInRoom(remainingUsers)
         }
     }
 

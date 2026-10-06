@@ -8,6 +8,7 @@ import Foundation
 @objc public protocol NCExternalSignalingControllerDelegate {
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedSignalingMessage signalingMessageDict: [AnyHashable: Any])
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedParticipantListMessage participantListMessageDict: [AnyHashable: Any])
+    @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceiveLeaveOfSessions sessionIds: [String])
     @objc func externalSignalingControllerShouldRejoinCall(_ externalSignalingController: NCExternalSignalingController)
     @objc func externalSignalingControllerWillRejoinCall(_ externalSignalingController: NCExternalSignalingController)
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, shouldSwitchToCall roomToken: String)
@@ -631,9 +632,16 @@ public enum NCExternalSignalingSendMessageStatus {
             guard let leftSessions = eventDict["leave"] as? [String]
             else { return }
 
+            // The call needs to know every session that left, also the ones not in the participants map
+            let otherSessions = leftSessions.filter { $0 != self.sessionId }
+
+            if !otherSessions.isEmpty {
+                self.delegate?.externalSignalingController(self, didReceiveLeaveOfSessions: otherSessions)
+            }
+
             for sessionId in leftSessions {
                 guard let participant = self.getParticipant(fromSessionId: sessionId)
-                else { return }
+                else { continue }
 
                 self.participantsMap.removeValue(forKey: sessionId)
 
