@@ -61,6 +61,9 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
             return
         }
 
+        // Delete pushes also remove a still ringing incoming call (e.g. answered on another device)
+        CallKitManager.sharedInstance().cancelIncomingCalls(forDeletePushNotification: pushNotification)
+
         switch pushNotification.type {
         case .delete:
             self.removeNotification(withNotificationIds: [NSNumber(value: pushNotification.notificationId)], forAccountId: pushNotification.accountId, withCompletionBlock: nil)
@@ -145,7 +148,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
 
     public func showIncomingCall(forPushNotification pushNotification: NCPushNotification) {
         if CallKitManager.isCallKitAvailable() {
-            CallKitManager.sharedInstance().reportIncomingCall(pushNotification.roomToken, withDisplayName: NSLocalizedString("Incoming call", comment: ""), forAccountId: pushNotification.accountId)
+            CallKitManager.sharedInstance().reportIncomingCall(pushNotification.roomToken, withDisplayName: NSLocalizedString("Incoming call", comment: ""), forAccountId: pushNotification.accountId, notificationId: pushNotification.notificationId)
         } else {
             CallKitManager.sharedInstance().reportIncomingCallForNonCallKitDevices(withPushNotification: pushNotification)
         }
@@ -277,6 +280,13 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
         }
     }
 
+    /// The id of the notification on the server, nil for notifications that only exist locally (no or invalid id)
+    static func serverNotificationId(fromUserInfo userInfo: [AnyHashable: Any]) -> Int? {
+        guard let notificationId = (userInfo["notificationId"] as? NSNumber)?.intValue, notificationId > 0 else { return nil }
+
+        return notificationId
+    }
+
     public func checkNotificationExistance(completionBlock block: ((_ error: Error?) -> Void)?) {
         let notificationsGroup = DispatchGroup()
 
@@ -295,11 +305,11 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
                 for notification in notifications {
                     let notificationRequest = notification.request
                     let notificationAccountId = notificationRequest.content.userInfo["accountId"] as? String
-                    let notificationId = (notificationRequest.content.userInfo["notificationId"] as? NSNumber)?.intValue ?? 0
 
-                    if notificationAccountId != account.accountId {
-                        continue
-                    }
+                    // Local notifications (e.g. missed call) have no server notification id and must not be removed here
+                    guard notificationAccountId == account.accountId,
+                          let notificationId = NCNotificationController.serverNotificationId(fromUserInfo: notificationRequest.content.userInfo)
+                    else { continue }
 
                     notificationIdsOnDevice.append(NSNumber(value: notificationId))
                 }
@@ -310,7 +320,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
                     return
                 }
 
-                NCAPIController.sharedInstance().checkNotificationExistance(withIds: notificationIdsOnDevice.map { $0.intValue }, forAccount: account) { notificationIds, error in
+                let existanceTask = NCAPIController.sharedInstance().checkNotificationExistance(withIds: notificationIdsOnDevice.map { $0.intValue }, forAccount: account) { notificationIds, error in
                     if error != nil {
                         notificationsGroup.leave()
                         return
@@ -332,6 +342,11 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
                     self.removeNotification(withNotificationIds: notificationIdsOnDevice, forAccountId: account.accountId) {
                         notificationsGroup.leave()
                     }
+                }
+
+                // No request was created (e.g. no API session for the account), so the completion block above will never be called
+                if existanceTask == nil {
+                    notificationsGroup.leave()
                 }
             }
         }

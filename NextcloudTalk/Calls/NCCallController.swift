@@ -1570,9 +1570,23 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                     // Clear usersInRoom array if incall == false
                     usersInRoom = []
                 }
+            } else {
+                // The update can name only some of the sessions, the others keep their state
+                usersInRoom = CallUsersMerge.merging(usersInRoom, into: self.usersInRoom)
             }
 
             self.processUsersInRoom(usersInRoom)
+        }
+    }
+
+    func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceiveLeaveOfSessions sessionIds: [String]) {
+        WebRTCCommon.shared.dispatch {
+            // A session can leave the room without an update with inCall 0 before, it then also left the call
+            let remainingUsers = CallUsersMerge.removing(sessionIds: sessionIds, from: self.usersInRoom)
+
+            guard remainingUsers.count != self.usersInRoom.count else { return }
+
+            self.processUsersInRoom(remainingUsers)
         }
     }
 
@@ -1729,8 +1743,21 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         }
 
         if !peerConnection.isMCUPublisherPeer {
+            // Without a MCU a lost connection to another participant is recovered by an ICE restart
+            peerConnection.handleIceConnectionStateChange(newState, hasMCU: externalSignalingController?.hasMCU ?? false)
+
             self.delegate?.callController(self, iceStatusChanged: newState, ofPeer: peerConnection)
         }
+    }
+
+    func peerConnectionIceRecoveryTimedOut(_ peerConnection: NCPeerConnection) {
+        // Without a MCU the ICE restart did not bring the peer back. With the external signaling the call is joined
+        // again with a new session, like it happened before ICE restarts. The internal signaling never reacted on
+        // failed peers, so nothing is done there.
+        guard externalSignalingController != nil else { return }
+
+        NCLog.log("Force reconnect, because ICE of peer \(peerConnection.peerId) did not recover")
+        self.forceReconnect()
     }
 
     func peerConnection(_ peerConnection: NCPeerConnection, didGenerate candidate: RTCIceCandidate) {

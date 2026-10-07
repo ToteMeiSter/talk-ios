@@ -23,6 +23,7 @@ public class CallKitCall: NSObject {
     public var token: String?
     public var displayName: String?
     public var accountId: String?
+    public var notificationId: Int = 0
     public var update: CXCallUpdate?
     public var reportedWhileInCall: Bool = false
     public var isRinging: Bool = false
@@ -52,6 +53,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     private lazy var callController = CXCallController()
 
     private var startCallRetried: Bool = false
+    private var deletedNotifications = CallKitDeletedNotifications()
 
     override init() {
         let configuration = CXProviderConfiguration()
@@ -103,13 +105,17 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         return nil
     }
 
+    public func hasCall(forToken token: String) -> Bool {
+        return self.call(forToken: token) != nil
+    }
+
     // MARK: - Actions
 
     public func setIncludeInRecents(toValue value: Bool) {
         self.provider.configuration.includesCallsInRecents = value
     }
 
-    public func reportIncomingCall(_ token: String, withDisplayName displayName: String, forAccountId accountId: String) {
+    public func reportIncomingCall(_ token: String, withDisplayName displayName: String, forAccountId accountId: String, notificationId: Int = 0) {
         var protectedDataAvailable = "available"
 
         if !UIApplication.shared.isProtectedDataAvailable {
@@ -117,6 +123,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         }
 
         NCLog.log("Report incoming call for token \(token) for account \(accountId). Protected data is \(protectedDataAvailable)")
+
+        // The "delete" push for this call arrived before the VoIP push. A call still needs to be reported to CallKit,
+        // but without closing the chat or switching the account.
+        if notificationId != 0, self.deletedNotifications.contains(notificationId, accountId: accountId) {
+            self.reportAndEndDeletedIncomingCall(token, forAccountId: accountId)
+            return
+        }
 
         let ongoingCalls = !self.calls.isEmpty
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
@@ -147,6 +160,8 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             }
         }
 
+        CallAccountMemory.remember(token: token, accountId: accountId)
+
         let update = self.defaultCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: token)
         update.localizedCallerName = displayName
@@ -157,6 +172,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         call.token = token
         call.displayName = displayName
         call.accountId = accountId
+        call.notificationId = notificationId
         call.update = update
         call.reportedWhileInCall = ongoingCalls
         call.isRinging = true
@@ -166,6 +182,16 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // The call is not shown by CallKit (e.g. Focus or block list), so tell the user about the missed call
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    if let room = NCDatabaseManager.sharedInstance().room(withToken: token, forAccountId: accountId) {
+                        call.displayName = room.displayName
+                    }
+
+                    self.presentMissedCallNotification(for: call)
+                }
+
                 return
             }
 
@@ -189,6 +215,72 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         }
     }
 
+    /// Ends ringing calls whose server notification was removed (`delete`, `delete-multiple`, `delete-all` push).
+    /// Only calls that are still ringing are ended, an answered or running call (also of the same room) is not touched.
+    public func cancelIncomingCalls(forDeletePushNotification pushNotification: NCPushNotification) {
+        let notificationIds: [Int]?
+
+        switch pushNotification.type {
+        case .delete:
+            notificationIds = [pushNotification.notificationId]
+        case .deleteMultiple:
+            notificationIds = (pushNotification.notificationIds as? [NSNumber])?.map { $0.intValue } ?? []
+        case .deleteAll:
+            notificationIds = nil
+        default:
+            return
+        }
+
+        let accountId = pushNotification.accountId
+
+        if let notificationIds {
+            self.deletedNotifications.record(notificationIds, accountId: accountId)
+        }
+
+        for uuid in CallKitCallCancellation.uuidsToCancel(in: self.calls, accountId: accountId, notificationIds: notificationIds) {
+            NCLog.log("Ending incoming call \(uuid) for account \(accountId) because of a delete push notification")
+            self.endRemotelyCancelledCall(withUUID: uuid)
+        }
+    }
+
+    private func reportAndEndDeletedIncomingCall(_ token: String, forAccountId accountId: String) {
+        NCLog.log("Incoming call for token \(token) for account \(accountId) was already deleted on the server, ending it")
+
+        let callUUID = UUID()
+        let call = CallKitCall()
+        call.uuid = callUUID
+        call.token = token
+        call.accountId = accountId
+        let update = self.defaultCallUpdate()
+        call.update = update
+
+        self.provider.reportNewIncomingCall(with: callUUID, update: update) { [weak self] error in
+            guard let self else { return }
+
+            if let error {
+                NCLog.log("Report deleted incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                return
+            }
+
+            self.calls[callUUID] = call
+            self.endRemotelyCancelledCall(withUUID: callUUID)
+        }
+    }
+
+    /// Ends a call that was cancelled on the server side. In contrast to `endCall(withUUID:)` this is reported to CallKit
+    /// as a remote event and does not post `CallKitManagerDidEndCall`, so a running call of the same room is not hung up.
+    private func endRemotelyCancelledCall(withUUID uuid: UUID) {
+        guard let call = self.calls[uuid] else { return }
+
+        call.isRinging = false
+        self.stopCallStateTimer(forCallUUID: uuid)
+        self.stopHangUpTimer(forCallUUID: uuid)
+        self.calls.removeValue(forKey: uuid)
+
+        // The push can't tell "answered elsewhere" from "dismissed elsewhere", the first one is the common case
+        self.provider.reportCall(with: uuid, endedAt: nil, reason: .answeredElsewhere)
+    }
+
     private func reportAndCancelIncomingCall(_ token: String, forAccountId accountId: String, withLocalNotificationType notificationType: NCLocalNotificationType) {
         NCLog.log("Report and cancel incoming call for token \(token) for account \(accountId).")
 
@@ -205,6 +297,18 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // Without CallKit the user would not see why the call was cancelled, show the notification directly
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    let userInfo: [String: Any] = [
+                        "roomToken": token,
+                        "localNotificationType": notificationType.rawValue,
+                        "accountId": accountId
+                    ]
+
+                    NCNotificationController.sharedInstance().show(notificationType, withUserInfo: userInfo)
+                }
+
                 return
             }
 
@@ -237,6 +341,12 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for non-callkit devices for token \(pushNotification.roomToken ?? "Unknown") for account \(pushNotification.accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // Show the incoming call as a plain local notification instead
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    NCNotificationController.sharedInstance().showLocalNotificationForIncomingCall(withPushNotificaion: pushNotification)
+                }
+
                 return
             }
 
@@ -262,6 +372,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
             if let error {
                 NCLog.log("Report incoming call for old account with UUID \(callUUID) failed with \(error.localizedDescription)")
+
+                // There is no data about the call (the push could not be decrypted), only tell the user that a call was received
+                if CallKitReportFailure.shouldNotifyUser(about: error) {
+                    let userInfo: [String: Any] = ["localNotificationType": NCLocalNotificationType.callFromOldAccount.rawValue]
+                    NCNotificationController.sharedInstance().show(.callFromOldAccount, withUserInfo: userInfo)
+                }
+
                 return
             }
 
@@ -472,6 +589,8 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             return
         }
 
+        CallAccountMemory.remember(token: token, accountId: accountId)
+
         if !CallKitManager.isCallKitAvailable() {
             let userInfo: [String: Any] = [
                 "roomToken": token,
@@ -568,6 +687,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         }
     }
 
+    public func endAnsweredCall(withToken token: String) {
+        guard let call = self.call(forToken: token) else { return }
+
+        // The user accepted the call but we were not able to show it, so make sure the user is informed (also when in background)
+        self.endCallWithMissedCallNotification(for: call)
+    }
+
     private func endCall(withUUID uuid: UUID?) {
         guard let uuid, let call = self.calls[uuid], let callUUID = call.uuid else { return }
 
@@ -604,6 +730,25 @@ public class CallKitManager: NSObject, CXProviderDelegate {
 
     public func providerDidReset(_ provider: CXProvider) {
         NSLog("Provider:didReset")
+
+        // CallKit dropped all calls, so our state must not keep timers and calls that no longer exist
+        self.hangUpTimers.values.forEach { $0.invalidate() }
+        self.hangUpTimers.removeAll()
+        self.callStateTimers.values.forEach { $0.invalidate() }
+        self.callStateTimers.removeAll()
+
+        // Inform the others (call screen, pending calls) like a regular end of the call
+        let droppedCalls = Array(self.calls.values)
+        self.calls.removeAll()
+
+        for call in droppedCalls {
+            call.isRinging = false
+
+            if let token = call.token {
+                let userInfo: [String: Any] = ["roomToken": token]
+                NotificationCenter.default.post(name: .CallKitManagerDidEndCall, object: self, userInfo: userInfo)
+            }
+        }
     }
 
     public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {

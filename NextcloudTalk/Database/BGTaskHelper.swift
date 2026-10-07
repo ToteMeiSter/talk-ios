@@ -22,6 +22,10 @@ import Foundation
             if let handler = handler {
                 handler(taskHelper)
             }
+
+            // iOS terminates the app when the expiration handler returns without ending the task.
+            // Ending an already ended task is a no-op, handlers might have done that themselves.
+            taskHelper.stopBackgroundTask()
         }
 
 #if !APP_EXTENSION

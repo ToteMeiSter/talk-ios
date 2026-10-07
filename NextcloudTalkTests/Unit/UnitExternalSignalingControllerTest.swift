@@ -6,6 +6,19 @@
 import XCTest
 @testable import NextcloudTalk
 
+private final class LeaveRecordingDelegate: NSObject, NCExternalSignalingControllerDelegate {
+    var leftSessions = [[String]]()
+
+    func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedSignalingMessage signalingMessageDict: [AnyHashable: Any]) {}
+    func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedParticipantListMessage participantListMessageDict: [AnyHashable: Any]) {}
+    func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceiveLeaveOfSessions sessionIds: [String]) {
+        leftSessions.append(sessionIds)
+    }
+    func externalSignalingControllerShouldRejoinCall(_ externalSignalingController: NCExternalSignalingController) {}
+    func externalSignalingControllerWillRejoinCall(_ externalSignalingController: NCExternalSignalingController) {}
+    func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, shouldSwitchToCall roomToken: String) {}
+}
+
 // Covers `joinedRoomToken`, the state the chat relay is gated on: the signaling server only relays
 // the room our session actually joined, so anything else (a capability, `currentRoom`) is not enough.
 final class UnitExternalSignalingControllerTest: TestBaseRealm {
@@ -157,5 +170,34 @@ final class UnitExternalSignalingControllerTest: TestBaseRealm {
         let payload = try XCTUnwrap(functionDict["payload"] as? [AnyHashable: Any])
         XCTAssertEqual(payload["substream"] as? Int, 0)
         XCTAssertEqual(payload["temporal"] as? Int, 2)
+    }
+
+    // MARK: - Leave events
+
+    func testLeaveForwardsOtherSessionsToTheDelegateButNotTheOwnSession() throws {
+        let delegate = LeaveRecordingDelegate()
+        signalingController.delegate = delegate
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-own"))
+
+        // "session-a" is not in the participants map, the call still needs to hear about it
+        signalingController.processRoomEvent(eventDict: ["type": "leave", "leave": ["session-own", "session-a"]])
+        XCTAssertEqual(delegate.leftSessions, [["session-a"]])
+
+        // Only the own session left: nothing to tell the call
+        signalingController.processRoomEvent(eventDict: ["type": "leave", "leave": ["session-own"]])
+        XCTAssertEqual(delegate.leftSessions.count, 1)
+
+        drainMainQueue()
+    }
+
+    func testLeaveRemovesSessionsListedAfterAnUnknownSession() throws {
+        signalingController.processRoomEvent(eventDict: ["type": "join", "join": [
+            ["sessionid": "session-a", "userid": "user-a"],
+            ["sessionid": "session-b", "userid": "user-b"]
+        ]])
+        XCTAssertEqual(signalingController.participantsMap.count, 2)
+
+        signalingController.processRoomEvent(eventDict: ["type": "leave", "leave": ["session-unknown", "session-a", "session-b"]])
+        XCTAssertTrue(signalingController.participantsMap.isEmpty)
     }
 }

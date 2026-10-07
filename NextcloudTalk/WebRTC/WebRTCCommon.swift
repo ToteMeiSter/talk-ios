@@ -40,6 +40,10 @@ import Foundation
         webrtcClientDispatchQueue.async(execute: work)
     }
 
+    public func dispatch(after delay: TimeInterval, _ work: DispatchWorkItem) {
+        webrtcClientDispatchQueue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     public func assertQueue() {
         dispatchPrecondition(condition: .onQueue(webrtcClientDispatchQueue))
     }

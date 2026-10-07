@@ -22,6 +22,7 @@ public class NCPushNotificationsUtils: NSObject {
 
             guard let devicePrivateKeyData = NCKeyChainController.sharedInstance().pushNotificationPrivateKey(forAccountId: account.accountId),
                   let devicePrivateKeyPem = String(data: devicePrivateKeyData, encoding: .utf8) else {
+                NCLog.log("Error decrypting push notification for account \(account.accountId): no push private key in keychain")
                 return nil
             }
 
@@ -36,7 +37,8 @@ public class NCPushNotificationsUtils: NSObject {
                 return try clearMessage.string(encoding: .utf8)
             }
         } catch {
-            print("decryptPushNotificationError: \(error)")
+            // Only the error is logged, never the push content or any key material
+            NCLog.log("Error decrypting push notification for account \(account.accountId): \(error)")
         }
 
         return nil

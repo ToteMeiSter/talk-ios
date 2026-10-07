@@ -13,6 +13,10 @@ import MBProgressHUD
 
 private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
+/// How many items can be in a share when more are added from this screen, and how many can be picked at once
+/// in the chat. Matches the Android app.
+let kShareConfirmationMaxItems = 10
+
 @objc public protocol ShareConfirmationViewControllerDelegate {
     @objc func shareConfirmationViewControllerDidFail(_ viewController: ShareConfirmationViewController)
     @objc func shareConfirmationViewControllerDidFinish(_ viewController: ShareConfirmationViewController)
@@ -37,6 +41,17 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
     public weak var delegate: ShareConfirmationViewControllerDelegate?
 
+    /// Takes over sending the files, once they are compressed. Set by the chat in the app, which shows a message
+    /// for each file and uploads in the background. The share extension has nobody to hand over to: it shows
+    /// the progress itself and uploads while it is open.
+    ///
+    /// Must be done with the files when it returns, the temporary copies are deleted right after.
+    var uploadHandler: (([ChatFileUpload]) -> Void)?
+
+    /// How long the progress is shown while waiting for the network. The share extension is not carried on by
+    /// the system and the HUD cannot be cancelled, so it reports a missing network soon.
+    private static let maxNetworkWait: TimeInterval = 30
+
     public lazy var shareItemController: ShareItemController = {
         let controller = ShareItemController()
         controller.delegate = self
@@ -48,7 +63,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
     private var serverCapabilities: ServerCapabilities
     private var shareType: ShareConfirmationType = .item
-    private var shareContentView = UIView()
+    private var shareContentView = MediaPreviewPassthroughView()
     private var shareSilently = false
 
     /// Quality the images are uploaded in. Deliberately not remembered between shares, so an
@@ -64,11 +79,26 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
     private var imagePicker: UIImagePickerController?
     private var hud: MBProgressHUD?
     private var objectShareMessage: NCChatMessage?
+    private var fileShareMessage: NCChatMessage?
+
+    /// Whether the media preview is shown, which it is as long as files are shared. Text and rich objects
+    /// have their own look.
+    private var showsMediaPreview = true {
+        didSet {
+            self.shareCollectionView.isHidden = !self.showsMediaPreview
+            self.toolsView.isHidden = !self.showsMediaPreview
+            self.counterView.isHidden = true
+
+            // The media is shown on a dark background, no matter the theme
+            self.overrideUserInterfaceStyle = self.showsMediaPreview ? .dark : .unspecified
+        }
+    }
 
     private enum ShareConfirmationType {
         case text
         case item
         case objectShare
+        case fileShare
     }
 
     // MARK: - UI Controls
@@ -112,60 +142,39 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         return view
     }()
 
-    private lazy var itemToolbar: UIToolbar = {
-        let toolbar = UIToolbar(frame: .init(x: 0, y: 0, width: 100, height: 44))
-
-        toolbar.barTintColor = .systemBackground
-        toolbar.isTranslucent = false
-
-        if #unavailable(iOS 26) {
-            toolbar.setItems([removeItemButton, UIBarButtonItem(systemItem: .flexibleSpace), cropItemButton, previewItemButton, addItemButton], animated: false)
-        } else {
-            toolbar.setItems([UIBarButtonItem(systemItem: .flexibleSpace), removeItemButton, UIBarButtonItem(systemItem: .fixedSpace), cropItemButton, previewItemButton, addItemButton], animated: false)
-        }
-
-        toolbar.translatesAutoresizingMaskIntoConstraints = false
-
-        return toolbar
+    private lazy var toolsView: MediaPreviewToolsView = {
+        return MediaPreviewToolsView(buttons: [self.addItemButton, self.cropItemButton, self.markupItemButton, self.removeItemButton])
     }()
 
-    private lazy var removeItemButton: UIBarButtonItem = {
-        let button = UIBarButtonItem(image: .init(systemName: "trash"))
-        button.width = 56
-        button.target = self
-        button.action = #selector(removeItemButtonPressed)
+    private lazy var counterView = MediaPreviewCounterView()
+
+    private lazy var removeItemButton: UIButton = {
+        let button = MediaPreviewToolsView.toolButton(systemName: "trash", accessibilityLabel: NSLocalizedString("Remove", comment: ""))
+        button.addTarget(self, action: #selector(removeItemButtonPressed), for: .touchUpInside)
 
         return button
     }()
 
-    private lazy var cropItemButton: UIBarButtonItem = {
-        let button = UIBarButtonItem(image: .init(systemName: "crop.rotate"))
-        button.width = 56
-        button.target = self
-        button.action = #selector(cropItemButtonPressed)
+    private lazy var cropItemButton: UIButton = {
+        let button = MediaPreviewToolsView.toolButton(systemName: "crop.rotate", accessibilityLabel: NSLocalizedString("Crop and rotate", comment: ""))
+        button.addTarget(self, action: #selector(cropItemButtonPressed), for: .touchUpInside)
 
         return button
     }()
 
-    private lazy var previewItemButton: UIBarButtonItem = {
-        let button = UIBarButtonItem(image: .init(systemName: "eye"))
-        button.width = 56
-        button.target = self
-        button.action = #selector(previewItemButtonPressed)
+    /// Draws on images and previews everything else, both through the QuickLook preview. The look is
+    /// adjusted to the shown item in `updateToolsForCurrentItem`.
+    private lazy var markupItemButton: UIButton = {
+        let button = MediaPreviewToolsView.toolButton(systemName: "pencil.tip.crop.circle", accessibilityLabel: NSLocalizedString("Draw", comment: ""))
+        button.addTarget(self, action: #selector(markupItemButtonPressed), for: .touchUpInside)
 
         return button
     }()
 
-    private lazy var addItemButton: UIBarButtonItem = {
-        let button = UIBarButtonItem(image: .init(systemName: "plus"))
-        button.width = 56
+    private lazy var addItemButton: UIButton = {
+        let button = MediaPreviewToolsView.toolButton(systemName: "plus", accessibilityLabel: NSLocalizedString("Add more", comment: "Add more photos, videos or files to the share"))
 
         var items: [UIAction] = []
-
-        let cameraAction = UIAction(title: NSLocalizedString("Camera", comment: ""), image: UIImage(systemName: "camera")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.checkAndPresentCamera()
-        }
 
         let photoLibraryAction = UIAction(title: NSLocalizedString("Photo Library", comment: ""), image: UIImage(systemName: "photo")) { [unowned self] _ in
             self.textView.resignFirstResponder()
@@ -180,8 +189,11 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 #if !APP_EXTENSION
         // Camera access is not available in app extensions
         // https://developer.apple.com/library/archive/documentation/General/Conceptual/ExtensibilityPG/ExtensionOverview.html
-        if UIImagePickerController.isSourceTypeAvailable(.camera) {
-            items.append(cameraAction)
+        if InAppCameraViewController.isCameraAvailable {
+            items.append(UIAction(title: NSLocalizedString("Camera", comment: ""), image: UIImage(systemName: "camera")) { [unowned self] _ in
+                self.textView.resignFirstResponder()
+                self.checkAndPresentCamera()
+            })
         }
 #endif
 
@@ -189,6 +201,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         items.append(filesAction)
 
         button.menu = UIMenu(children: items)
+        button.showsMenuAsPrimaryAction = true
 
         return button
     }()
@@ -355,7 +368,10 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         collectionView.dataSource = self
         collectionView.isPagingEnabled = true
         collectionView.showsVerticalScrollIndicator = false
-        collectionView.backgroundColor = .systemBackground
+        // The preview is dark no matter the theme, so the media stands out the same way in both
+        collectionView.backgroundColor = .black
+        // The collection view fills the screen: the page is the width of the view, not of its safe area
+        collectionView.contentInsetAdjustmentBehavior = .never
         return collectionView
     }()
 
@@ -369,18 +385,6 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         return textView
     }()
 
-    private lazy var pageControl: UIPageControl = {
-        let pageControl = UIPageControl()
-        pageControl.translatesAutoresizingMaskIntoConstraints = false
-        pageControl.currentPageIndicatorTintColor = NCAppBranding.elementColor()
-        pageControl.pageIndicatorTintColor = NCAppBranding.placeholderColor()
-        pageControl.hidesForSinglePage = true
-        pageControl.numberOfPages = 1
-        pageControl.addTarget(self, action: #selector(pageControlValueChanged), for: .valueChanged)
-
-        return pageControl
-    }()
-
     // MARK: - Init.
 
     public init?(room: NCRoom, thread: NCThread?, account: TalkAccount, serverCapabilities: ServerCapabilities) {
@@ -389,10 +393,13 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         super.init(forRoom: room, withAccount: account, withView: self.shareContentView)
         self.thread = thread
 
-        self.shareContentView.addSubview(self.shareCollectionView)
-        self.shareContentView.addSubview(self.pageControl)
+        // The media fills the whole screen and sits below the content view. The content view only holds the
+        // controls on top of the media, so the media neither shrinks nor jumps when the keyboard shows up.
+        self.view.insertSubview(self.shareCollectionView, belowSubview: self.shareContentView)
+
         self.shareContentView.addSubview(self.shareTextView)
-        self.shareContentView.addSubview(self.itemToolbar)
+        self.shareContentView.addSubview(self.counterView)
+        self.shareContentView.addSubview(self.toolsView)
         self.shareContentView.addSubview(self.optionsView)
 
         NSLayoutConstraint.activate([
@@ -402,9 +409,15 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         ])
 
         NSLayoutConstraint.activate([
-            self.itemToolbar.leftAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.leftAnchor),
-            self.itemToolbar.rightAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.rightAnchor),
-            self.itemToolbar.heightAnchor.constraint(equalToConstant: 44)
+            self.shareCollectionView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
+            self.shareCollectionView.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
+            self.shareCollectionView.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+
+            self.counterView.centerXAnchor.constraint(equalTo: self.shareContentView.centerXAnchor),
+
+            self.toolsView.leadingAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.leadingAnchor, constant: 20),
+            self.toolsView.bottomAnchor.constraint(equalTo: self.optionsView.topAnchor, constant: -8),
+            self.toolsView.heightAnchor.constraint(equalToConstant: 44)
         ])
 
         if #unavailable(iOS 26) {
@@ -418,28 +431,21 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
                 self.shareTextView.topAnchor.constraint(equalTo: self.toLabelView.bottomAnchor, constant: 20),
 
-                self.itemToolbar.topAnchor.constraint(equalTo: self.toLabelView.bottomAnchor)
+                self.shareCollectionView.topAnchor.constraint(equalTo: self.toLabelView.bottomAnchor),
+                self.counterView.topAnchor.constraint(equalTo: self.toLabelView.bottomAnchor, constant: 8)
             ])
         } else {
-            // On iOS 26 we don't have a toLabel anymore, so we need to constraint to the safe area as well
+            // On iOS 26 we don't have a toLabel anymore, so we need to constraint to the safe area as well.
+            // The navigation bar is glass there, the media can go below it.
             NSLayoutConstraint.activate([
                 self.shareTextView.topAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.topAnchor),
 
-                self.itemToolbar.topAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.topAnchor)
+                self.shareCollectionView.topAnchor.constraint(equalTo: self.view.topAnchor),
+                self.counterView.topAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.topAnchor, constant: 8)
             ])
         }
 
         NSLayoutConstraint.activate([
-            self.shareCollectionView.leftAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.leftAnchor),
-            self.shareCollectionView.rightAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.rightAnchor),
-            self.shareCollectionView.topAnchor.constraint(equalTo: self.itemToolbar.bottomAnchor, constant: 8),
-            self.shareCollectionView.bottomAnchor.constraint(equalTo: self.pageControl.topAnchor, constant: -8),
-
-            self.pageControl.leftAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.leftAnchor),
-            self.pageControl.rightAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.rightAnchor),
-            self.pageControl.heightAnchor.constraint(equalToConstant: 26),
-            self.pageControl.bottomAnchor.constraint(equalTo: self.optionsView.topAnchor),
-
             self.optionsView.leftAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.leftAnchor, constant: 20),
             self.optionsView.rightAnchor.constraint(equalTo: self.shareContentView.safeAreaLayoutGuide.rightAnchor, constant: -20),
             self.optionsView.bottomAnchor.constraint(equalTo: self.textInputbar.topAnchor),
@@ -456,8 +462,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
         DispatchQueue.main.async {
             self.setTextInputbarHidden(true, animated: false)
-            self.shareCollectionView.isHidden = true
-            self.itemToolbar.isHidden = true
+            self.showsMediaPreview = false
             self.shareTextView.isHidden = false
             self.shareTextView.text = sharedText
             self.updateOptionsView()
@@ -477,14 +482,48 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
         DispatchQueue.main.async {
             self.setTextInputbarHidden(true, animated: false)
-            self.shareCollectionView.isHidden = true
-            self.itemToolbar.isHidden = true
+            self.showsMediaPreview = false
             self.shareTextView.isHidden = false
             self.shareTextView.isUserInteractionEnabled = false
             self.shareTextView.text = objectShareMessage.parsedMessage().string
             self.objectShareMessage = objectShareMessage
             self.updateOptionsView()
         }
+    }
+
+    /// Shows an already uploaded file as the thing to share. Sending shares the file of the
+    /// message into the room, there is no new upload.
+    public func shareFileMessage(_ fileMessage: NCChatMessage) {
+        self.shareType = .fileShare
+
+        DispatchQueue.main.async {
+            self.setTextInputbarHidden(true, animated: false)
+            self.showsMediaPreview = false
+            self.shareTextView.isHidden = false
+            self.shareTextView.isUserInteractionEnabled = false
+
+            // What is forwarded is what is shown: the name of the file and its caption, if there is one
+            var text = fileMessage.file()?.name ?? ""
+
+            if let caption = self.forwardedCaption(of: fileMessage) {
+                text += "\n\n" + (fileMessage.sendingMessageWithDisplayNames ?? caption)
+            }
+
+            self.shareTextView.text = text
+            self.fileShareMessage = fileMessage
+            self.updateOptionsView()
+        }
+    }
+
+    /// The caption of a file message, only when the server can send one along with a shared file
+    private func forwardedCaption(of fileMessage: NCChatMessage) -> String? {
+        guard fileMessage.message != "{file}",
+              NCDatabaseManager.sharedInstance().serverHasTalkCapability(.mediaCaption, forAccountId: self.account.accountId)
+        else { return nil }
+
+        let caption = fileMessage.sendingMessage
+
+        return caption.isEmpty ? nil : caption
     }
 
     // MARK: - View lifecycle
@@ -505,6 +544,9 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         let bundle = Bundle(for: ShareConfirmationCollectionViewCell.self)
         self.shareCollectionView.register(UINib(nibName: kShareConfirmationTableCellNibName, bundle: bundle), forCellWithReuseIdentifier: kShareConfirmationCellIdentifier)
         self.shareCollectionView.delegate = self
+
+        self.overrideUserInterfaceStyle = .dark
+        self.configureCaptionInputbar()
 
         // Configure communication lib
         guard let userToken = NCKeyChainController.sharedInstance().token(forAccountId: self.account.accountId) else { return }
@@ -528,6 +570,25 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
             self.navigationItem.title = self.room.displayName
         }
 
+    }
+
+    /// Makes the inputbar the caption field on top of the media: no bar of its own, a dark field and a round send button.
+    private func configureCaptionInputbar() {
+        self.textInputbar.backgroundColor = .clear
+
+        self.textView.keyboardAppearance = .dark
+        self.textView.textColor = .white
+        self.textView.placeholder = NSLocalizedString("Add a caption …", comment: "Placeholder of the field for the text sent along with the photos and files")
+        self.textView.placeholderColor = UIColor.white.withAlphaComponent(0.6)
+
+        if #unavailable(iOS 26.0) {
+            self.textView.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+            self.textView.layer.borderWidth = 0
+
+            self.rightButton.backgroundColor = NCAppBranding.themeColor()
+            self.rightButton.tintColor = NCAppBranding.themeTextColor()
+            self.rightButton.clipsToBounds = true
+        }
     }
 
     /// The options that apply to what is being shared right now.
@@ -594,6 +655,15 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         }
 
         self.updateOptionsView()
+        self.configureCaptionInputbar()
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+
+        if #unavailable(iOS 26.0) {
+            self.rightButton.layer.cornerRadius = self.rightButton.bounds.height / 2
+        }
     }
 
     public override func viewDidAppear(_ animated: Bool) {
@@ -659,7 +729,8 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         }
     }
 
-    func previewItemButtonPressed() {
+    func markupItemButtonPressed() {
+        // The QuickLook preview offers the markup of images, see previewController(_:editingModeFor:)
         self.previewCurrentItem()
     }
 
@@ -686,6 +757,8 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
             self.sendSharedText()
         } else if self.shareType == .objectShare {
             self.sendObjectShare()
+        } else if self.shareType == .fileShare {
+            self.sendFileShare()
         } else {
             self.uploadAndShareFiles()
         }
@@ -695,6 +768,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
     // MARK: - Add additional items
 
+#if !APP_EXTENSION
     func checkAndPresentCamera() {
         // https://stackoverflow.com/a/20464727/2512312
         let mediaType = AVMediaType.video
@@ -722,18 +796,13 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
     func presentCamera() {
         DispatchQueue.main.async {
-            self.imagePicker = UIImagePickerController()
-
-            if let imagePicker = self.imagePicker,
-               let sourceType = UIImagePickerController.availableMediaTypes(for: imagePicker.sourceType) {
-                imagePicker.sourceType = .camera
-                imagePicker.cameraFlashMode = UIImagePickerController.CameraFlashMode(rawValue: NCUserDefaults.preferredCameraFlashMode()) ?? .off
-                imagePicker.mediaTypes = sourceType
-                imagePicker.delegate = self
-                self.present(imagePicker, animated: true)
-            }
+            let camera = InAppCameraViewController()
+            camera.delegate = self
+            camera.modalPresentationStyle = .fullScreen
+            self.present(camera, animated: true)
         }
     }
+#endif
 
     func presentPhotoLibrary() {
         self.imagePicker = UIImagePickerController()
@@ -781,6 +850,40 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
                 self.delegate?.shareConfirmationViewControllerDidFinish(self)
             }
+            self.stopAnimatingSharingIndicator()
+        }
+    }
+
+    func sendFileShare() {
+        // The path comes from the message object that was handed to us in process, never from outside.
+        // It is the path of the cached message and can be outdated, e.g. when the file was moved or
+        // deleted since. Then the server refuses the share and the error is shown. If another file lies
+        // at the old path now, the server shares that one.
+        // The path only means something for the account of the message, so never send it for another one.
+        guard let fileMessage = self.fileShareMessage,
+              fileMessage.accountId == self.account.accountId,
+              let path = fileMessage.file()?.path
+        else {
+            self.delegate?.shareConfirmationViewControllerDidFail(self)
+            self.stopAnimatingSharingIndicator()
+            return
+        }
+
+        var metaData = ChatFileUploadMetadata()
+        metaData.silent = self.shareSilently
+
+        // Sent only when it was shown on this screen
+        metaData.caption = self.forwardedCaption(of: fileMessage)
+
+        NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
+            if let error {
+                NCLog.log(String(format: "Failed to share file. Error: %@", error.localizedDescription))
+                self.delegate?.shareConfirmationViewControllerDidFail(self)
+            } else {
+                NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
+                self.delegate?.shareConfirmationViewControllerDidFinish(self)
+            }
+
             self.stopAnimatingSharingIndicator()
         }
     }
@@ -834,12 +937,18 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
             let uploads = await self.uploads(for: shareItems, quality: self.imageQuality)
 
+            if let uploadHandler = self.uploadHandler {
+                uploadHandler(uploads)
+                self.finishUploads(withErrors: [], succeededItems: shareItems)
+                return
+            }
+
             self.hud?.mode = .annularDeterminate
 
             let results: [Result<Void, Error>]
 
             do {
-                results = try await ChatFileUploader.upload(uploads) { index, fractionCompleted in
+                results = try await ChatFileUploader.upload(uploads, maxNetworkWait: Self.maxNetworkWait) { index, fractionCompleted in
                     shareItems[index].uploadProgress = fractionCompleted
                     self.updateHudProgress()
                 }
@@ -988,27 +1097,36 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         }
     }
 
-    func updateToolbarForCurrentItem() {
-        if let item = self.getCurrentShareItem() {
-            UIView.transition(with: self.itemToolbar, duration: 0.3, options: .transitionCrossDissolve) {
-                self.cropItemButton.isEnabled = item.isImage
-                self.previewItemButton.isEnabled = QLPreviewController.canPreview(item.fileURL as QLPreviewItem)
-                self.addItemButton.isEnabled = self.shareItemController.shareItems.count < 20
-            }
-        } else {
-            self.cropItemButton.isEnabled = false
-            self.previewItemButton.isEnabled = false
+    func updateToolsForCurrentItem() {
+        guard self.shareType == .item else { return }
+
+        let itemCount = self.shareItemController.shareItems.count
+
+        if itemCount > 0 {
+            self.counterView.update(current: self.currentPageIndex + 1, total: itemCount)
         }
 
-        self.removeItemButton.isEnabled = self.shareItemController.shareItems.count > 1
-        self.removeItemButton.tintColor = self.shareItemController.shareItems.count > 1 ? nil : .clear
+        UIView.transition(with: self.toolsView, duration: 0.3, options: .transitionCrossDissolve) {
+            self.addItemButton.isEnabled = itemCount < kShareConfirmationMaxItems
+            self.removeItemButton.isHidden = itemCount <= 1
+
+            if let item = self.getCurrentShareItem() {
+                self.cropItemButton.isEnabled = item.isImage
+                self.markupItemButton.isEnabled = QLPreviewController.canPreview(item.fileURL as QLPreviewItem)
+
+                // Images can be drawn on in the preview, everything else can only be looked at
+                self.markupItemButton.setImage(UIImage(systemName: item.isImage ? "pencil.tip.crop.circle" : "eye"), for: .normal)
+                self.markupItemButton.accessibilityLabel = item.isImage ? NSLocalizedString("Draw", comment: "") : NSLocalizedString("Preview", comment: "")
+            } else {
+                self.cropItemButton.isEnabled = false
+                self.markupItemButton.isEnabled = false
+            }
+        }
     }
 
     // MARK: - UIImagePickerController Delegate
 
     public func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-        self.saveImagePickerSettings(picker)
-
         guard let mediaType = info[.mediaType] as? String else { return }
 
         if mediaType == "public.image" {
@@ -1030,24 +1148,29 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
     }
 
     public func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-        self.saveImagePickerSettings(picker)
         self.dismiss(animated: true)
-    }
-
-    func saveImagePickerSettings(_ picker: UIImagePickerController) {
-        if picker.sourceType == .camera && picker.cameraCaptureMode == .photo {
-            NCUserDefaults.setPreferredCameraFlashMode(picker.cameraFlashMode.rawValue)
-        }
     }
 
     // MARK: - UIDocumentPickerViewController Delegate
 
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        for documentURL in urls {
+        let freeSlots = max(0, kShareConfirmationMaxItems - self.shareItemController.shareItems.count)
+
+        for documentURL in urls.prefix(freeSlots) {
             self.shareItemController.addItem(with: documentURL)
         }
 
         self.collectionViewScrollToEnd()
+
+        if urls.count > freeSlots {
+            let message = String.localizedStringWithFormat(NSLocalizedString("You can select up to %ld items", comment: "Shown when more photos and videos are selected than can be sent at once"), kShareConfirmationMaxItems)
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default))
+
+            DispatchQueue.main.async {
+                self.present(alert, animated: true)
+            }
+        }
     }
 
     // MARK: - ScrollView/CollectionView
@@ -1113,11 +1236,11 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
     }
 
     public override func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        self.updatePageControlPage()
+        self.updateCurrentPage()
     }
 
     public override func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
-        self.updatePageControlPage()
+        self.updateCurrentPage()
     }
 
     func collectionViewScrollToEnd() {
@@ -1136,28 +1259,30 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
         }
     }
 
-    func getCurrentShareItem() -> ShareItem? {
-        let currentIndex = Int(self.shareCollectionView.contentOffset.x / self.shareCollectionView.frame.size.width)
+    /// The index of the page that is shown, kept inside the items. A removal can leave the offset behind the last one.
+    private var currentPageIndex: Int {
+        let width = self.shareCollectionView.frame.size.width
+        let itemCount = self.shareItemController.shareItems.count
 
-        if currentIndex >= self.shareItemController.shareItems.count {
+        guard width > 0, itemCount > 0 else { return 0 }
+
+        // see: https://stackoverflow.com/a/46181277/2512312
+        return max(0, min(Int((self.shareCollectionView.contentOffset.x / width).rounded()), itemCount - 1))
+    }
+
+    func getCurrentShareItem() -> ShareItem? {
+        let shareItems = self.shareItemController.shareItems
+
+        if shareItems.isEmpty {
             return nil
         }
 
-        return self.shareItemController.shareItems[currentIndex]
+        return shareItems[self.currentPageIndex]
     }
 
-    // MARK: - PageControl
-
-    func pageControlValueChanged() {
-        let indexPath = IndexPath(row: self.pageControl.currentPage, section: 0)
-        self.shareCollectionView.scrollToItem(at: indexPath, at: [], animated: true)
-    }
-
-    func updatePageControlPage() {
-        // see: https://stackoverflow.com/a/46181277/2512312
+    func updateCurrentPage() {
         DispatchQueue.main.async {
-            self.pageControl.currentPage = Int(self.shareCollectionView.contentOffset.x / self.shareCollectionView.frame.width)
-            self.updateToolbarForCurrentItem()
+            self.updateToolsForCurrentItem()
         }
     }
 
@@ -1220,9 +1345,8 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
                 // Make sure all changes are fully populated before we update our UI elements
                 self.shareCollectionView.layoutIfNeeded()
-                self.updateToolbarForCurrentItem()
+                self.updateToolsForCurrentItem()
                 self.updateOptionsView()
-                self.pageControl.numberOfPages = shareItemController.shareItems.count
 
                 // Update the text input to check if sending is (not-)possible
                 self.textDidUpdate(false)
@@ -1267,3 +1391,25 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
     }
 
 }
+
+#if !APP_EXTENSION
+// MARK: - InAppCameraViewController Delegate
+
+extension ShareConfirmationViewController: InAppCameraViewControllerDelegate {
+
+    // The camera does not close itself, that is up to us. The shot becomes one more item of the share and
+    // the screen stays open, showing it.
+    func inAppCameraViewController(_ controller: InAppCameraViewController, didCaptureMediaAt fileURL: URL) {
+        controller.dismiss(animated: true) { [weak self] in
+            guard let self else { return }
+
+            self.shareItemController.addItem(with: fileURL)
+            self.collectionViewScrollToEnd()
+        }
+    }
+
+    func inAppCameraViewControllerDidCancel(_ controller: InAppCameraViewController) {
+        controller.dismiss(animated: true)
+    }
+}
+#endif

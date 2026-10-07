@@ -8,6 +8,7 @@ import Foundation
 @objc public protocol NCExternalSignalingControllerDelegate {
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedSignalingMessage signalingMessageDict: [AnyHashable: Any])
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedParticipantListMessage participantListMessageDict: [AnyHashable: Any])
+    @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceiveLeaveOfSessions sessionIds: [String])
     @objc func externalSignalingControllerShouldRejoinCall(_ externalSignalingController: NCExternalSignalingController)
     @objc func externalSignalingControllerWillRejoinCall(_ externalSignalingController: NCExternalSignalingController)
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, shouldSwitchToCall roomToken: String)
@@ -138,11 +139,9 @@ public enum NCExternalSignalingSendMessageStatus {
         wsRequest.setValue(NCAppBranding.userAgent(), forHTTPHeaderField: "User-Agent")
 
         if self.resumeId != nil {
-            let currentTimestamp = Date().timeIntervalSince1970
-
-            // We are only allowed to resume a session 30s after disconnect
-            if self.disconnectTime == nil || (currentTimestamp - (self.disconnectTime ?? 0)) >= 30 {
-                NCLog.log("We have a resumeId, but we disconnected outside of the 30s resume window. Connecting without resumeId.")
+            // We are only allowed to resume a session shortly after the connection was lost
+            if !NCSignalingResumePolicy.canResume(resumeId: self.resumeId, connectionLostTime: self.disconnectTime, now: Date().timeIntervalSince1970) {
+                NCLog.log("We have a resumeId, but the connection was lost outside of the resume window. Connecting without resumeId.")
                 self.resumeId = nil
             }
         }
@@ -161,6 +160,10 @@ public enum NCExternalSignalingSendMessageStatus {
         guard self.reconnectTimer == nil else { return }
 
         NCLog.log("Reconnecting to: \(self.serverUrl)")
+
+        // Remember when the connection was lost, so we can try to resume the session (like the web client does).
+        // Keep the first moment, as failed reconnect attempts end up here again.
+        self.disconnectTime = NCSignalingResumePolicy.connectionLostTime(existing: self.disconnectTime, now: Date().timeIntervalSince1970)
 
         self.resetWebSocket()
 
@@ -202,9 +205,11 @@ public enum NCExternalSignalingSendMessageStatus {
     func disconnect() {
         NCLog.log("Disconnecting from: \(self.serverUrl)")
 
-        self.disconnectTime = Date().timeIntervalSince1970
-
         DispatchQueue.main.async {
+            // Keep an earlier moment of a lost connection, so the resume window is not extended.
+            // `disconnectTime` is only accessed on the main thread.
+            self.disconnectTime = NCSignalingResumePolicy.connectionLostTime(existing: self.disconnectTime, now: Date().timeIntervalSince1970)
+
             self.invalidateReconnectionTimer()
             self.resetWebSocket()
         }
@@ -341,6 +346,11 @@ public enum NCExternalSignalingSendMessageStatus {
         }
 
         self.resumeId = helloDict["resumeid"] as? String
+
+        // We are connected again, the next connection loss starts a new resume window
+        DispatchQueue.main.async {
+            self.disconnectTime = nil
+        }
 
         let sessionChanged = self.sessionId != newSessionId
         self.sessionId = newSessionId
@@ -631,9 +641,16 @@ public enum NCExternalSignalingSendMessageStatus {
             guard let leftSessions = eventDict["leave"] as? [String]
             else { return }
 
+            // The call needs to know every session that left, also the ones not in the participants map
+            let otherSessions = leftSessions.filter { $0 != self.sessionId }
+
+            if !otherSessions.isEmpty {
+                self.delegate?.externalSignalingController(self, didReceiveLeaveOfSessions: otherSessions)
+            }
+
             for sessionId in leftSessions {
                 guard let participant = self.getParticipant(fromSessionId: sessionId)
-                else { return }
+                else { continue }
 
                 self.participantsMap.removeValue(forKey: sessionId)
 
