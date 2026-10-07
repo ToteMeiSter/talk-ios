@@ -72,3 +72,4 @@ class TestBaseRealm: XCTestCase {
         return room
     }
 }
+// CI baseline (#1579), not for merge
