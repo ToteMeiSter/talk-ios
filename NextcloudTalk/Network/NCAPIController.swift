@@ -2743,6 +2743,24 @@ class NCAPIController: NSObject, NKCommonDelegate {
                                 forAccount account: TalkAccount,
                                 completionBlock: @escaping (_ error: OcsError?) -> Void) -> URLSessionDataTask? {
 
+        return self.sendChatMessageReturningId(message, toRoom: token, threadTitle: threadTitle, replyTo: replyTo, replyToToken: replyToToken, referenceId: referenceId, silently: silently, forAccount: account) { _, error in
+            completionBlock(error)
+        }
+    }
+
+    // Same as sendChatMessage, but also returns the id the server assigned to the new message
+    @discardableResult
+    // swiftlint:disable:next function_parameter_count
+    public func sendChatMessageReturningId(_ message: String,
+                                           toRoom token: String,
+                                           threadTitle: String?,
+                                           replyTo: Int,
+                                           replyToToken: String? = nil,
+                                           referenceId: String?,
+                                           silently: Bool,
+                                           forAccount account: TalkAccount,
+                                           completionBlock: @escaping (_ messageId: Int?, _ error: OcsError?) -> Void) -> URLSessionDataTask? {
+
         guard let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
         else { return nil }
@@ -2774,8 +2792,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
             parameters["threadTitle"] = threadTitle
         }
 
-        return apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { _, ocsError in
-            completionBlock(ocsError)
+        return apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { ocsResponse, ocsError in
+            completionBlock(ocsResponse?.dataDict?["id"] as? Int, ocsError)
         }
     }
 
