@@ -21,4 +21,17 @@ import Foundation
         self.requestSerializer.timeoutInterval = 25
     }
 
+    /// Describes a failed push proxy request with HTTP status code and (truncated) response body, e.g. to find out why a registration was rejected with a 400
+    public static func failureDescription(forTask task: URLSessionDataTask?, error: Error) -> String {
+        let statusCode = (task?.response as? HTTPURLResponse)?.statusCode
+        var description = "HTTP status: \(statusCode.map { String($0) } ?? "none")"
+
+        if let data = (error as NSError).userInfo[AFNetworkingOperationFailingURLResponseDataErrorKey] as? Data,
+           let body = String(data: data.prefix(500), encoding: .utf8), !body.isEmpty {
+            description += ", body: \(body)"
+        }
+
+        return "\(description), error: \(error.localizedDescription)"
+    }
+
 }
