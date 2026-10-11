@@ -51,6 +51,14 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     private let userSessionId: String
     private var isAudioOnly: Bool
 
+    // An answered incoming call can be a voice call only because its kind was unknown when it was answered.
+    // It gives up the own camera but still receives the video of the others, until the user switches to voice only.
+    private var receivesVideoInVoiceCall: Bool
+
+    private var receivesRemoteVideo: Bool {
+        return CallVideoPolicy.receivesRemoteVideo(isAudioOnly: self.isAudioOnly, keepsReceivingVideo: self.receivesVideoInVoiceCall)
+    }
+
     // TODO: Default true?
     // The state the local media is (re)created in, so audio and video are restored whenever the
     // local tracks are recreated, e.g. when reconnecting to a call. The audio state is kept in
@@ -150,12 +158,13 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         return flags
     }
 
-    init(delegate: NCCallControllerDelegate, room: NCRoom, account: TalkAccount, isAudioOnly: Bool, userSessionId: String, voiceChatMode: Bool) {
+    init(delegate: NCCallControllerDelegate, room: NCRoom, account: TalkAccount, isAudioOnly: Bool, userSessionId: String, voiceChatMode: Bool, receivesVideoInVoiceCall: Bool = false) {
         self.delegate = delegate
         self.room = room
         self.account = account
         self.userSessionId = userSessionId
         self.isAudioOnly = isAudioOnly
+        self.receivesVideoInVoiceCall = receivesVideoInVoiceCall
 
         self.signalingController = NCSignalingController(for: room)
 
@@ -550,6 +559,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
             NCLog.log("Downgrading video call to voice only call using renegotiation")
 
             self.isAudioOnly = true
+            self.receivesVideoInVoiceCall = false
             self.disableVideoAtStart = true
 
             NCAudioController.shared.setAudioSessionToVoiceChatMode()
@@ -1097,7 +1107,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         // Create a peer connection
         print("Creating a peer for \(sessionId)")
         let iceServers = self.signalingController.getIceServers()
-        peerConnectionWrapper = NCPeerConnection(sessionId: sessionId, sid: sid, andICEServers: iceServers, forAudioOnlyCall: screensharingPeer ? false : self.isAudioOnly)
+        peerConnectionWrapper = NCPeerConnection(sessionId: sessionId, sid: sid, andICEServers: iceServers, forAudioOnlyCall: screensharingPeer ? false : !self.receivesRemoteVideo)
         peerConnectionWrapper?.roomType = roomType
         peerConnectionWrapper?.delegate = self
         peerConnectionWrapper?.isOwnScreensharePeer = ownScreenshare

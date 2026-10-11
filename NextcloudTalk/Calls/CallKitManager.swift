@@ -412,7 +412,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
                 if callFlag.isEmpty {
                     self.presentMissedCallNotification(for: call)
                     self.endCall(withUUID: call.uuid)
-                } else if callFlag.contains(.withVideo) {
+                } else if CallVideoPolicy.callType(callFlag: callFlag, hasCallFlagsCapability: true) == .video {
                     self.updateCall(call, hasVideo: true)
                 }
             }

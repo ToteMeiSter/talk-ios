@@ -555,7 +555,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // MARK: - Call
 
     // swiftlint:disable:next function_parameter_count
-    public func startCall(withVideo video: Bool, inRoom room: NCRoom, withVideoEnabled videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, withRecordingConsent recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool) {
+    public func startCall(withVideo video: Bool, inRoom room: NCRoom, withVideoEnabled videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, withRecordingConsent recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool, answeredIncomingCall: Bool = false) {
         guard self.callViewController == nil else {
             print("Not starting call due to in another call.")
             return
@@ -570,6 +570,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         self.callViewController = callViewController
 
         callViewController.videoDisabledAtStart = !videoEnabled
+        callViewController.receivesVideoInVoiceCall = answeredIncomingCall
         callViewController.voiceChatModeAtStart = voiceChatMode
         callViewController.initiator = initiator
         callViewController.silentCall = silently
@@ -869,8 +870,15 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 break
             }
 
+            // The answer may come before CallKit knows the kind of the call (or its request failed), but this response is fresh
+            let callFlag = (roomDict?["callFlag"] as? Int).map { CallFlag(rawValue: $0) }
+            let hasCallFlags = NCDatabaseManager.sharedInstance().serverHasTalkCapability(.callFlags, forAccountId: accountId)
+            let callType = CallVideoPolicy.callType(callFlag: callFlag, hasCallFlagsCapability: hasCallFlags)
+            let startsAsVideoCall = CallVideoPolicy.startsAsVideoCall(callKitHasVideo: video, serverCallType: callType)
+
             // Calls that have been answered start with video disabled by default, in voice chat mode and silently (without notification).
-            self.startCall(withVideo: video, inRoom: room, withVideoEnabled: false, asInitiator: false, silently: true, withRecordingConsent: false, withVoiceChatMode: true)
+            // They receive video also when they are voice calls, because their kind can be unknown or outdated when they are answered.
+            self.startCall(withVideo: startsAsVideoCall, inRoom: room, withVideoEnabled: false, asInitiator: false, silently: true, withRecordingConsent: false, withVoiceChatMode: true, answeredIncomingCall: true)
         }
     }
 
