@@ -37,6 +37,14 @@ struct NCIceRestartTracker {
         return true
     }
 
+    /// Like `startRestart`, for a change of the network of the device. The old connection is bound to the address of
+    /// the old network, so the restart is needed whatever the earlier failures were: the attempts start over.
+    mutating func startRestartAfterNetworkChange(hasMCU: Bool, isOfferer: Bool, isSignalingStable: Bool) -> Bool {
+        reset()
+
+        return startRestart(hasMCU: hasMCU, isOfferer: isOfferer, isSignalingStable: isSignalingStable)
+    }
+
     /// The recovery watchdog is armed on the first failure and stays armed until the connection is established again
     static func shouldArmRecoveryWatchdog(hasMCU: Bool, isFailed: Bool, isAlreadyArmed: Bool) -> Bool {
         return !hasMCU && isFailed && !isAlreadyArmed

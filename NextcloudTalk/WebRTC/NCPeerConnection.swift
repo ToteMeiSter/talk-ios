@@ -270,7 +270,20 @@ public class NCPeerConnection: NSObject {
         recoveryWatchdogWorkItem = nil
     }
 
-    private func restartIceIfNeeded(hasMCU: Bool) {
+    /// The device changed its network (e.g. Wi-Fi to cellular): the connection is bound to the address of the old
+    /// network, so ICE is restarted at once instead of waiting for the connection to fail. Not used with a MCU, there
+    /// the call is joined again if the connection does not come back. Only the side that sent the offer restarts,
+    /// the other side recovers when the offerer restarts or through the recovery watchdog after ICE failed.
+    func restartIceAfterNetworkChange(hasMCU: Bool) {
+        WebRTCCommon.shared.assertQueue()
+
+        disconnectedRestartWorkItem?.cancel()
+        disconnectedRestartWorkItem = nil
+
+        restartIceIfNeeded(hasMCU: hasMCU, afterNetworkChange: true)
+    }
+
+    private func restartIceIfNeeded(hasMCU: Bool, afterNetworkChange: Bool = false) {
         WebRTCCommon.shared.assertQueue()
 
         guard let peerConnection else { return }
@@ -278,7 +291,11 @@ public class NCPeerConnection: NSObject {
         let isOfferer = peerConnection.localDescription?.type == .offer
         let isSignalingStable = peerConnection.signalingState == .stable
 
-        guard iceRestartTracker.startRestart(hasMCU: hasMCU, isOfferer: isOfferer, isSignalingStable: isSignalingStable) else {
+        let didStart = afterNetworkChange
+            ? iceRestartTracker.startRestartAfterNetworkChange(hasMCU: hasMCU, isOfferer: isOfferer, isSignalingStable: isSignalingStable)
+            : iceRestartTracker.startRestart(hasMCU: hasMCU, isOfferer: isOfferer, isSignalingStable: isSignalingStable)
+
+        guard didStart else {
             if iceRestartTracker.isExhausted, !hasMCU {
                 NCLog.log("ICE restart limit reached for peer \(peerId)")
             }
