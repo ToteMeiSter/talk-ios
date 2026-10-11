@@ -35,6 +35,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private static let statusCodeFailedToJoinExternal = 997
     private static let statusCodeShouldIgnoreAttemptButJoinedSuccessfully = 998
     private static let statusCodeIgnoreJoinAttempt = 999
+
+    // Re-joining a room for a call is not possible, because the room is not active anymore (it was left meanwhile)
+    static let statusCodeRoomNotActive = 995
+
     private static let answeredCallReadyTimeoutSeconds: TimeInterval = 30
 
     private struct PendingAnsweredCall {
@@ -53,6 +57,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private var leavingRoomToken: String?
     private var joiningSessionId: String?
     private var joinRoomTask: URLSessionTask?
+    private var rejoinAttemptId: UUID?
     private var leaveRoomTask: URLSessionTask?
     private var upgradeCallToken: String?
     private var upgradeCallAccountId: String?
@@ -1279,10 +1284,34 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     public func rejoinRoomForCall(_ token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ sessionId: String?, _ room: NCRoom?, _ error: Error?, _ statusCode: Int, _ statusReason: String?) -> Void) {
         NCLog.log("Rejoining room \(token)")
 
-        guard let roomController = self.activeRooms[token] else { return }
+        guard let roomController = self.activeRooms[token] else {
+            // Report it, otherwise the caller waits for the answer forever (the call stays "reconnecting")
+            NCLog.log("Could not re-join room \(token), the room is not active anymore")
+            completionBlock(nil, nil, NSError(domain: NSCocoaErrorDomain, code: 0), NCRoomsManager.statusCodeRoomNotActive, nil)
+            return
+        }
+
+        // A second re-join of the same room replaces the first one. Its request is cancelled (the caller gets the
+        // cancellation as the result), so two requests do not create two room sessions of which one stays behind.
+        if self.rejoinAttemptId != nil, self.isJoiningRoom(withToken: token) {
+            NCLog.log("Re-joining room \(token) while a re-join of it is running, cancelling the earlier one")
+            self.joinRoomTask?.cancel()
+        }
+
+        let attemptId = UUID()
+        self.rejoinAttemptId = attemptId
 
         self.joiningRoomToken = token
         self.joinRoomTask = NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: { sessionId, room, error, statusCode, statusReason in
+            // The result of a cancelled earlier attempt must not clear what the later attempt has set
+            defer {
+                if self.rejoinAttemptId == attemptId {
+                    self.rejoinAttemptId = nil
+                    self.joiningRoomToken = nil
+                    self.joiningSessionId = nil
+                }
+            }
+
             if error == nil, let sessionId {
                 roomController.userSessionId = sessionId
                 roomController.inCall = true
@@ -1316,9 +1345,6 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 NCLog.log("Could not re-join room \(token). Status code: \(statusCode). Error: \(error?.localizedDescription ?? "Unknown")")
                 completionBlock(nil, nil, error, statusCode, statusReason)
             }
-
-            self.joiningRoomToken = nil
-            self.joiningSessionId = nil
         })
     }
 
