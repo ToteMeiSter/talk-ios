@@ -76,6 +76,10 @@ public enum NCExternalSignalingSendMessageStatus {
     private var pendingMessages = [WSMessage]()
     private var helloMessage: WSMessage?
     private var messagesWithCompletionBlock = [WSMessage]()
+
+    // Reason of the last error response of the signaling server to a join message (e.g. "no_such_room: ..."),
+    // read and cleared by the completion of `joinRoom` (main thread only)
+    private var lastJoinFailureReason: String?
     private var reconnectInterval: Int = 0
     private var reconnectTimer: Timer?
     private var disconnectTime: TimeInterval?
@@ -257,7 +261,7 @@ public enum NCExternalSignalingSendMessageStatus {
         // Wiggle interval a little bit to prevent all clients from connecting
         // simultaneously in case the server connection is interrupted.
         let interval = self.reconnectInterval - (self.reconnectInterval / 2) + Int.random(in: 1...self.reconnectInterval)
-        print("Reconnecting in \(interval)")
+        NCLog.log("Reconnecting in \(interval)s")
 
         DispatchQueue.main.async {
             self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(interval), repeats: false, block: { [weak self] _ in
@@ -517,6 +521,15 @@ public enum NCExternalSignalingSendMessageStatus {
 
         NCLog.log("Received error response \(errorCode)")
 
+        let errorReason = [errorCode, errorDict["message"] as? String].compactMap { $0 }.joined(separator: ": ")
+
+        DispatchQueue.main.async {
+            // Queued before the completion block is executed, so the reason is available there
+            if let message = self.messagesWithCompletionBlock.first(where: { messageId == $0.messageId }), message.isJoinMessage {
+                self.lastJoinFailureReason = errorReason
+            }
+        }
+
         if errorCode == "no_such_session" || errorCode == "too_many_requests" {
             // We could not resume the previous session, but the websocket is still alive -> resend the hello message without a resumeId
             self.resumeId = nil
@@ -579,12 +592,24 @@ public enum NCExternalSignalingSendMessageStatus {
                 self.forceReconnect()
             }
 
-            if let block {
-                if status != .success {
-                    block(NSError(domain: NSCocoaErrorDomain, code: 0))
-                } else {
-                    block(nil)
+            let failureReason = self.lastJoinFailureReason
+            self.lastJoinFailureReason = nil
+
+            if status != .success {
+                let reason: String
+
+                switch status {
+                case .socketError:
+                    reason = "websocket error or no answer from the signaling server in time"
+                default:
+                    reason = failureReason ?? "request was dropped or rejected without an error response"
                 }
+
+                NCLog.log("Room request (roomId '\(roomId)') at the signaling server failed: \(reason)")
+
+                block?(NSError(domain: "NCExternalSignalingController", code: status == .socketError ? 1 : 2, userInfo: [NSLocalizedDescriptionKey: reason]))
+            } else {
+                block?(nil)
             }
         }
     }
@@ -595,7 +620,7 @@ public enum NCExternalSignalingSendMessageStatus {
             self.joinedRoomToken = nil
             self.joinRoom(withRoomId: "", withSessionId: "", withFederation: nil, withCompletionBlock: nil)
         } else {
-            print("External signaling: Not leaving because it's not the room we joined")
+            NCLog.log("External signaling: Not leaving because it's not the room we joined")
         }
     }
 
@@ -706,7 +731,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if eventTarget == "participants" {
             self.processRoomParticipantsEvents(eventDict: eventDict)
         } else {
-            print("Unsupported event target: \(eventDict)")
+            NCLog.log("Unsupported event target: \(eventTarget ?? "nil")")
         }
     }
 
@@ -726,12 +751,12 @@ public enum NCExternalSignalingSendMessageStatus {
                 self.participantsMap[signalingSessionId] = participant
 
                 if !participant.isFederated, participant.userId == self.account.userId {
-                    print("App user joined room")
+                    NCLog.log("App user joined room")
                     continue
                 }
 
                 // Only notify if another participant joined the room and not ourselves from a different device
-                print("Participant joined room")
+                NCLog.log("Participant joined room")
 
                 guard let currentRoom else { continue }
 
@@ -780,7 +805,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if eventType == "switchto", let wrappedMessage = eventDict["switchto"] as? [AnyHashable: Any] {
             self.processSwitchToMessageEvent(messageDict: wrappedMessage)
         } else {
-            print("Unknown room event: \(eventDict)")
+            NCLog.log("Unknown room event: \(eventType)")
         }
     }
 
@@ -802,7 +827,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if messageType == "recording" {
             self.delegate?.externalSignalingController(self, didReceivedSignalingMessage: messageDict)
         } else {
-            print("Unknown room message type \(messageDict)")
+            NCLog.log("Unknown room message type \(messageType)")
         }
     }
 
@@ -812,7 +837,7 @@ public enum NCExternalSignalingSendMessageStatus {
         if let roomToken, !roomToken.isEmpty {
             self.delegate?.externalSignalingController(self, shouldSwitchToCall: roomToken)
         } else {
-            print("Unknown switchTo message: \(messageDict)")
+            NCLog.log("Unknown switchTo message without a room token")
         }
     }
 
@@ -851,7 +876,7 @@ public enum NCExternalSignalingSendMessageStatus {
 
             NotificationCenter.default.post(name: .extSignalingDidUpdateParticipants, object: self, userInfo: userInfo)
         } else {
-            print("Unknown room event: \(eventDict)")
+            NCLog.log("Unknown participants event: \(eventType)")
         }
     }
 

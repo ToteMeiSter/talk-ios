@@ -49,9 +49,9 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
         let authOptions: UNAuthorizationOptions = [.alert, .sound, .badge]
         self.notificationCenter.requestAuthorization(options: authOptions) { granted, _ in
             if granted {
-                NSLog("User notifications permission granted.")
+                NCLog.log("User notifications permission granted.")
             } else {
-                NSLog("User notifications permission denied.")
+                NCLog.log("User notifications permission denied.")
             }
         }
     }
@@ -72,7 +72,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
         case .deleteMultiple:
             self.removeNotification(withNotificationIds: pushNotification.notificationIds as? [NSNumber], forAccountId: pushNotification.accountId, withCompletionBlock: nil)
         default:
-            NSLog("Push Notification of an unknown type received")
+            NCLog.log("Push Notification of an unknown type received")
         }
     }
 
@@ -429,7 +429,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
     }
 
     private func handlePushNotificationResponse(withUserText pushNotification: NCPushNotification) {
-        NSLog("Received push-notification with user input -> sending chat message")
+        NCLog.log("Received push-notification with user input -> sending chat message")
 
         guard let pushAccount = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: pushNotification.accountId) else {
             return
@@ -445,7 +445,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
         DispatchQueue.global().async {
             NCAPIController.sharedInstance().sendChatMessage(pushNotification.responseUserText, toRoom: pushNotification.roomToken, threadTitle: nil, replyTo: -1, referenceId: nil, silently: false, forAccount: pushAccount) { error in
                 if let error {
-                    NSLog("Could not send chat message. Error: %@", error.description)
+                    NCLog.log("Could not send chat message. Error: \(error.description)")
 
                     // Display local push-notification to inform user
                     var userInfo: [AnyHashable: Any] = [:]
