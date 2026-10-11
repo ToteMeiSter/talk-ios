@@ -693,7 +693,7 @@ public class NCChatController: NSObject {
                 let previousKnownReadMarker = self.knownReadMarker
                 self.knownReadMarker = messageId
 
-                NCAPIController.sharedInstance().setChatReadMarker(messageId, inRoom: self.room.token, forAccount: self.account) { error in
+                NCAPIController.sharedInstance().setChatReadMarker(messageId, inRoom: self.room.token, forAccount: self.account) { error, lastCommonReadMessage in
                     guard error == nil else {
                         DispatchQueue.main.async {
                             // The request failed, so the server marker was not moved. Allow to send it again with the next message
@@ -707,6 +707,7 @@ public class NCChatController: NSObject {
 
                     // Keep our local room in sync so the unread indicators stay correct
                     NCRoomsManager.shared.updateLastReadMessage(messageId, forRoom: self.room)
+                    self.checkLastCommonReadMessage(lastCommonReadMessage)
                 }
             }
 

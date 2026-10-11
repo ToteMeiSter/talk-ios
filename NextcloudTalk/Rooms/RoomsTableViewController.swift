@@ -1467,7 +1467,7 @@ class RoomsTableViewController: UITableViewController, CCCertificateDelegate, UI
     }
 
     private func markRoomAsRead(_ room: NCRoom) {
-        NCAPIController.sharedInstance().setChatReadMarker(room.lastMessage?.messageId ?? 0, inRoom: room.token, forAccount: NCDatabaseManager.sharedInstance().activeAccount()) { error in
+        NCAPIController.sharedInstance().setChatReadMarker(room.lastMessage?.messageId ?? 0, inRoom: room.token, forAccount: NCDatabaseManager.sharedInstance().activeAccount()) { error, _ in
             if let error {
                 NSLog("Error marking room as read: %@", error.description)
             }
