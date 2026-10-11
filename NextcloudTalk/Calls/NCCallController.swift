@@ -89,6 +89,10 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     // Pause and counter for joining the call again after the session was lost (WebRTC queue only)
     private var rejoinBackoff = CallRejoinBackoff()
     private var rejoinRetryWorkItem: DispatchWorkItem?
+
+    // Pause and counter for joining the call again after the ICE connection failed (WebRTC queue only). The pause
+    // itself is `rejoinRetryWorkItem`, a second one is not scheduled while it is running.
+    private var iceFailedBackoff = CallRejoinBackoff.forFailedIce()
     private var speaking = false
     private var userInCall = 0 // TODO: Do we have a type for that?
     private var sendCurrentStateTimer: Timer?
@@ -397,13 +401,8 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         NCLog.log("Rejoining the call in \(self.room.token) failed (StatusCode \(statusCode)), retry \(self.rejoinBackoff.attempts) in \(delay) s")
 
-        let workItem = DispatchWorkItem { [weak self] in
+        self.scheduleRejoinRetry(after: delay) { [weak self] in
             guard let self else { return }
-
-            self.rejoinRetryWorkItem = nil
-
-            // The pause is over, but the call may have been left in the meantime
-            guard !self.isLeavingCall else { return }
 
             switch retry {
             case .joinRoom:
@@ -414,6 +413,24 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
             case .newSession:
                 self.forceReconnect()
             }
+        }
+    }
+
+    /// Runs `action` after a pause on the WebRTC queue. There is one pause at a time for all kinds of rejoins
+    /// (steps of a rejoin that failed, a rejoin after a failed ICE connection), so they can not pile up.
+    /// The action does not run if the call was left in the meantime or if the pause was cancelled.
+    private func scheduleRejoinRetry(after delay: TimeInterval, action: @escaping () -> Void) {
+        WebRTCCommon.shared.assertQueue()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+
+            self.rejoinRetryWorkItem = nil
+
+            // The pause is over, but the call may have been left in the meantime
+            guard !self.isLeavingCall else { return }
+
+            action()
         }
 
         self.rejoinRetryWorkItem = workItem
@@ -1850,10 +1867,15 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                 return
             }
 
+            if self.isPeerDecidingIceRecovery(peerConnection) {
+                // A connection which held for long and fails now starts the pauses over, a short one does not
+                self.iceFailedBackoff.noteFailed(now: ProcessInfo.processInfo.systemUptime)
+            }
+
             if peerConnection.isMCUPublisherPeer {
                 // If publisher peer failed, then reconnect
                 NCLog.log("Publisher peer connection failed")
-                self.forceReconnect()
+                self.rejoinAfterIceFailure()
             } else if let externalSignalingController, externalSignalingController.hasMCU {
                 // If another peer failed using MCU, then request a new offer
                 let sessionId = peerConnection.peerId
@@ -1864,6 +1886,16 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                     // Request new offer
                     self.requestOfferWithRepetition(forSessionId: sessionId, withRoomType: roomType)
                 }
+            }
+        }
+
+        if self.isPeerDecidingIceRecovery(peerConnection) {
+            if newState == .connected || newState == .completed {
+                // The pause starts over only when the connection holds for long (see `CallRejoinBackoff.failedIceStableTime`):
+                // one which comes up and fails again after a few seconds must keep the growing pause
+                self.iceFailedBackoff.noteConnected(now: ProcessInfo.processInfo.systemUptime)
+            } else if newState == .disconnected {
+                self.iceFailedBackoff.noteDisturbed()
             }
         }
 
@@ -1906,8 +1938,43 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         // failed peers, so nothing is done there.
         guard externalSignalingController != nil else { return }
 
-        NCLog.log("Force reconnect, because ICE of peer \(peerConnection.peerId) did not recover")
-        self.forceReconnect()
+        NCLog.log("ICE of peer \(peerConnection.peerId) did not recover")
+        self.rejoinAfterIceFailure()
+    }
+
+    /// With a MCU the connection of our own publisher tells if the call works, without a MCU the connections to the
+    /// other participants do. The state of the others says nothing about the publisher and vice versa.
+    private func isPeerDecidingIceRecovery(_ peerConnection: NCPeerConnection) -> Bool {
+        let hasMCU = self.externalSignalingController?.hasMCU ?? false
+
+        // The publisher of a screen share is a publisher too, but it says nothing about the camera and the microphone
+        return hasMCU ? (peerConnection.isMCUPublisherPeer && !peerConnection.isOwnScreensharePeer) : !peerConnection.isDummyPeer
+    }
+
+    /// Joins the call again with a new session after ICE failed for good. A connection which fails again and again
+    /// (e.g. TURNS does not work, UDP is blocked) would rejoin every few seconds and pile up sessions on the server,
+    /// so the pause grows with every failure (see `CallRejoinBackoff.failedIceDelays`) until the connection holds.
+    private func rejoinAfterIceFailure() {
+        WebRTCCommon.shared.assertQueue()
+
+        guard !self.isLeavingCall else { return }
+
+        // A rejoin is waiting for its pause already (after a failed step or after an earlier ICE failure)
+        guard self.rejoinRetryWorkItem == nil else {
+            NCLog.log("ICE failed, a rejoin is scheduled already")
+            return
+        }
+
+        guard let delay = self.iceFailedBackoff.nextDelay(), delay > 0 else {
+            self.forceReconnect()
+            return
+        }
+
+        NCLog.log("ICE failed again, rejoining the call in \(self.room.token) in \(delay) s (failure \(self.iceFailedBackoff.attempts))")
+
+        self.scheduleRejoinRetry(after: delay) { [weak self] in
+            self?.forceReconnect()
+        }
     }
 
     func peerConnection(_ peerConnection: NCPeerConnection, didGenerate candidate: RTCIceCandidate) {

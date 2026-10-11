@@ -20,15 +20,36 @@ struct CallRejoinBackoff {
     /// 2 + 4 + 8 + 15 + 15 + 15 = 59 s, that is two signaling resume windows (30 s each) of waiting for the network
     static let defaultMaxAttempts = 6
 
+    /// The pause between the rejoins of a call whose ICE connection failed: the first rejoin at once, so a single
+    /// glitch heals as fast as it did without a pause, then 2, 4, 8 and 15 s. 15 s stays the ceiling and the number of
+    /// attempts is not limited, because the call is not lost for the user: the user sees it reconnecting and ends it.
+    /// This is what the Android client does.
+    static let failedIceDelays: [TimeInterval] = [0, 2, 4, 8, 15]
+
+    /// The time a connection has to stay connected, without a break, before the pause starts over. It has to be
+    /// longer than the longest pause (15 s) and than the cycle of a connection which comes up and fails again
+    /// after 10 to 30 s (TURN lets the checks pass, the media does not), otherwise such a cycle rejoins at once, always.
+    static let failedIceStableTime: TimeInterval = 60
+
+    /// The counter for the rejoins after a failed ICE connection, see `failedIceDelays`
+    static func forFailedIce() -> CallRejoinBackoff {
+        return CallRejoinBackoff(delays: failedIceDelays, maxAttempts: Int.max, stableTime: failedIceStableTime)
+    }
+
     private let delays: [TimeInterval]
     private let maxAttempts: Int
+    private let stableTime: TimeInterval
+
+    /// Since when the connection holds without a break, nil if it does not
+    private var connectedSince: TimeInterval?
 
     /// Number of repeats that were handed out by `nextDelay()` since the last `reset()`
     private(set) var attempts = 0
 
-    init(delays: [TimeInterval] = CallRejoinBackoff.defaultDelays, maxAttempts: Int = CallRejoinBackoff.defaultMaxAttempts) {
+    init(delays: [TimeInterval] = CallRejoinBackoff.defaultDelays, maxAttempts: Int = CallRejoinBackoff.defaultMaxAttempts, stableTime: TimeInterval = .infinity) {
         self.delays = delays.isEmpty ? CallRejoinBackoff.defaultDelays : delays
         self.maxAttempts = max(0, maxAttempts)
+        self.stableTime = stableTime
     }
 
     /// No more repeats are allowed
@@ -49,6 +70,29 @@ struct CallRejoinBackoff {
     /// The call is joined (or given up), the next loss of the connection starts with the shortest pause again
     mutating func reset() {
         attempts = 0
+    }
+
+    /// The connection is up. The first call of a run counts, the later ones (connected, then completed) do not.
+    /// - Parameter now: a monotonic clock, in seconds
+    mutating func noteConnected(now: TimeInterval) {
+        if connectedSince == nil {
+            connectedSince = now
+        }
+    }
+
+    /// The connection is shaky (disconnected), so the time it held does not count
+    mutating func noteDisturbed() {
+        connectedSince = nil
+    }
+
+    /// The connection failed. If it held for `stableTime` before, the failure is a new one and the pause starts over,
+    /// otherwise the failure goes on with the growing pause. Call it before `nextDelay()`.
+    mutating func noteFailed(now: TimeInterval) {
+        if let connectedSince, now - connectedSince >= stableTime {
+            reset()
+        }
+
+        connectedSince = nil
     }
 
     /// Tells if an attempt that failed with this HTTP status may succeed when repeated.
