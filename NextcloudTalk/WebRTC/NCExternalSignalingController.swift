@@ -189,6 +189,26 @@ public enum NCExternalSignalingSendMessageStatus {
         }
     }
 
+    /// The device changed its network. The websocket is bound to the address of the old network: it dies by itself
+    /// only when the old network goes away completely, otherwise it stays silent until a timeout, and there is no
+    /// ping of the client. A call needs the signaling right now (offers of an ICE restart, a new join), so the socket
+    /// is replaced. The session is kept (resume), if the server still holds it.
+    func reconnectAfterNetworkChange() {
+        DispatchQueue.main.async {
+            NCLog.log("Reconnecting to \(self.serverUrl) because the network changed")
+
+            // A new network deserves a new attempt now, not after the rest of the growing pause
+            self.reconnectInterval = self.initialReconnectInterval
+
+            if self.reconnectTimer != nil {
+                // The connection was lost already and a reconnect is waiting for its time
+                self.connect(force: true)
+            } else {
+                self.reconnect()
+            }
+        }
+    }
+
     func forceReconnectForRejoin() {
         // In case we force reconnect in order to rejoin the call again, we need to keep the currently joined room.
         // In `helloResponseReceived` we determine that we were in a room and that the sessionId changed, in that case
