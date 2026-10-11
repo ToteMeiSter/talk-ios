@@ -353,6 +353,10 @@ public enum NCExternalSignalingSendMessageStatus {
         }
 
         let sessionChanged = self.sessionId != newSessionId
+
+        // The very first session has no predecessor, so there is nothing a queued message could be stale for
+        let sessionReplaced = sessionChanged && self.sessionId != nil
+        let rejoinToken = sessionChanged ? self.currentRoom : nil
         self.sessionId = newSessionId
 
         if sessionChanged {
@@ -380,12 +384,31 @@ public enum NCExternalSignalingSendMessageStatus {
             let bgTask = BGTaskHelper.startBackgroundTask(withName: "NCUpdateSignalingVersionTransaction")
             NCDatabaseManager.sharedInstance().setExternalSignalingServerVersion(serverVersion, forAccountId: self.account.accountId)
 
-            // Send pending messages
-            for wsMessage in self.pendingMessages {
-                self.send(message: wsMessage)
+            let queuedMessages = self.pendingMessages
+            self.pendingMessages = []
+
+            var droppedCount = 0
+
+            // Send pending messages. With a new session, the ones for the old session are dropped
+            for wsMessage in queuedMessages {
+                let messageType = wsMessage.message["type"] as? String
+                let action = NCSignalingResumePolicy.queuedMessageAction(messageType: messageType, sessionReplaced: sessionReplaced, rejoinFollows: rejoinToken != nil)
+
+                switch action {
+                case .send:
+                    self.send(message: wsMessage)
+                case .drop:
+                    droppedCount += 1
+                    wsMessage.executeCompletionBlock(withStatus: .applicationError)
+                case .dropSilently:
+                    droppedCount += 1
+                    wsMessage.ignoreCompletionBlock()
+                }
             }
 
-            self.pendingMessages = []
+            if droppedCount > 0 {
+                NCLog.log("Hello with a new session: dropped \(droppedCount) of \(queuedMessages.count) pending messages of the old session")
+            }
 
             bgTask.stopBackgroundTask()
         }
