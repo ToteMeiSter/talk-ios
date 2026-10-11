@@ -2594,7 +2594,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
 
         NCPushProxySessionManager.shared.post(urlString, parameters: parameters, progress: nil) { _, _ in
             completionBlock(nil)
-        } failure: { _, error in
+        } failure: { task, error in
+            NCLog.log("Push proxy request to subscribe failed. \(NCPushProxySessionManager.failureDescription(forTask: task, error: error))")
             completionBlock(error)
         }
     }
@@ -2609,7 +2610,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
 
         NCPushProxySessionManager.shared.delete(urlString, parameters: parameters) { _, _ in
             completionBlock(nil)
-        } failure: { _, error in
+        } failure: { task, error in
+            NCLog.log("Push proxy request to unsubscribe failed. \(NCPushProxySessionManager.failureDescription(forTask: task, error: error))")
             completionBlock(error)
         }
     }
