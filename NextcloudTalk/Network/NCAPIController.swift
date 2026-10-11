@@ -2841,15 +2841,18 @@ class NCAPIController: NSObject, NKCommonDelegate {
     }
 
     @discardableResult
-    public func setChatReadMarker(_ lastReadMessage: Int, inRoom token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) -> URLSessionDataTask? {
+    public func setChatReadMarker(_ lastReadMessage: Int, inRoom token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?, _ lastCommonReadMessage: Int) -> Void) -> URLSessionDataTask? {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)
         else { return nil }
 
         let urlString = self.getRequestURL(forEndpoint: "chat/\(encodedToken)/read", withAPIType: .chat, forAccount: account)
 
-        return apiSessionManager.postOcs(urlString, account: account, parameters: ["lastReadMessage": lastReadMessage]) { _, ocsError in
-            completionBlock(ocsError)
+        return apiSessionManager.postOcs(urlString, account: account, parameters: ["lastReadMessage": lastReadMessage]) { ocsResponse, ocsError in
+            // The response of the read request also carries the last message read by everybody, -1 if not available
+            let headerLastCommonRead = Int(ocsResponse?.value(forHTTPHeaderField: "x-chat-last-common-read") ?? "") ?? -1
+
+            completionBlock(ocsError, headerLastCommonRead)
         }
     }
 

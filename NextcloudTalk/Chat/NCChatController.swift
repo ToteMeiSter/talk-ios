@@ -669,11 +669,12 @@ public class NCChatController: NSObject {
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
 
-                NCAPIController.sharedInstance().setChatReadMarker(messageId, inRoom: self.room.token, forAccount: self.account) { error in
+                NCAPIController.sharedInstance().setChatReadMarker(messageId, inRoom: self.room.token, forAccount: self.account) { error, lastCommonReadMessage in
                     guard error == nil else { return }
 
                     // Keep our local room in sync so the unread indicators stay correct
                     NCRoomsManager.shared.updateLastReadMessage(messageId, forRoom: self.room)
+                    self.checkLastCommonReadMessage(lastCommonReadMessage)
                 }
             }
 
