@@ -194,17 +194,6 @@ import SwiftUI
     }
 
     func startCall(withVideo video: Bool, silently: Bool, button: BarButtonItemWithActivity) {
-        if NCSettingsController.sharedInstance().isEndToEndEncryptedCallingEnabled(forAccount: self.account.accountId) {
-            let alert = UIAlertController(title: NSLocalizedString("Unsupported", comment: "Calling is not supported"),
-                                          message: NSLocalizedString("Calling is currently not supported because end-to-end-encryption is enabled on the server", comment: ""),
-                                          preferredStyle: .alert)
-
-            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default))
-            self.present(alert, animated: true)
-
-            return
-        }
-
         button.showIndicator()
         if self.room.recordingConsent {
             NCUserInterfaceController.sharedInstance().presentRecordingConsentAlert(for: self.room) { confirmed in
@@ -998,7 +987,7 @@ import SwiftUI
             oooView.setupAbsence(withData: absenceData, inRoom: self.room)
             oooView.alpha = 0
 
-            self.view.addSubview(oooView)
+            self.addBelowVideoMessageScrim(oooView)
 
             NSLayoutConstraint.activate([
                 oooView.leadingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.leadingAnchor),
@@ -1041,7 +1030,7 @@ import SwiftUI
             view.setupPinnedMessage(withMessage: message, inRoom: self.room)
             view.alpha = 0
 
-            self.view.addSubview(view)
+            self.addBelowVideoMessageScrim(view)
 
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.leadingAnchor),
@@ -1223,8 +1212,7 @@ import SwiftUI
 
         // If in offline mode, we don't want to show the voice button
         if !offlineMode, !canPress, !presentedInCall,
-           NCDatabaseManager.sharedInstance().roomHasTalkCapability(.voiceMessage, for: room),
-           !room.isFederated {
+           self.isVoiceMessageRecordingAvailable || self.isVideoMessageRecordingAvailable {
 
             self.showVoiceMessageRecordButton()
             return true
