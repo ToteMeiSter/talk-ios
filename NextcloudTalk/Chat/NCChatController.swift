@@ -50,6 +50,11 @@ public class NCChatController: NSObject {
     // Debounces the read-marker requests we issue while receiving messages over the chat relay. Only accessed on the main queue.
     private var setReadMarkerWorkItem: DispatchWorkItem?
 
+    // Highest message id we know the server read marker of this conversation to be at (at least). It is raised when we send a
+    // read marker request and when we send a message, because the server moves the marker to our own message then. Only accessed on the main queue.
+    private var knownReadMarker = 0
+    private var pendingRelayReadMarker = 0
+
     public init!(for room: NCRoom) {
         guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: room.accountId) else { return nil }
 
@@ -656,7 +661,16 @@ public class NCChatController: NSObject {
         // `.active` state), which is the relay equivalent of polling the chat API with setReadMarker
         // enabled. Since relay messages are not fetched over the chat API, the read marker is no longer
         // advanced as a side effect, so we have to set it explicitly to keep the same behaviour.
-        setChatRelayReadMarker(toMessageId: message.messageId)
+        // The relay delivers messages out of order too, so the marker must be derived from the newest known message and not
+        // from the one that just arrived, otherwise it could be set below messages that were already read or sent by us
+        let newestKnownMessageId = chatBlocksForRoomOrThread().last?.newestMessageId ?? 0
+        setChatRelayReadMarker(toMessageId: max(message.messageId, newestKnownMessageId))
+    }
+
+    // Returns the message id to send as read marker, or nil if the server marker is already at or above the candidate.
+    // The read marker must never be lowered: the server also moves it by itself, e.g. to our own message when we send one.
+    static func relayReadMarkerToSend(candidate: Int, knownReadMarker: Int) -> Int? {
+        return candidate > knownReadMarker ? candidate : nil
     }
 
     // Marks the newest message received over the chat relay as read on the server. Requests are
@@ -664,13 +678,32 @@ public class NCChatController: NSObject {
     // results in a single /read request for the newest message.
     private func setChatRelayReadMarker(toMessageId messageId: Int) {
         DispatchQueue.main.async {
+            self.pendingRelayReadMarker = max(self.pendingRelayReadMarker, messageId)
+
+            guard NCChatController.relayReadMarkerToSend(candidate: self.pendingRelayReadMarker, knownReadMarker: self.knownReadMarker) != nil else { return }
+
             self.setReadMarkerWorkItem?.cancel()
 
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
 
+                // Evaluate again, the marker could have been raised by sending a message in the meantime
+                guard let messageId = NCChatController.relayReadMarkerToSend(candidate: self.pendingRelayReadMarker, knownReadMarker: self.knownReadMarker) else { return }
+
+                let previousKnownReadMarker = self.knownReadMarker
+                self.knownReadMarker = messageId
+
                 NCAPIController.sharedInstance().setChatReadMarker(messageId, inRoom: self.room.token, forAccount: self.account) { error in
-                    guard error == nil else { return }
+                    guard error == nil else {
+                        DispatchQueue.main.async {
+                            // The request failed, so the server marker was not moved. Allow to send it again with the next message
+                            if self.knownReadMarker == messageId {
+                                self.knownReadMarker = previousKnownReadMarker
+                            }
+                        }
+
+                        return
+                    }
 
                     // Keep our local room in sync so the unread indicators stay correct
                     NCRoomsManager.shared.updateLastReadMessage(messageId, forRoom: self.room)
@@ -1285,7 +1318,15 @@ public class NCChatController: NSObject {
             }
         }
 
-        NCAPIController.sharedInstance().sendChatMessage(message, toRoom: room.token, threadTitle: nil, replyTo: replyTo, replyToToken: replyToToken, referenceId: referenceId, silently: silently, forAccount: account) { error in
+        NCAPIController.sharedInstance().sendChatMessageReturningId(message, toRoom: room.token, threadTitle: nil, replyTo: replyTo, replyToToken: replyToToken, referenceId: referenceId, silently: silently, forAccount: account) { sentMessageId, error in
+            if error == nil, let sentMessageId {
+                // The server moves the read marker to our own message ("replied = read"). A marker request for an
+                // older message, that is still pending or arrives afterwards, would lower it again.
+                DispatchQueue.main.async {
+                    self.knownReadMarker = max(self.knownReadMarker, sentMessageId)
+                }
+            }
+
             if let referenceId {
                 userInfo["referenceId"] = referenceId
             }
