@@ -196,12 +196,12 @@ static CGFloat const kShareItemControllerEditedImageMaxPixelSize = 4096.0f;
         NSURL *originalURL = [NSURL fileURLWithPath:item.filePath];
 
         if (![NSFileManager.defaultManager replaceItemAtURL:originalURL withItemAtURL:newURL backupItemName:nil options:0 resultingItemURL:nil error:&replaceError]) {
-            NSLog(@"Failed to replace shareItem with edited file: %@ %@", item.fileName, replaceError);
+            [NCLog log:[NSString stringWithFormat:@"Failed to replace shareItem with edited file: %@ %@", item.fileName, replaceError]];
         }
     }];
 
     if (error) {
-        NSLog(@"Failed to coordinate reading edited file: %@ %@", item.fileName, error);
+        [NCLog log:[NSString stringWithFormat:@"Failed to coordinate reading edited file: %@ %@", item.fileName, error]];
     }
     
     NSLog(@"Updating shareItem: %@ %@", item.fileName, item.fileURL);
