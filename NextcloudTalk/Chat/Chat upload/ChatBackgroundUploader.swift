@@ -858,11 +858,26 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     /// Shows the temporary message as not sent, so the user can send it again or delete it.
     private func markMessageAsFailed(referenceId: String) {
+        var roomToken: String?
+        var accountId: String?
+
         RLMRealm.writeTransaction { _ in
             if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage {
                 managedTemporaryMessage.sendingFailed = true
                 managedTemporaryMessage.isOfflineMessage = false
+                roomToken = managedTemporaryMessage.token
+                accountId = managedTemporaryMessage.accountId
             }
+        }
+
+        // Nobody sees the failed message while the app is not in the foreground
+        if UIApplication.shared.applicationState != .active, let roomToken, let accountId {
+            let userInfo: [AnyHashable: Any] = [
+                "roomToken": roomToken,
+                "accountId": accountId,
+                "localNotificationType": NCLocalNotificationType.failedSendChat.rawValue
+            ]
+            NCNotificationController.sharedInstance().show(.failedSendChat, withUserInfo: userInfo)
         }
 
         // An open chat holds its own copy of the message
