@@ -122,7 +122,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             protectedDataAvailable = "unavailable"
         }
 
-        NCLog.log("Report incoming call for token \(token) for account \(accountId). Protected data is \(protectedDataAvailable)")
+        NCLog.log("Report incoming call for token \(token). Protected data is \(protectedDataAvailable)")
 
         // The "delete" push for this call arrived before the VoIP push. A call still needs to be reported to CallKit,
         // but without closing the chat or switching the account.
@@ -181,7 +181,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             guard let self else { return }
 
             if let error {
-                NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                NCLog.log("Report incoming call for token \(token) with UUID \(callUUID) failed with \(error.localizedDescription)")
 
                 // The call is not shown by CallKit (e.g. Focus or block list), so tell the user about the missed call
                 if CallKitReportFailure.shouldNotifyUser(about: error) {
@@ -238,13 +238,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         }
 
         for uuid in CallKitCallCancellation.uuidsToCancel(in: self.calls, accountId: accountId, notificationIds: notificationIds) {
-            NCLog.log("Ending incoming call \(uuid) for account \(accountId) because of a delete push notification")
+            NCLog.log("Ending incoming call \(uuid) because of a delete push notification")
             self.endRemotelyCancelledCall(withUUID: uuid)
         }
     }
 
     private func reportAndEndDeletedIncomingCall(_ token: String, forAccountId accountId: String) {
-        NCLog.log("Incoming call for token \(token) for account \(accountId) was already deleted on the server, ending it")
+        NCLog.log("Incoming call for token \(token) was already deleted on the server, ending it")
 
         let callUUID = UUID()
         let call = CallKitCall()
@@ -258,7 +258,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             guard let self else { return }
 
             if let error {
-                NCLog.log("Report deleted incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                NCLog.log("Report deleted incoming call for token \(token) with UUID \(callUUID) failed with \(error.localizedDescription)")
                 return
             }
 
@@ -282,7 +282,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     private func reportAndCancelIncomingCall(_ token: String, forAccountId accountId: String, withLocalNotificationType notificationType: NCLocalNotificationType) {
-        NCLog.log("Report and cancel incoming call for token \(token) for account \(accountId).")
+        NCLog.log("Report and cancel incoming call for token \(token).")
 
         let update = self.defaultCallUpdate()
         let callUUID = UUID()
@@ -296,7 +296,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             guard let self else { return }
 
             if let error {
-                NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                NCLog.log("Report incoming call for token \(token) with UUID \(callUUID) failed with \(error.localizedDescription)")
 
                 // Without CallKit the user would not see why the call was cancelled, show the notification directly
                 if CallKitReportFailure.shouldNotifyUser(about: error) {
@@ -326,7 +326,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     public func reportIncomingCallForNonCallKitDevices(withPushNotification pushNotification: NCPushNotification) {
-        NCLog.log("Report incoming call for non callkit device for token \(pushNotification.roomToken ?? "Unknown") for account \(pushNotification.accountId).")
+        NCLog.log("Report incoming call for non callkit device for token \(pushNotification.roomToken ?? "Unknown").")
 
         let update = self.defaultCallUpdate()
         let callUUID = UUID()
@@ -340,7 +340,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             guard let self else { return }
 
             if let error {
-                NCLog.log("Report incoming call for non-callkit devices for token \(pushNotification.roomToken ?? "Unknown") for account \(pushNotification.accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                NCLog.log("Report incoming call for non-callkit devices for token \(pushNotification.roomToken ?? "Unknown") with UUID \(callUUID) failed with \(error.localizedDescription)")
 
                 // Show the incoming call as a plain local notification instead
                 if CallKitReportFailure.shouldNotifyUser(about: error) {

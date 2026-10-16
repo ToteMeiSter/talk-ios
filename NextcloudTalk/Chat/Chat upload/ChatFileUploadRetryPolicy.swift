@@ -226,19 +226,6 @@ enum ChatFileUploadRetryPolicy {
         return nil
     }
 
-    /// The beginning of the body an error response had, to be logged.
-    static func responseBody(of error: Error, maxLength: Int = 300) -> String? {
-        for link in self.chain(of: error) {
-            guard let data = link.nsError?.userInfo["com.alamofire.serialization.response.error.data"] as? Data,
-                  let body = String(data: data, encoding: .utf8)
-            else { continue }
-
-            return String(body.prefix(maxLength))
-        }
-
-        return nil
-    }
-
     // MARK: - Duplicates
 
     /// Whether a refused announce means the file was announced by an earlier attempt already.

@@ -1227,7 +1227,7 @@ public class NCChatController: NSObject {
                 }
 
                 if statusCode == 404 {
-                    NCLog.log("Thread not found error: \(error.description)")
+                    NCLog.log("Thread not found error: \(NCLog.errorCode(error))")
                     self.resetChatRelayState()
                     NotificationCenter.default.post(name: .NCChatControllerDidReceiveThreadNotFound, object: self, userInfo: nil)
                     return
@@ -1240,7 +1240,7 @@ public class NCChatController: NSObject {
                 }
 
                 if statusCode != 304, error.underlyingError.code != NSURLErrorCancelled  {
-                    NCLog.log("Could not get new chat messages. Error: \(error.description)")
+                    NCLog.log("Could not get new chat messages. Error: \(NCLog.errorCode(error))")
                 }
             } else {
                 // Update last chat block
@@ -1354,7 +1354,7 @@ public class NCChatController: NSObject {
                     }
                 }
 
-                NCLog.log("Could not send chat message. Error: \(error.description)")
+                NCLog.log("Could not send chat message. Error: \(NCLog.errorCode(error))")
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
             }
@@ -1404,7 +1404,7 @@ public class NCChatController: NSObject {
                 try await ChatFileUploader.upload(upload)
                 NCLog.log("Successfully uploaded and shared voice message.")
             } catch {
-                NCLog.log("Failed to upload voice message. Error: \(error.localizedDescription)")
+                NCLog.log("Failed to upload voice message. Error: \(NCLog.errorCode(error))")
             }
         }
     }

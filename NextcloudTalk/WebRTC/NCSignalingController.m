@@ -54,7 +54,7 @@ static NSInteger const kMaxConsecutiveSessionGoneFailures = 5;
             }
 
             // TODO: Error handling
-            [NCLog log:[NSString stringWithFormat:@"Could not get signaling settings. Error: %@", error.description]];
+            [NCLog log:[NSString stringWithFormat:@"Could not get signaling settings. Error: %@", [NCLog errorCode:error]]];
         }
 
         if (settings) {
@@ -177,7 +177,7 @@ static NSInteger const kMaxConsecutiveSessionGoneFailures = 5;
     [[NCAPIController sharedInstance] sendSignalingMessages:JSONSerializedMessages toRoom:_room.token forAccount:[[NCDatabaseManager sharedInstance] activeAccount] completionHandler:^(NSError *error) {
         if (error) {
             //TODO: Error handling
-            [NCLog log:[NSString stringWithFormat:@"Error sending internal signaling message to %@: %@", self->_room.token, error.localizedDescription]];
+            [NCLog log:[NSString stringWithFormat:@"Error sending internal signaling message to %@: %@", self->_room.token, [NCLog errorCode:error]]];
         }
     }];
 }

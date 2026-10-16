@@ -946,7 +946,7 @@ let kShareConfirmationMaxItems = 10
     func shareFile(atPath path: String, canShare: Bool, metaData: ChatFileUploadMetadata) {
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
             if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
-                NCLog.log(String(format: "Failed to share file. Error: %@", error.localizedDescription))
+                NCLog.log("Failed to share file. Error: \(NCLog.errorCode(error))")
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
@@ -980,7 +980,7 @@ let kShareConfirmationMaxItems = 10
         ChatFileDownloader.shared.downloadFile(withFileId: fileId, fromAccount: self.account) { result in
             guard case .success(let fileStatus) = result, let localPath = fileStatus.fileLocalPath else {
                 if case .failure(let error) = result {
-                    NCLog.log("Failed to download the file to forward a copy. Error: \(error)")
+                    NCLog.log("Failed to download the file to forward a copy. Error: \(NCLog.errorCode(error))")
                 }
 
                 self.hud?.hide(animated: true)
@@ -1005,7 +1005,7 @@ let kShareConfirmationMaxItems = 10
                     NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
                     self.finishUploads(withErrors: [], succeededItems: [])
                 } catch {
-                    NCLog.log("Failed to upload the copy of a file. Error: \(error.localizedDescription)")
+                    NCLog.log("Failed to upload the copy of a file. Error: \(NCLog.errorCode(error))")
                     self.finishUploads(withErrors: [self.message(for: error)], succeededItems: [])
                 }
             }
@@ -1079,7 +1079,7 @@ let kShareConfirmationMaxItems = 10
                 }
             } catch {
                 // Without a draft folder nothing was uploaded at all
-                NCLog.log("Could not prepare the upload folder. Error: \(error.localizedDescription)")
+                NCLog.log("Could not prepare the upload folder. Error: \(NCLog.errorCode(error))")
                 self.finishUploads(withErrors: [NSLocalizedString("Could not prepare upload folder", comment: "")], succeededItems: [])
                 return
             }
@@ -1092,7 +1092,7 @@ let kShareConfirmationMaxItems = 10
                 case .success:
                     succeededItems.append(shareItem)
                 case .failure(let error):
-                    NCLog.log("Failed to upload \(shareItem.fileName ?? "file"). Error: \(error.localizedDescription)")
+                    NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: shareItem.fileName ?? "")). Error: \(NCLog.errorCode(error))")
                     errors.append(self.message(for: error))
                 }
             }
@@ -1181,7 +1181,7 @@ let kShareConfirmationMaxItems = 10
 
         // A screen that is gone cannot show the alert
         guard self.viewIfLoaded?.window != nil else {
-            NCLog.log("Upload failed after the screen was left: \(errors.joined(separator: ", "))")
+            NCLog.log("Upload failed after the screen was left, \(errors.count) error(s)")
             return
         }
 

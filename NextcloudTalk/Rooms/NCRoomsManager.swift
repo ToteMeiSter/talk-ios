@@ -244,7 +244,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         NCAPIController.sharedInstance().getRooms(forAccount: activeAccount, updateStatus: updateStatus, modifiedSince: modifiedSince) { rooms, error in
             if let error {
-                NCLog.log("Could not update rooms. Error: \(error.localizedDescription)")
+                NCLog.log("Could not update rooms. Error: \(NCLog.errorCode(error))")
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidUpdateRooms, object: self, userInfo: ["error": error])
                 completion?([], activeAccount, error)
@@ -354,7 +354,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         NCAPIController.sharedInstance().getRoom(forAccount: account, withToken: token) { roomDict, error in
             if let error {
-                NCLog.log("Could not update room. Error: \(error.localizedDescription)")
+                NCLog.log("Could not update room. Error: \(NCLog.errorCode(error))")
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidUpdateRoom, object: self, userInfo: ["error": error])
                 completion?([:], error)
@@ -1293,7 +1293,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                     userInfo["isBanned"] = true
                 }
 
-                NCLog.log("Could not join room. Status code: \(statusCode). Error: \(error?.localizedDescription ?? "")")
+                NCLog.log("Could not join room. Status code: \(statusCode). Error: \(error.map { NCLog.errorCode($0) } ?? "none")")
             }
 
             self.joiningRoomToken = nil
@@ -1485,7 +1485,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                     }
                 }
             } else {
-                NCLog.log("Could not re-join room \(token). Status code: \(statusCode). Error: \(error?.localizedDescription ?? "Unknown")")
+                NCLog.log("Could not re-join room \(token). Status code: \(statusCode). Error: \(error.map { NCLog.errorCode($0) } ?? "none")")
                 completionBlock(nil, nil, error, statusCode, statusReason)
             }
         })
@@ -1522,7 +1522,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
                 if let error {
                     userInfo["error"] = error
-                    NCLog.log("Could not exit room. Error: \(error.localizedDescription)")
+                    NCLog.log("Could not exit room. Error: \(NCLog.errorCode(error))")
                 }
 
                 // Leaving the old room is not needed to join the answered call, so don't leave it hanging in CallKit on errors

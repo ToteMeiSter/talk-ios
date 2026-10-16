@@ -73,6 +73,37 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         }
     }
 
+    func testLogDescriptionsCarryNoFileNameOrPath() {
+        // The description of a file error contains the name and the path, so only domain and code are logged
+        let fileError = NSError(domain: NSCocoaErrorDomain, code: 260, userInfo: [NSFilePathErrorKey: "/private/var/Alice Passport.pdf",
+                                                                                 NSLocalizedDescriptionKey: "The file “Alice Passport.pdf” couldn’t be opened."])
+        XCTAssertEqual(NCLog.errorCode(fileError), "NSCocoaErrorDomain 260")
+
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Alice Passport.PDF"), "file with extension pdf")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Notes"), "file without extension")
+        XCTAssertFalse(NCLog.fileTraits(fileName: "Alice Passport.pdf").contains("Alice"))
+
+        // A dot inside the name is no extension: the part after it is either dropped by pathExtension (a space makes
+        // it "no extension") or reported as unusual, the name is never part of the result
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Встреча 10.10 Иванов"), "file without extension")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Договор Петров И.И"), "file with unusual extension")
+
+        // A word after a dot is no extension the system knows
+        XCTAssertEqual(NCLog.fileTraits(fileName: "J.Smith"), "file with unusual extension")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Contract A.Petrov"), "file with unusual extension")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "photo.jpeg"), "file with extension jpeg")
+
+        // The error of a request is logged with its status and codes, not with its URL
+        let urlError = NSError(domain: NSURLErrorDomain, code: -1202, userInfo: [NSURLErrorFailingURLStringErrorKey: "https://cloud.example.org/ocs/v2.php/search=Alice"])
+        let ocsError = OcsError(withError: urlError, withTask: nil)
+        XCTAssertEqual(NCLog.errorCode(ocsError), "OcsError http 0, NSURLErrorDomain -1202")
+        XCTAssertFalse(NCLog.errorCode(ocsError).contains("example.org"))
+        XCTAssertEqual(NCLog.errorCode(ChatFileUploadError.uploadFailed(errorCode: 413, errorDescription: "Alice Passport.pdf")), "ChatFileUploadError http 413")
+
+        let wrapped = NSError(domain: NSCocoaErrorDomain, code: 4, userInfo: [NSUnderlyingErrorKey: urlError])
+        XCTAssertEqual(NCLog.errorCode(wrapped), "NSCocoaErrorDomain 4, underlying NSURLErrorDomain -1202")
+    }
+
     func testLogfileNamePerProcess() throws {
         // The app keeps its name, an extension gets its own file so two processes never write to the same file
         XCTAssertEqual(NCLog.logfileName(dateString: "2026-10-16", processName: ""), "debug-2026-10-16.log")

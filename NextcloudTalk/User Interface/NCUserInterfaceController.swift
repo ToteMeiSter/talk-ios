@@ -309,7 +309,7 @@ public typealias PresentCallControllerCompletionBlock = () -> Void
                                                      accountIdsWithToken: NCDatabaseManager.sharedInstance().accountIds(withRoomToken: token),
                                                      rememberedAccountId: CallAccountMemory.rememberedAccountId(forToken: token))
         if resolution.isAmbiguous {
-            NCLog.log("Call from Recents: token is known by multiple accounts, using \(resolution.accountId)")
+            NCLog.log("Call from Recents: token is known by multiple accounts")
         }
 
         // Don't change the account while another call is ongoing
