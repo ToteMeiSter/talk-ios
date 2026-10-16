@@ -1604,10 +1604,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 if let accountId = offlineMessage.accountId,
                    let room = NCDatabaseManager.sharedInstance().room(withToken: offlineMessage.token, forAccountId: accountId) {
                     if offlineMessage.threadId > 0 && offlineMessage.isThread {
-                        guard let chatController = NCChatController(forThreadId: offlineMessage.threadId, in: room) else { return }
+                        guard let chatController = NCChatController(forThreadId: offlineMessage.threadId, in: room) else { continue }
                         chatController.send(offlineMessage)
                     } else {
-                        guard let chatController = NCChatController(for: room) else { return }
+                        guard let chatController = NCChatController(for: room) else { continue }
                         chatController.send(offlineMessage)
                     }
                 }
