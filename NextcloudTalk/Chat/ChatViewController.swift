@@ -2177,9 +2177,9 @@ import SwiftUI
         }
 
         if started {
-            self.addTypingIndicator(withUserIdentifier: userIdentifier, andDisplayName: displayName)
+            self.addTypingIndicator(withUserIdentifier: userIdentifier, andDisplayName: displayName, sessionId: sessionId)
         } else {
-            self.removeTypingIndicator(withUserIdentifier: userIdentifier)
+            self.removeTypingIndicator(withUserIdentifier: userIdentifier, sessionId: sessionId)
         }
     }
 
@@ -2217,7 +2217,7 @@ import SwiftUI
             userIdentifier = userId
         }
 
-        self.removeTypingIndicator(withUserIdentifier: userIdentifier)
+        self.removeTypingIndicator(withUserIdentifier: userIdentifier, sessionId: sessionId)
     }
 
     // MARK: - Lobby functions

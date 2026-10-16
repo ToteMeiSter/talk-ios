@@ -155,4 +155,153 @@ final class UnitNCRoomsManagerTest: TestBaseRealm {
         XCTAssertEqual(room.token, "noszqmnh")
     }
 
+    // MARK: - Write order
+
+    private func roomDict(token: String, name: String = "Room", unreadMessages: Int = 0, lastReadMessage: Int = 0, lastCommonReadMessage: Int = 0, isFavorite: Bool = false) -> [String: Any] {
+        return [
+            "token": token,
+            "type": 2,
+            "name": name,
+            "displayName": name,
+            "unreadMessages": unreadMessages,
+            "lastReadMessage": lastReadMessage,
+            "lastCommonReadMessage": lastCommonReadMessage,
+            "lastActivity": 1000,
+            "isFavorite": isFavorite
+        ]
+    }
+
+    private func store(_ roomDict: [String: Any], requestStart: Int, timestamp: Int = Int(Date().timeIntervalSince1970)) throws {
+        let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
+
+        try realm.transaction {
+            NCRoomsManager.shared.updateRoom(withDict: roomDict, withAccount: activeAccount, withTimestamp: timestamp, withRealm: realm, withRequestStart: requestStart)
+        }
+    }
+
+    private func managedRoom(_ token: String) -> NCRoom? {
+        let internalId = "\(NCDatabaseManager.sharedInstance().activeAccount().accountId)@\(token)"
+        return NCRoom.objects(where: "internalId = %@", internalId).firstObject() as? NCRoom
+    }
+
+    func testLateOlderRoomResponseDoesNotOverwriteNewerOne() throws {
+        let olderStart = NCRoomsManager.shared.nextWriteStamp()
+        let newerStart = NCRoomsManager.shared.nextWriteStamp()
+
+        // The newer request answers first
+        try store(roomDict(token: "lateToken", unreadMessages: 0, isFavorite: true), requestStart: newerStart)
+        // The older request answers late with outdated data
+        try store(roomDict(token: "lateToken", unreadMessages: 5, isFavorite: false), requestStart: olderStart)
+
+        let room = try XCTUnwrap(managedRoom("lateToken"))
+        XCTAssertEqual(room.unreadMessages, 0)
+        XCTAssertTrue(room.isFavorite)
+    }
+
+    func testOlderRoomsListDoesNotDeleteRoomStoredByNewerRequest() throws {
+        let listStart = NCRoomsManager.shared.nextWriteStamp()
+        let roomStart = NCRoomsManager.shared.nextWriteStamp()
+
+        // The room is stored (with an old lastUpdate) by a request that started after the list
+        try store(roomDict(token: "newRoom"), requestStart: roomStart, timestamp: 1)
+
+        let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
+        _ = NCRoomsManager.shared.storeRooms([roomDict(token: "listedRoom")], forAccount: activeAccount, requestStart: listStart, onlyLastModified: false, isExpired: { false })
+
+        XCTAssertNotNil(managedRoom("newRoom"))
+        XCTAssertNotNil(managedRoom("listedRoom"))
+    }
+
+    func testOlderResponseDoesNotRevertFieldsWrittenLocally() throws {
+        try store(roomDict(token: "localToken", unreadMessages: 3, lastReadMessage: 20, lastCommonReadMessage: 10), requestStart: NCRoomsManager.shared.nextWriteStamp())
+
+        let requestStart = NCRoomsManager.shared.nextWriteStamp()
+
+        // Local writes after the request was started
+        let room = try XCTUnwrap(managedRoom("localToken"))
+        NCRoomsManager.shared.updateLastReadMessage(50, forRoom: room)
+        NCRoomsManager.shared.updateLastCommonReadMessage(40, forRoom: room)
+        NCRoomsManager.shared.setNoUnreadMessages(forRoom: room, withLastMessage: nil)
+
+        // The response is from before the local writes: other fields are written, the local ones are kept
+        try store(roomDict(token: "localToken", name: "Renamed", unreadMessages: 7, lastReadMessage: 10, lastCommonReadMessage: 5, isFavorite: true), requestStart: requestStart)
+
+        let stored = try XCTUnwrap(managedRoom("localToken"))
+        XCTAssertEqual(stored.lastReadMessage, 50)
+        XCTAssertEqual(stored.lastCommonReadMessage, 40)
+        XCTAssertEqual(stored.unreadMessages, 0)
+        XCTAssertEqual(stored.name, "Renamed")
+        XCTAssertTrue(stored.isFavorite)
+    }
+
+    func testResponseInRequestOrderStillWritesAndDeletes() throws {
+        try store(roomDict(token: "goneRoom"), requestStart: NCRoomsManager.shared.nextWriteStamp(), timestamp: 1)
+        try store(roomDict(token: "keptRoom", unreadMessages: 1, lastReadMessage: 5), requestStart: NCRoomsManager.shared.nextWriteStamp(), timestamp: 1)
+
+        // Local write before the next request starts must not hold back its response
+        NCRoomsManager.shared.updateLastReadMessage(8, forRoom: try XCTUnwrap(managedRoom("keptRoom")))
+
+        let listStart = NCRoomsManager.shared.nextWriteStamp()
+        let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
+        _ = NCRoomsManager.shared.storeRooms([roomDict(token: "keptRoom", unreadMessages: 4, lastReadMessage: 12)], forAccount: activeAccount, requestStart: listStart, onlyLastModified: false, isExpired: { false })
+
+        XCTAssertNil(managedRoom("goneRoom"))
+
+        let kept = try XCTUnwrap(managedRoom("keptRoom"))
+        XCTAssertEqual(kept.unreadMessages, 4)
+        XCTAssertEqual(kept.lastReadMessage, 12)
+    }
+
+    func testOlderResponseDoesNotRevertLastActivityToOlderValue() throws {
+        // The response is older than the local write, but carries a newer activity than the stored room
+        var seed = roomDict(token: "activityToken")
+        seed["lastActivity"] = 1000
+        try store(seed, requestStart: NCRoomsManager.shared.nextWriteStamp())
+
+        let requestStart = NCRoomsManager.shared.nextWriteStamp()
+        let room = try XCTUnwrap(managedRoom("activityToken"))
+
+        // Without a last message nothing is written for the last message, so the response wins
+        NCRoomsManager.shared.setNoUnreadMessages(forRoom: room, withLastMessage: nil)
+
+        var response = roomDict(token: "activityToken")
+        response["lastActivity"] = 2000
+        try store(response, requestStart: requestStart)
+        XCTAssertEqual(try XCTUnwrap(managedRoom("activityToken")).lastActivity, 2000)
+
+        // Now a last message is written locally: an older response must not take the activity back to an older value
+        let newRequestStart = NCRoomsManager.shared.nextWriteStamp()
+        let lastMessage = NCChatMessage()
+        lastMessage.internalId = "activityMessage"
+        lastMessage.timestamp = 3000
+        NCRoomsManager.shared.setNoUnreadMessages(forRoom: try XCTUnwrap(managedRoom("activityToken")), withLastMessage: lastMessage)
+
+        var olderResponse = roomDict(token: "activityToken")
+        olderResponse["lastActivity"] = 2500
+        try store(olderResponse, requestStart: newRequestStart)
+
+        let stored = try XCTUnwrap(managedRoom("activityToken"))
+        XCTAssertEqual(stored.lastActivity, 3000)
+        XCTAssertEqual(stored.lastMessageId, "activityMessage")
+    }
+
+    func testCancelledRoomsWriteDoesNotRejectOlderResponse() throws {
+        let olderStart = NCRoomsManager.shared.nextWriteStamp()
+        let listStart = NCRoomsManager.shared.nextWriteStamp()
+
+        // The write is cancelled when the second room is about to be stored
+        var checks = 0
+        let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
+        _ = NCRoomsManager.shared.storeRooms([roomDict(token: "cancelRoomA"), roomDict(token: "cancelRoomB")], forAccount: activeAccount, requestStart: listStart, onlyLastModified: true, isExpired: {
+            checks += 1
+            return checks > 1
+        })
+
+        XCTAssertNil(managedRoom("cancelRoomA"))
+
+        // An older response must still be stored, nothing newer is in the database
+        try store(roomDict(token: "cancelRoomA", name: "FromOlderResponse"), requestStart: olderStart)
+        XCTAssertEqual(managedRoom("cancelRoomA")?.name, "FromOlderResponse")
+    }
+
 }

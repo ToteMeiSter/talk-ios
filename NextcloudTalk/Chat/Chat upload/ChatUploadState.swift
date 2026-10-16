@@ -205,6 +205,16 @@ struct ChatUploadState: Codable, Equatable {
         return self.destinationKind == .draftFolder
     }
 
+    /// URL of the file this upload left in the draft folder of the conversation, which nobody posts anymore
+    /// once the upload is dropped. `nil` when there is nothing of ours to remove: the file did not reach the
+    /// server, it is posted already (the server moved it), or it is in the attachment folder of the user,
+    /// which is a file of the user.
+    var abandonedDraftFileURL: String? {
+        guard self.isDraftFolder, self.fileUploaded, self.step != .announced else { return nil }
+
+        return self.serverURL
+    }
+
     var destination: ChatFileUploadDestination? {
         guard let serverPath, let serverURL else { return nil }
 

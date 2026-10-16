@@ -392,6 +392,10 @@ public enum NCExternalSignalingSendMessageStatus {
         if sessionChanged {
             // The new session did not join any room yet, the re-join below takes care of that
             self.joinedRoomToken = nil
+
+            // The sessions of the old signaling session are gone and their leave events are not replayed. The re-join
+            // reports the sessions of the room again, but `roomMessageReceived` keeps the map for an unchanged room
+            self.participantsMap = [:]
         } else {
             // The session was resumed, so the server kept us in the room and replays what we missed
             self.joinedRoomToken = self.currentRoom
