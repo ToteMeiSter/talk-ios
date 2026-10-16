@@ -710,7 +710,7 @@ final class UnitChatViewControllerTest: TestBaseRealm {
     // MARK: - Temporary messages after the process was killed
 
     private let mentionParameters = "{\"mention-user1\":{\"type\":\"user\",\"id\":\"alice\",\"name\":\"Alice\"}}"
-    private let fileParameters = ""{\"file\":{\"type\":\"file\",\"id\":\"1\",\"name\":\"voice.mp3\",\"path\":\"/tmp/voice.mp3\"}}"
+    private let fileParameters = "{\"file\":{\"type\":\"file\",\"id\":\"1\",\"name\":\"voice.mp3\",\"path\":\"/tmp/voice.mp3\"}}"
 
     private func enableChatReferenceId() {
         updateCapabilities { cap in
