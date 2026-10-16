@@ -117,8 +117,14 @@ final class UnitNCMessageParameterTest: XCTestCase {
 
         // Read, update, delete and share
         XCTAssertTrue(try fileParameter(permissions: "27").canBeShared)
+        // Read, update and share
+        XCTAssertTrue(try fileParameter(permissions: "19").canBeShared)
         // Read and update only, e.g. a file shared without reshare
         XCTAssertFalse(try fileParameter(permissions: "3").canBeShared)
+        // Read and share, but no update: the server refuses the share with 403 "more permission"
+        XCTAssertFalse(try fileParameter(permissions: "17").canBeShared)
+        // Read only
+        XCTAssertFalse(try fileParameter(permissions: "1").canBeShared)
         // The server did not tell: do not take away the action
         XCTAssertNil(try fileParameter(permissions: nil).permissions)
         XCTAssertTrue(try fileParameter(permissions: nil).canBeShared)

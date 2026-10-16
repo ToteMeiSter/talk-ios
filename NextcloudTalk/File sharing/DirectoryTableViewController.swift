@@ -14,6 +14,8 @@ class DirectoryTableViewController: UITableViewController {
 
     private var userHomePath = ""
     private var itemsInDirectory: [NKFile] = []
+    // oc:permissions of the directory itself, empty until the listing arrived
+    private var currentDirectoryPermissions = ""
     private var sortingButton: UIBarButtonItem?
     private let directoryBackgroundView = PlaceholderView()
     private let sharingFileView = UIActivityIndicatorView()
@@ -71,7 +73,9 @@ class DirectoryTableViewController: UITableViewController {
     }
 
     @objc private func shareButtonPressed() {
-        showConfirmationDialogForSharingItem(withPath: path, andName: (path as NSString).lastPathComponent)
+        showConfirmationDialogForSharingItem(withPath: path,
+                                             andName: (path as NSString).lastPathComponent,
+                                             canShare: NCAPIController.canShare(davPermissions: currentDirectoryPermissions, isDirectory: true))
     }
 
     private func addMenuToSortingButton() {
@@ -99,6 +103,11 @@ class DirectoryTableViewController: UITableViewController {
     private func getItemsInDirectory() {
         NCAPIController.sharedInstance().readFolder(forAccount: NCDatabaseManager.sharedInstance().activeAccount(), atPath: path, withDepth: "1") { [weak self] items, error in
             guard let self, let items, error == nil else { return }
+
+            // The first entry of a listing is the requested directory itself, the loop below filters it out
+            if let directory = items.first, directory.directory {
+                self.currentDirectoryPermissions = directory.permissions
+            }
 
             let currentDirectory = self.path.isEmpty ? "/" : (self.path as NSString).lastPathComponent
             var itemsInDirectory: [NKFile] = []
@@ -151,7 +160,7 @@ class DirectoryTableViewController: UITableViewController {
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: NCDatabaseManager.sharedInstance().activeAccount(), atPath: path, toRoom: token, withTalkMetaData: talkMetaData, withReferenceId: nil) { [weak self] error in
             guard let self else { return }
 
-            // 403 on a file the user may share means it is already shared with the conversation
+            // 403 on a node the user may share and update means it is already shared with the conversation
             if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
                 self.removeSharingFileUI()
                 self.showErrorSharingItem()
@@ -274,7 +283,7 @@ class DirectoryTableViewController: UITableViewController {
             let directoryVC = DirectoryTableViewController(path: selectedItemPath, inRoom: token, andThread: threadId)
             self.navigationController?.pushViewController(directoryVC, animated: true)
         } else {
-            showConfirmationDialogForSharingItem(withPath: selectedItemPath, andName: item.fileName, canShare: NCAPIController.canShare(davPermissions: item.permissions))
+            showConfirmationDialogForSharingItem(withPath: selectedItemPath, andName: item.fileName, canShare: NCAPIController.canShare(davPermissions: item.permissions, isDirectory: item.directory))
         }
 
         tableView.deselectRow(at: indexPath, animated: true)

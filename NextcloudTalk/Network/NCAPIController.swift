@@ -3187,7 +3187,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
             parameters["talkMetaData"] = jsonString
         }
 
-        // A 403 is not handled here: the server uses it for "already shared" as well as for "no right to share",
+        // A 403 is not handled here: the server uses it for "already shared" as well as for a refused share,
         // so only the caller knows which one it is (see `isAlreadyShared`).
         apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { _, ocsError in
             completionBlock(ocsError)
@@ -3196,10 +3196,12 @@ class NCAPIController: NSObject, NKCommonDelegate {
 
     /// Whether a failed `shareFileOrFolder` only says that the path is already shared with the conversation.
     ///
-    /// The server answers 403 for "Path is already shared with this conversation" and for "You are not allowed
-    /// to share ..." (no `PERMISSION_SHARE` on the node). The text is localized, so it can not tell them apart.
-    /// The right to share is checked before the "already shared" check on the server, so for a node the user
-    /// may share, a 403 can only mean "already shared". For a node without the right it means "not allowed".
+    /// The server answers 403 for "Path is already shared with this conversation" (Talk's `RoomShareProvider`).
+    /// A refused share looks the same: since server 34.0.2 "You are not allowed to share ..." and "more permission
+    /// than you have" are 403 as well (`RestrictInteractionListener`), before that the refusal is a 404.
+    /// The text is localized, so it can not tell them apart. The provider runs after all checks of the server,
+    /// so a 403 can only mean "already shared" for a node the user may share and update: the default permissions
+    /// of a file share are read, update and share. For any other node it is a refusal.
     @nonobjc
     static func isAlreadyShared(statusCode: Int, canShare: Bool) -> Bool {
         return statusCode == 403 && canShare
@@ -3211,11 +3213,16 @@ class NCAPIController: NSObject, NKCommonDelegate {
         return isAlreadyShared(statusCode: ocsError.responseStatusCode, canShare: canShare)
     }
 
-    /// Whether the WebDAV permissions (`oc:permissions`) of a node include the right to share ("R").
+    /// Whether the WebDAV permissions (`oc:permissions`) of a node include everything a share of it asks for by default
+    /// (`shareapi_default_permissions`, 31): the right to share ("R") and to update ("W"), for a folder also to create
+    /// ("C", "K") and to delete ("D") inside. A 403 for a node with less is a refusal, not "already shared".
     /// Without permissions in the listing nothing is known, so the node is treated as shareable.
     @nonobjc
-    static func canShare(davPermissions: String) -> Bool {
-        return davPermissions.isEmpty || davPermissions.contains("R")
+    static func canShare(davPermissions: String, isDirectory: Bool) -> Bool {
+        if davPermissions.isEmpty { return true }
+
+        let required = isDirectory ? ["R", "W", "C", "K", "D"] : ["R", "W"]
+        return required.allSatisfy { davPermissions.contains($0) }
     }
 
     func uniqueNameForFileUpload(withName fileName: String, isOriginalName: Bool, forAccount account: TalkAccount, completionBlock: @escaping (_ fileServerURL: String?, _ fileServerPath: String?, _ errorCode: Int, _ errorDescription: String?) -> Void) {
