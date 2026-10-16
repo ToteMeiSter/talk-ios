@@ -1745,18 +1745,18 @@ import Toast
         self.stopTypingTimer =  nil
     }
 
-    func addTypingIndicator(withUserIdentifier userIdentifier: String, andDisplayName displayName: String) {
+    func addTypingIndicator(withUserIdentifier userIdentifier: String, andDisplayName displayName: String, sessionId: String?) {
         DispatchQueue.main.async {
             if let view = self.textInputbar.typingView as? TypingIndicatorView {
-                view.addTyping(userIdentifier: userIdentifier, displayName: displayName)
+                view.addTyping(userIdentifier: userIdentifier, displayName: displayName, sessionId: sessionId)
             }
         }
     }
 
-    func removeTypingIndicator(withUserIdentifier userIdentifier: String) {
+    func removeTypingIndicator(withUserIdentifier userIdentifier: String, sessionId: String?) {
         DispatchQueue.main.async {
             if let view = self.textInputbar.typingView as? TypingIndicatorView {
-                view.removeTyping(userIdentifier: userIdentifier)
+                view.removeTyping(userIdentifier: userIdentifier, sessionId: sessionId)
             }
         }
     }
