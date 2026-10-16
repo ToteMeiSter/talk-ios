@@ -73,6 +73,24 @@ final class UnitShareItemControllerTest: XCTestCase {
         XCTAssertTrue(delegate.failedFileNames.isEmpty)
         XCTAssertEqual(delegate.changedCount, 1)
     }
+
+    func testUpdateItemWithMissingFileReportsTheItemAndKeepsTheFile() throws {
+        let sourceURL = self.sourceDirectory.appendingPathComponent("Document.txt")
+        try Data("content".utf8).write(to: sourceURL)
+
+        let shareItemController = ShareItemController()
+        shareItemController.addItem(with: sourceURL)
+        let item = try XCTUnwrap(shareItemController.shareItems.first)
+
+        let delegate = FailureRecordingDelegate()
+        shareItemController.delegate = delegate
+
+        shareItemController.update(item, with: self.sourceDirectory.appendingPathComponent("Edited.txt"))
+
+        XCTAssertEqual(delegate.failedFileNames, ["Document.txt"])
+        XCTAssertEqual(shareItemController.shareItems.count, 1)
+        XCTAssertEqual(try String(contentsOfFile: item.filePath, encoding: .utf8), "content")
+    }
 }
 
 private final class FailureRecordingDelegate: NSObject, ShareItemControllerDelegate {
