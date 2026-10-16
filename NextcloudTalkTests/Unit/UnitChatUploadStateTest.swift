@@ -562,6 +562,37 @@ final class UnitChatUploadStateTest: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(ChatUploadState.self, from: Data(json.utf8)))
     }
 
+    // MARK: - Draft file of a dropped upload
+
+    func testDraftFileIsNotOursBeforeTheUploadReachedTheServer() {
+        XCTAssertNil(makeState().abandonedDraftFileURL)
+    }
+
+    func testUploadedDraftFileIsRemovedAfterAFailure() {
+        var state = uploadedState()
+        state.fail(reason: "test")
+
+        XCTAssertEqual(state.step, .failed)
+        XCTAssertEqual(state.abandonedDraftFileURL, state.serverURL)
+    }
+
+    func testPostedDraftFileIsNotRemoved() {
+        var state = uploadedState()
+        XCTAssertTrue(state.beginAnnounce())
+        _ = state.announceFinished(failure: nil, now: now)
+
+        XCTAssertEqual(state.step, .announced)
+        XCTAssertNil(state.abandonedDraftFileURL)
+    }
+
+    func testFileInTheAttachmentFolderIsNeverRemoved() {
+        var state = uploadedState(kind: .attachmentFolder)
+        state.fail(reason: "test")
+
+        XCTAssertTrue(state.fileUploaded)
+        XCTAssertNil(state.abandonedDraftFileURL)
+    }
+
     func testStateNeverContainsCredentials() throws {
         let data = try JSONEncoder().encode(makeState())
         let json = String(data: data, encoding: .utf8) ?? ""
