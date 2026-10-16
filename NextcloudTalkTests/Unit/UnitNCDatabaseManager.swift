@@ -73,6 +73,17 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         }
     }
 
+    func testLogDescriptionsCarryNoFileNameOrPath() {
+        // The description of a file error contains the name and the path, so only domain and code are logged
+        let fileError = NSError(domain: NSCocoaErrorDomain, code: 260, userInfo: [NSFilePathErrorKey: "/private/var/Alice Passport.pdf",
+                                                                                 NSLocalizedDescriptionKey: "The file “Alice Passport.pdf” couldn’t be opened."])
+        XCTAssertEqual(NCLog.errorCode(fileError), "NSCocoaErrorDomain 260")
+
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Alice Passport.PDF"), "file with extension pdf")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Notes"), "file without extension")
+        XCTAssertFalse(NCLog.fileTraits(fileName: "Alice Passport.pdf").contains("Alice"))
+    }
+
     func testLogfileNamePerProcess() throws {
         // The app keeps its name, an extension gets its own file so two processes never write to the same file
         XCTAssertEqual(NCLog.logfileName(dateString: "2026-10-16", processName: ""), "debug-2026-10-16.log")

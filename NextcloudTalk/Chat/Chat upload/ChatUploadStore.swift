@@ -231,7 +231,7 @@ final class ChatUploadStore {
 
             if let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
                now.timeIntervalSince(modified) > Self.unreadableStateRetention {
-                NCLog.log("Removing the state \(url.lastPathComponent) of an upload, it cannot be read for long")
+                NCLog.log("Removing the state of an upload, it cannot be read for long")
                 try? self.fileManager.removeItem(at: url)
             }
         }

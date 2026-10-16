@@ -219,7 +219,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                 self.announce(id: state.id)
             case .failed:
                 if self.isObsolete(state, now: now) {
-                    NCLog.log("Removing the failed upload of \(state.fileName), it is obsolete")
+                    NCLog.log("Removing the failed upload of a \(NCLog.fileTraits(fileName: state.fileName)), it is obsolete")
                     self.store.remove(state)
                 } else {
                     // The process might have died before the message was updated
@@ -361,7 +361,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         state.fail(reason: reason)
         self.persist(state)
         self.markMessageAsFailed(referenceId: state.id)
-        NCLog.log("Upload of \(state.fileName) was interrupted: \(reason)")
+        NCLog.log("Upload of a \(NCLog.fileTraits(fileName: state.fileName)) was interrupted: \(reason)")
     }
 
     /// Posts the files that are on the server but not in the conversation.
@@ -393,7 +393,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     @MainActor
     func stage(_ upload: ChatFileUpload) -> Bool {
         guard let referenceId = upload.referenceId else {
-            NCLog.log("Upload of \(upload.fileName) has no reference id")
+            NCLog.log("Upload of a \(NCLog.fileTraits(fileName: upload.fileName)) has no reference id")
             return false
         }
 
@@ -402,7 +402,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         do {
             localFileName = try self.store.copyFile(at: URL(fileURLWithPath: upload.localPath), id: referenceId)
         } catch {
-            NCLog.log("Could not copy \(upload.fileName) for the upload. Error: \(error.localizedDescription)")
+            NCLog.log("Could not copy a \(NCLog.fileTraits(fileName: upload.fileName)) for the upload. Error: \(NCLog.errorCode(error))")
             self.markMessageAsFailed(referenceId: referenceId)
             return false
         }
@@ -504,7 +504,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         do {
             destination = try await ChatFileUploader.resolveDestinationWithRetries(in: room, account: account, fileName: state.fileName, allowUpdate: state.allowUpdate)
         } catch {
-            NCLog.log("Could not determine where to upload \(state.fileName) to. Error: \(error.localizedDescription)")
+            NCLog.log("Could not determine where to upload a \(NCLog.fileTraits(fileName: state.fileName)) to. Error: \(error.localizedDescription)")
 
             if let current = self.store.load(id: id) {
                 self.interrupt(current, reason: "no destination")
@@ -649,7 +649,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         self.persist(state)
 
         if let failure {
-            NCLog.log("Transfer of \(state.fileName) failed, http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0). Next: \(action)")
+            NCLog.log("Transfer of a \(NCLog.fileTraits(fileName: state.fileName)) failed, http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0). Next: \(action)")
         }
 
         switch action {
@@ -683,14 +683,14 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         do {
             try self.store.saveEvent(ChatUploadStore.TransferEvent(id: id, failure: failure, date: Date().timeIntervalSince1970))
         } catch {
-            NCLog.log("Could not store the result of the upload \(id). Error: \(error.localizedDescription)")
+            NCLog.log("Could not store the result of the upload \(id). Error: \(NCLog.errorCode(error))")
         }
     }
 
     /// Started again when the app comes to the front. When it is in front already, once: a system
     /// that stops every transfer would else make a loop.
     private func transferSuspended(_ state: ChatUploadState) {
-        NCLog.log("The system stopped the transfer of \(state.fileName)")
+        NCLog.log("The system stopped the transfer of a \(NCLog.fileTraits(fileName: state.fileName))")
 
         if UIApplication.shared.applicationState == .active, !self.didRestartSuspendedTransfer {
             self.didRestartSuspendedTransfer = true
@@ -720,7 +720,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             do {
                 try await ChatFileUploader.ensureAttachmentFolder(for: account)
             } catch {
-                NCLog.log("Could not create the attachment folder for \(state.fileName). Error: \(error.localizedDescription)")
+                NCLog.log("Could not create the attachment folder for a \(NCLog.fileTraits(fileName: state.fileName)). Error: \(error.localizedDescription)")
 
                 if let current = self.store.load(id: id), current.step == .uploading {
                     self.interrupt(current, reason: "attachment folder")
@@ -804,7 +804,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                                                     at: destination)
             } catch {
                 failure = ChatFileUploader.failure(for: error)
-                NCLog.log("Announcing \(announcedState.fileName) failed. Error: \(error.localizedDescription). Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
+                NCLog.log("Announcing a \(NCLog.fileTraits(fileName: announcedState.fileName)) failed. Error: \(error.localizedDescription). Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
             }
 
             self.announcingIds.remove(id)
@@ -823,7 +823,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
         switch action {
         case .finished:
-            NCLog.log("Uploaded and shared \(state.fileName)")
+            NCLog.log("Uploaded and shared a \(NCLog.fileTraits(fileName: state.fileName))")
             // The state stays for a while, see `isAnnounced`
             self.store.removeFile(for: state)
         case .announce(let delay):
@@ -843,7 +843,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             try self.store.save(state)
             return true
         } catch {
-            NCLog.log("Could not store the state of the upload of \(state.fileName). Error: \(error.localizedDescription)")
+            NCLog.log("Could not store the state of the upload of a \(NCLog.fileTraits(fileName: state.fileName)). Error: \(NCLog.errorCode(error))")
             return false
         }
     }

@@ -179,7 +179,7 @@ enum ChatFileUploader {
                 let failure = self.failure(for: error)
 
                 if ChatFileUploadRetryPolicy.isAlreadyAnnounced(failure, viaDraftFolder: isDraftFolder, earlierAttemptMayHaveSucceeded: earlierAttemptMayHaveSucceeded) {
-                    NCLog.log("Announcing \(upload.fileName) was done by an earlier attempt already. Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
+                    NCLog.log("Announcing a \(NCLog.fileTraits(fileName: upload.fileName)) was done by an earlier attempt already. Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
                     return
                 }
 

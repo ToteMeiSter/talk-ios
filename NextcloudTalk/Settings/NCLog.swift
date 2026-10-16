@@ -104,6 +104,19 @@
         }
     }
 
+    // Logs are exported by the user, so lines must not carry file names, paths or accounts.
+    // The description of a file error can contain them, therefore log domain and code only.
+    public static func errorCode(_ error: Error) -> String {
+        let nsError = error as NSError
+        return "\(nsError.domain) \(nsError.code)"
+    }
+
+    // Describes a file without its name
+    public static func fileTraits(fileName: String) -> String {
+        let fileExtension = (fileName as NSString).pathExtension.lowercased()
+        return fileExtension.isEmpty ? "file without extension" : "file with extension \(fileExtension)"
+    }
+
     public static func getLogfiles() -> [URL] {
         return logfiles(in: allLogDirectories)
     }
