@@ -3,6 +3,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+/// An error that knows what it may write into the exported log.
+public protocol NCLogDescribable {
+    var logDescription: String { get }
+}
+
 @objcMembers public class NCLog: NSObject {
 
     private static let backgroundLogQueue = DispatchQueue(label: "\(bundleIdentifier).backgroundLogQueue", qos: .background)
@@ -104,17 +109,44 @@
         }
     }
 
-    // Logs are exported by the user, so lines must not carry file names, paths or accounts.
-    // The description of a file error can contain them, therefore log domain and code only.
+    // Logs are exported by the user, so lines must not carry file names, paths, accounts or server addresses.
+    // The description of an error can contain them (the path of a file error, the URL of a failed request),
+    // therefore log domain and code only. Errors that wrap another error describe themselves, see `NCLogDescribable`.
     public static func errorCode(_ error: Error) -> String {
+        if let describable = error as? NCLogDescribable {
+            return describable.logDescription
+        }
+
         let nsError = error as NSError
-        return "\(nsError.domain) \(nsError.code)"
+
+        // The error of a failed server request travels inside the user info
+        if let describable = nsError.userInfo["ocsError"] as? NCLogDescribable {
+            return describable.logDescription
+        }
+
+        var description = "\(nsError.domain) \(nsError.code)"
+
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            description += ", underlying \(underlyingError.domain) \(underlyingError.code)"
+        }
+
+        return description
     }
 
-    // Describes a file without its name
+    // Describes a file without its name. An "extension" that is not short and plain is part of the name
+    // ("Meeting 10.10 Smith"), so it is not logged.
     public static func fileTraits(fileName: String) -> String {
         let fileExtension = (fileName as NSString).pathExtension.lowercased()
-        return fileExtension.isEmpty ? "file without extension" : "file with extension \(fileExtension)"
+
+        if fileExtension.isEmpty {
+            return "file without extension"
+        }
+
+        if fileExtension.range(of: "^[a-z0-9]{1,10}$", options: .regularExpression) == nil {
+            return "file with unusual extension"
+        }
+
+        return "file with extension \(fileExtension)"
     }
 
     public static func getLogfiles() -> [URL] {

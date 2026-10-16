@@ -82,6 +82,20 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         XCTAssertEqual(NCLog.fileTraits(fileName: "Alice Passport.PDF"), "file with extension pdf")
         XCTAssertEqual(NCLog.fileTraits(fileName: "Notes"), "file without extension")
         XCTAssertFalse(NCLog.fileTraits(fileName: "Alice Passport.pdf").contains("Alice"))
+
+        // A dot inside the name is no extension
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Встреча 10.10 Иванов"), "file with unusual extension")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Договор Петров И.И"), "file with unusual extension")
+
+        // The error of a request is logged with its status and codes, not with its URL
+        let urlError = NSError(domain: NSURLErrorDomain, code: -1202, userInfo: [NSURLErrorFailingURLStringErrorKey: "https://cloud.example.org/ocs/v2.php/search=Alice"])
+        let ocsError = OcsError(withError: urlError, withTask: nil)
+        XCTAssertEqual(NCLog.errorCode(ocsError), "OcsError http 0, NSURLErrorDomain -1202")
+        XCTAssertFalse(NCLog.errorCode(ocsError).contains("example.org"))
+        XCTAssertEqual(NCLog.errorCode(ChatFileUploadError.uploadFailed(errorCode: 413, errorDescription: "Alice Passport.pdf")), "ChatFileUploadError http 413, url error 0")
+
+        let wrapped = NSError(domain: NSCocoaErrorDomain, code: 4, userInfo: [NSUnderlyingErrorKey: urlError])
+        XCTAssertEqual(NCLog.errorCode(wrapped), "NSCocoaErrorDomain 4, underlying NSURLErrorDomain -1202")
     }
 
     func testLogfileNamePerProcess() throws {

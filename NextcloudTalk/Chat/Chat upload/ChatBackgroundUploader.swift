@@ -361,7 +361,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         state.fail(reason: reason)
         self.persist(state)
         self.markMessageAsFailed(referenceId: state.id)
-        NCLog.log("Upload of a \(NCLog.fileTraits(fileName: state.fileName)) was interrupted: \(reason)")
+        NCLog.log("Upload of a \(NCLog.fileTraits(fileName: state.fileName)) was interrupted: \(reason) (upload \(state.id))")
     }
 
     /// Posts the files that are on the server but not in the conversation.
@@ -649,7 +649,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         self.persist(state)
 
         if let failure {
-            NCLog.log("Transfer of a \(NCLog.fileTraits(fileName: state.fileName)) failed, http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0). Next: \(action)")
+            NCLog.log("Transfer of a \(NCLog.fileTraits(fileName: state.fileName)) failed, http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0). Next: \(action) (upload \(state.id))")
         }
 
         switch action {
@@ -690,7 +690,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     /// Started again when the app comes to the front. When it is in front already, once: a system
     /// that stops every transfer would else make a loop.
     private func transferSuspended(_ state: ChatUploadState) {
-        NCLog.log("The system stopped the transfer of a \(NCLog.fileTraits(fileName: state.fileName))")
+        NCLog.log("The system stopped the transfer of a \(NCLog.fileTraits(fileName: state.fileName)) (upload \(state.id))")
 
         if UIApplication.shared.applicationState == .active, !self.didRestartSuspendedTransfer {
             self.didRestartSuspendedTransfer = true
@@ -823,7 +823,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
         switch action {
         case .finished:
-            NCLog.log("Uploaded and shared a \(NCLog.fileTraits(fileName: state.fileName))")
+            NCLog.log("Uploaded and shared a \(NCLog.fileTraits(fileName: state.fileName)) (upload \(state.id))")
             // The state stays for a while, see `isAnnounced`
             self.store.removeFile(for: state)
         case .announce(let delay):
@@ -843,7 +843,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             try self.store.save(state)
             return true
         } catch {
-            NCLog.log("Could not store the state of the upload of a \(NCLog.fileTraits(fileName: state.fileName)). Error: \(NCLog.errorCode(error))")
+            NCLog.log("Could not store the state of the upload of a \(NCLog.fileTraits(fileName: state.fileName)). Error: \(NCLog.errorCode(error)) (upload \(state.id))")
             return false
         }
     }

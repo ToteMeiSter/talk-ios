@@ -142,7 +142,7 @@ public enum NCExternalSignalingSendMessageStatus {
         self.messagesWithCompletionBlock = []
         self.helloResponseReceived = false
 
-        NCLog.log("Connecting to: \(self.serverUrl)")
+        NCLog.log("Connecting to the signaling server")
 
         let wsSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         var wsRequest = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: webSocketTimeoutInterval)
@@ -169,7 +169,7 @@ public enum NCExternalSignalingSendMessageStatus {
 
         guard self.reconnectTimer == nil else { return }
 
-        NCLog.log("Reconnecting to: \(self.serverUrl)")
+        NCLog.log("Reconnecting to the signaling server")
 
         // Remember when the connection was lost, so we can try to resume the session (like the web client does).
         // Keep the first moment, as failed reconnect attempts end up here again.
@@ -199,7 +199,7 @@ public enum NCExternalSignalingSendMessageStatus {
     /// is replaced. The session is kept (resume), if the server still holds it.
     func reconnectAfterNetworkChange() {
         DispatchQueue.main.async {
-            NCLog.log("Reconnecting to \(self.serverUrl) because the network changed")
+            NCLog.log("Reconnecting to the signaling server because the network changed")
 
             // A new network deserves a new attempt now, not after the rest of the growing pause
             self.reconnectInterval = self.initialReconnectInterval
@@ -233,7 +233,7 @@ public enum NCExternalSignalingSendMessageStatus {
     }
 
     func disconnect() {
-        NCLog.log("Disconnecting from: \(self.serverUrl)")
+        NCLog.log("Disconnecting from the signaling server")
 
         DispatchQueue.main.async {
             // Keep an earlier moment of a lost connection, so the resume window is not extended.
@@ -490,7 +490,7 @@ public enum NCExternalSignalingSendMessageStatus {
                 }
 
                 guard error == nil, sessionId != nil else {
-                    NCLog.log("Re-joining room \(token) failed, StatusCode: \(statusCode), Error: \(error?.localizedDescription ?? "none")")
+                    NCLog.log("Re-joining room \(token) failed, StatusCode: \(statusCode), Error: \(error.map { NCLog.errorCode($0) } ?? "none")")
                     self.delegate?.externalSignalingController?(self, didFailRejoiningCallWithStatusCode: statusCode, error: error)
                     return
                 }
@@ -971,7 +971,7 @@ public enum NCExternalSignalingSendMessageStatus {
             guard task == self.webSocket else { return }
 
             if let error = error as? URLError, error.code == .serverCertificateUntrusted {
-                NCLog.log("WebSocket session didCompleteWithError: \(error)")
+                NCLog.log("WebSocket session didCompleteWithError: \(NCLog.errorCode(error))")
 
                 DispatchQueue.main.async {
                     CCCertificate.sharedManager()
@@ -985,7 +985,7 @@ public enum NCExternalSignalingSendMessageStatus {
             }
 
             if let error {
-                NCLog.log("WebSocket session didCompleteWithError: \(error)")
+                NCLog.log("WebSocket session didCompleteWithError: \(NCLog.errorCode(error))")
                 self.reconnect()
             }
         }
@@ -1030,7 +1030,7 @@ public enum NCExternalSignalingSendMessageStatus {
                         return
                     }
 
-                    NCLog.log("WebSocket receiveMessageWithCompletionHandler error \(error)")
+                    NCLog.log("WebSocket receiveMessageWithCompletionHandler error \(NCLog.errorCode(error))")
                     self.reconnect()
                 }
             }

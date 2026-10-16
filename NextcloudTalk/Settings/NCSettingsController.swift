@@ -672,7 +672,7 @@ public class NCSettingsController: NSObject {
 
         NCAPIController.sharedInstance().subscribeAccount(account, withPublicKey: keyPair.publicKey, toNextcloudServerWithCompletionBlock: { responseDict, error in
             guard error == nil else {
-                NCLog.log("Error while subscribing to NC server. Error: \(error?.description ?? "")")
+                NCLog.log("Error while subscribing to NC server. Error: \(error.map { NCLog.errorCode($0) } ?? "none")")
                 block?(false)
                 bgTask.stopBackgroundTask()
                 return

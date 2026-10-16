@@ -29,3 +29,10 @@ enum ChatFileUploadError: Error {
     /// The server asked us to slow down.
     case tooManyRequests
 }
+
+extension ChatFileUploadError: NCLogDescribable {
+    var logDescription: String {
+        let failure = ChatFileUploader.failure(for: self)
+        return "ChatFileUploadError http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0)"
+    }
+}

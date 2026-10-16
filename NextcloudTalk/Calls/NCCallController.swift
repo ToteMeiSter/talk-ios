@@ -292,7 +292,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                     }
 
                     self.delegate?.callControllerDidFailedJoiningCall(self, statusCode: statusCode, errorReason: self.getJoinCallErrorReason(statusCode))
-                    NCLog.log("Could not join call in \(self.room.token), StatusCode: \(statusCode), Error: \(error)")
+                    NCLog.log("Could not join call in \(self.room.token), StatusCode: \(statusCode), Error: \(NCLog.errorCode(error))")
                 } else {
                     NCLog.log("Did join call in NCCallController for \(self.room.token)")
 
@@ -355,7 +355,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                         return
                     }
 
-                    NCLog.log("Could not rejoin call, StatusCode: \(statusCode), Error: \(error)")
+                    NCLog.log("Could not rejoin call, StatusCode: \(statusCode), Error: \(NCLog.errorCode(error))")
 
                     // 404 with the signaling server: our session is gone at the server. The same request fails again,
                     // a new session is needed. Without it there is no session to renew, the request is repeated.
@@ -526,7 +526,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
             self.leaveCallInServer(forAll: false) { error in
                 if let error {
-                    NCLog.log("Could not leave call. Error: \(error.localizedDescription)")
+                    NCLog.log("Could not leave call. Error: \(NCLog.errorCode(error))")
                 }
 
                 self.delegate?.callController(self, isSwitchingToCall: token, withAudioEnabled: isAudioEnabled, andVideoEnabled: isVideoEnabled)
@@ -796,7 +796,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         self.leaveCallInServer(forAll: allParticipants) { error in
             if let error {
-                NCLog.log("Could not leave call. Error: \(error.localizedDescription)")
+                NCLog.log("Could not leave call. Error: \(NCLog.errorCode(error))")
             }
 
             self.delegate?.callControllerDidEndCall(self)
@@ -947,7 +947,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     private func updateCallFlagsInServer() {
         NCAPIController.shared.updateCallFlags(inRoom: self.room.token, withCallFlags: self.joinCallFlags, forAccount: self.account) { error in
             if let error {
-                NCLog.log("Could not update call flags. Error: \(error)")
+                NCLog.log("Could not update call flags. Error: \(NCLog.errorCode(error))")
             }
         }
     }

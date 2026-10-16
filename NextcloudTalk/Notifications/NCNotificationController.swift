@@ -445,7 +445,7 @@ public class NCNotificationController: NSObject, UNUserNotificationCenterDelegat
         DispatchQueue.global().async {
             NCAPIController.sharedInstance().sendChatMessage(pushNotification.responseUserText, toRoom: pushNotification.roomToken, threadTitle: nil, replyTo: -1, referenceId: nil, silently: false, forAccount: pushAccount) { error in
                 if let error {
-                    NCLog.log("Could not send chat message. Error: \(error.description)")
+                    NCLog.log("Could not send chat message. Error: \(NCLog.errorCode(error))")
 
                     // Display local push-notification to inform user
                     var userInfo: [AnyHashable: Any] = [:]
