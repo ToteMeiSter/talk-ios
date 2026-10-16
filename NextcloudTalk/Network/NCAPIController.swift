@@ -3213,11 +3213,16 @@ class NCAPIController: NSObject, NKCommonDelegate {
         return isAlreadyShared(statusCode: ocsError.responseStatusCode, canShare: canShare)
     }
 
-    /// Whether the WebDAV permissions (`oc:permissions`) of a node include the right to share ("R") and to update ("W").
+    /// Whether the WebDAV permissions (`oc:permissions`) of a node include everything a share of it asks for by default
+    /// (`shareapi_default_permissions`, 31): the right to share ("R") and to update ("W"), for a folder also to create
+    /// ("C", "K") and to delete ("D") inside. A 403 for a node with less is a refusal, not "already shared".
     /// Without permissions in the listing nothing is known, so the node is treated as shareable.
     @nonobjc
-    static func canShare(davPermissions: String) -> Bool {
-        return davPermissions.isEmpty || (davPermissions.contains("R") && davPermissions.contains("W"))
+    static func canShare(davPermissions: String, isDirectory: Bool) -> Bool {
+        if davPermissions.isEmpty { return true }
+
+        let required = isDirectory ? ["R", "W", "C", "K", "D"] : ["R", "W"]
+        return required.allSatisfy { davPermissions.contains($0) }
     }
 
     func uniqueNameForFileUpload(withName fileName: String, isOriginalName: Bool, forAccount account: TalkAccount, completionBlock: @escaping (_ fileServerURL: String?, _ fileServerPath: String?, _ errorCode: Int, _ errorDescription: String?) -> Void) {
