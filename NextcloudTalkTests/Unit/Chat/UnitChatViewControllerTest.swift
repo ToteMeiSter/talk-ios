@@ -774,6 +774,14 @@ final class UnitChatViewControllerTest: TestBaseRealm {
 
         chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970))
 
+        do {
+            let db = NCDatabaseManager.sharedInstance()
+            let rows = ServerCapabilities.objects(where: "accountId = %@", TestBaseRealm.fakeAccountId)
+            let realmCaps = (rows.firstObject() as? ServerCapabilities)?.talkCapabilities.value(forKey: "self") as? [String]
+            let afterCaps = db.serverCapabilities(forAccountId: room.accountId)?.talkCapabilities.value(forKey: "self") as? [String]
+            print("G17DIAG-AFTER rows=\(rows.count) realmCaps=\(String(describing: realmCaps)) managerCapsAfter=\(String(describing: afterCaps)) roomHasAfter=\(db.roomHasTalkCapability(.chatReferenceId, for: room)) stored=\(String(describing: storedTemporaryMessage(lostId)?.sendingFailed))")
+        }
+
         let lost = try XCTUnwrap(storedTemporaryMessage(lostId))
         XCTAssertTrue(lost.sendingFailed)
         XCTAssertFalse(lost.isOfflineMessage)

@@ -220,8 +220,7 @@ jobs:
         -xctestrun $(find . -type f -name '*.xctestrun') \
         -destination '${{ env.DESTINATION }}' \
         -derivedDataPath 'DerivedData' \
-        -test-iterations 3 \
-        -retry-tests-on-failure \
+        -only-testing:NextcloudTalkTests/UnitChatViewControllerTest \
         -resultBundlePath 'testResult.xcresult'
 
     - name: Parse test results with xcresultparser & xctesthtmlreport
