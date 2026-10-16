@@ -883,7 +883,7 @@ let kShareConfirmationMaxItems = 10
 
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
             if let error {
-                NCLog.log(String(format: "Failed to share file. Error: %@", error.localizedDescription))
+                NCLog.log("Failed to share file. Error: \(NCLog.errorCode(error))")
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)

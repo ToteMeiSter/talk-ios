@@ -2407,7 +2407,7 @@ import Toast
         switch error {
         case ChatFileUploadError.destinationUnavailable(let underlyingError):
             // Nothing has been uploaded yet, so keep this silent as before
-            NCLog.log("Could not determine where to upload a \(NCLog.fileTraits(fileName: upload.fileName)) to. Error: \(underlyingError?.localizedDescription ?? "unknown")")
+            NCLog.log("Could not determine where to upload a \(NCLog.fileTraits(fileName: upload.fileName)) to. Error: \(underlyingError.map { NCLog.errorCode($0) } ?? "unknown")")
             return
         case ChatFileUploadError.attachmentFolderUnavailable:
             NCLog.log("Failed to check or create attachment folder")
@@ -2421,8 +2421,8 @@ import Toast
         case ChatFileUploadError.tooManyRequests:
             NCLog.log("Too many requests while uploading")
             message = NSLocalizedString("Too many requests, please try again later", comment: "")
-        case ChatFileUploadError.uploadFailed(_, let errorDescription) where !errorDescription.isEmpty:
-            NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: upload.fileName)). Error: \(errorDescription)")
+        case ChatFileUploadError.uploadFailed(let errorCode, let errorDescription) where !errorDescription.isEmpty:
+            NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: upload.fileName)). Error code: \(errorCode)")
             message = errorDescription
         default:
             NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: upload.fileName)). Error: \(NCLog.errorCode(error))")

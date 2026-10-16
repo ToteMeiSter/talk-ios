@@ -504,7 +504,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         do {
             destination = try await ChatFileUploader.resolveDestinationWithRetries(in: room, account: account, fileName: state.fileName, allowUpdate: state.allowUpdate)
         } catch {
-            NCLog.log("Could not determine where to upload a \(NCLog.fileTraits(fileName: state.fileName)) to. Error: \(error.localizedDescription)")
+            NCLog.log("Could not determine where to upload a \(NCLog.fileTraits(fileName: state.fileName)) to. Error: \(NCLog.errorCode(error))")
 
             if let current = self.store.load(id: id) {
                 self.interrupt(current, reason: "no destination")
@@ -720,7 +720,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             do {
                 try await ChatFileUploader.ensureAttachmentFolder(for: account)
             } catch {
-                NCLog.log("Could not create the attachment folder for a \(NCLog.fileTraits(fileName: state.fileName)). Error: \(error.localizedDescription)")
+                NCLog.log("Could not create the attachment folder for a \(NCLog.fileTraits(fileName: state.fileName)). Error: \(NCLog.errorCode(error))")
 
                 if let current = self.store.load(id: id), current.step == .uploading {
                     self.interrupt(current, reason: "attachment folder")
@@ -804,7 +804,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
                                                     at: destination)
             } catch {
                 failure = ChatFileUploader.failure(for: error)
-                NCLog.log("Announcing a \(NCLog.fileTraits(fileName: announcedState.fileName)) failed. Error: \(error.localizedDescription). Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
+                NCLog.log("Announcing a \(NCLog.fileTraits(fileName: announcedState.fileName)) failed. Http \(failure?.httpStatusCode ?? 0), error \(NCLog.errorCode(error))")
             }
 
             self.announcingIds.remove(id)

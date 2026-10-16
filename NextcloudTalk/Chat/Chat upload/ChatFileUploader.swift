@@ -131,7 +131,7 @@ enum ChatFileUploader {
                                                                                  maxNetworkWait: maxNetworkWait)
                 else { throw error }
 
-                NCLog.log("Upload request failed, trying again in \(delay) seconds. Error: \(error.localizedDescription)")
+                NCLog.log("Upload request failed, trying again in \(delay) seconds. Error: \(NCLog.errorCode(error))")
 
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
@@ -179,7 +179,7 @@ enum ChatFileUploader {
                 let failure = self.failure(for: error)
 
                 if ChatFileUploadRetryPolicy.isAlreadyAnnounced(failure, viaDraftFolder: isDraftFolder, earlierAttemptMayHaveSucceeded: earlierAttemptMayHaveSucceeded) {
-                    NCLog.log("Announcing a \(NCLog.fileTraits(fileName: upload.fileName)) was done by an earlier attempt already. Answer: \(ChatFileUploadRetryPolicy.responseBody(of: error) ?? "none")")
+                    NCLog.log("Announcing a \(NCLog.fileTraits(fileName: upload.fileName)) was done by an earlier attempt already. Http \(failure.httpStatusCode ?? 0), error \(NCLog.errorCode(error))")
                     return
                 }
 

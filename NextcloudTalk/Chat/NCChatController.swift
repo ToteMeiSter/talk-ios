@@ -1404,7 +1404,7 @@ public class NCChatController: NSObject {
                 try await ChatFileUploader.upload(upload)
                 NCLog.log("Successfully uploaded and shared voice message.")
             } catch {
-                NCLog.log("Failed to upload voice message. Error: \(error.localizedDescription)")
+                NCLog.log("Failed to upload voice message. Error: \(NCLog.errorCode(error))")
             }
         }
     }
