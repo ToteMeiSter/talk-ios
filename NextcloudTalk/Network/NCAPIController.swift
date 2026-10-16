@@ -3146,6 +3146,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 <d:getcontenttype />\
                 <d:resourcetype />\
                 <fileid xmlns=\"http://owncloud.org/ns\"/>\
+                <permissions xmlns=\"http://owncloud.org/ns\"/>\
                 <is-encrypted xmlns=\"http://nextcloud.org/ns\"/>\
                 <has-preview xmlns=\"http://nextcloud.org/ns\"/>\
             </d:prop>\
@@ -3186,17 +3187,42 @@ class NCAPIController: NSObject, NKCommonDelegate {
             parameters["talkMetaData"] = jsonString
         }
 
+        // A 403 is not handled here: the server uses it for "already shared" as well as for a refused share,
+        // so only the caller knows which one it is (see `isAlreadyShared`).
         apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { _, ocsError in
-            if let ocsError {
-                // Do not return error when re-sharing a file or folder.
-                if ocsError.responseStatusCode != 403 {
-                    completionBlock(ocsError)
-                    return
-                }
-            }
-
-            completionBlock(nil)
+            completionBlock(ocsError)
         }
+    }
+
+    /// Whether a failed `shareFileOrFolder` only says that the path is already shared with the conversation.
+    ///
+    /// The server answers 403 for "Path is already shared with this conversation" (Talk's `RoomShareProvider`).
+    /// A refused share looks the same: since server 34.0.2 "You are not allowed to share ..." and "more permission
+    /// than you have" are 403 as well (`RestrictInteractionListener`), before that the refusal is a 404.
+    /// The text is localized, so it can not tell them apart. The provider runs after all checks of the server,
+    /// so a 403 can only mean "already shared" for a node the user may share and update: the default permissions
+    /// of a file share are read, update and share. For any other node it is a refusal.
+    @nonobjc
+    static func isAlreadyShared(statusCode: Int, canShare: Bool) -> Bool {
+        return statusCode == 403 && canShare
+    }
+
+    @nonobjc
+    static func isAlreadyShared(_ error: Error, canShare: Bool) -> Bool {
+        guard let ocsError = error as? OcsError else { return false }
+        return isAlreadyShared(statusCode: ocsError.responseStatusCode, canShare: canShare)
+    }
+
+    /// Whether the WebDAV permissions (`oc:permissions`) of a node include everything a share of it asks for by default
+    /// (`shareapi_default_permissions`, 31): the right to share ("R") and to update ("W"), for a folder also to create
+    /// ("C", "K") and to delete ("D") inside. A 403 for a node with less is a refusal, not "already shared".
+    /// Without permissions in the listing nothing is known, so the node is treated as shareable.
+    @nonobjc
+    static func canShare(davPermissions: String, isDirectory: Bool) -> Bool {
+        if davPermissions.isEmpty { return true }
+
+        let required = isDirectory ? ["R", "W", "C", "K", "D"] : ["R", "W"]
+        return required.allSatisfy { davPermissions.contains($0) }
     }
 
     func uniqueNameForFileUpload(withName fileName: String, isOriginalName: Bool, forAccount account: TalkAccount, completionBlock: @escaping (_ fileServerURL: String?, _ fileServerPath: String?, _ errorCode: Int, _ errorDescription: String?) -> Void) {
@@ -3222,6 +3248,18 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 print("Error checking file name: \(error.errorDescription)")
                 completionBlock(nil, nil, error.errorCode, error.errorDescription)
             }
+        }
+    }
+
+    /// Deletes a file or folder using its absolute WebDAV URL. A file that is gone already is no error.
+    ///
+    /// - Returns: The status code, `0` when the file was deleted or is not there.
+    func deleteFile(atServerURL serverURL: String, forAccount account: TalkAccount, completionBlock: @escaping (_ statusCode: Int) -> Void) {
+        self.setupNCCommunication(forAccount: account)
+
+        let options = NKRequestOptions(timeout: TimeInterval(60), queue: .main)
+        NextcloudKit.shared.deleteFileOrFolder(serverUrlFileName: serverURL, options: options) { _, error in
+            completionBlock(error.errorCode == 404 ? 0 : error.errorCode)
         }
     }
 
@@ -3474,7 +3512,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func setUserProfileImage(_ image: UIImage, forAccount account: TalkAccount, completionBlock: @escaping (_ error: Error?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            // Asynchronous like the network path: callers may still be presenting or dismissing a view controller
+            DispatchQueue.main.async { completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0)) }
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/spreed/temp-user-avatar"
 
@@ -3491,7 +3533,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     @nonobjc
     public func removeUserProfileImage(forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/spreed/temp-user-avatar"
 
@@ -3777,7 +3822,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            // Asynchronous like the network path: callers may still be presenting or dismissing a view controller
+            DispatchQueue.main.async { completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0)) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
@@ -3796,7 +3845,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func setEmojiAvatar(forRoom token: String, withEmoji emoji: String, withColor color: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
         guard let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar/emoji"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
@@ -3821,7 +3873,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let encodedToken = room.token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: room.accountId),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
