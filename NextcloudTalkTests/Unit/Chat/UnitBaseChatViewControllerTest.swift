@@ -350,6 +350,15 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
             wait(for: [mainQueueRan], timeout: 1)
         }
 
+        if baseController.voiceMessagesPlayer === previousPlayer {
+            // Tell apart why the player was not replaced: the selection changed, or no player can be built from the parsed path
+            XCTAssertEqual(baseController.voiceMessageSelection, 1)
+            let parsedPath = testMessage.file()?.fileStatus?.fileLocalPath
+            XCTAssertEqual(parsedPath, fileLocalPath)
+            XCTAssertNotNil(parsedPath.flatMap { BaseChatViewController.makeVoiceMessagePlayer(atPath: $0) },
+                            "No player can be built from the parsed path")
+        }
+
         XCTAssertNotNil(baseController.voiceMessagesPlayer)
         XCTAssertFalse(baseController.voiceMessagesPlayer === previousPlayer)
         XCTAssertNil(baseController.pendingVoiceMessageDownload)
