@@ -69,7 +69,21 @@ let kShareConfirmationMaxItems = 10
     /// Whether a send has started and not ended yet. Taps on the send buttons while it is true are ignored,
     /// else a second tap during a slow send (download of a copy, upload) would send the same thing twice.
     /// Set by `sendCurrent`, cleared by `stopAnimatingSharingIndicator`, which every end of a send, failed or not, calls.
-    private(set) var isSending = false
+    ///
+    /// While it is true the screen cannot be left: a send that goes on without a screen cannot show its error, and its
+    /// end would close whatever the delegate shows then.
+    private(set) var isSending = false {
+        didSet { self.updateClosingLock() }
+    }
+
+    /// Takes away the ways to close the screen (back button, cancel button, swipe back, swipe down) while sending
+    private func updateClosingLock() {
+        self.navigationItem.hidesBackButton = self.isSending
+        self.navigationItem.leftBarButtonItem?.isEnabled = !self.isSending
+        self.navigationController?.interactivePopGestureRecognizer?.isEnabled = !self.isSending
+        self.navigationController?.isModalInPresentation = self.isSending
+        self.isModalInPresentation = self.isSending
+    }
 
     /// Quality the images are uploaded in. Deliberately not remembered between shares, so an
     /// exception stays an exception.
@@ -957,39 +971,36 @@ let kShareConfirmationMaxItems = 10
         self.hud?.mode = .indeterminate
         self.hud?.label.text = String.localizedStringWithFormat(NSLocalizedString("Uploading %ld elements", comment: ""), 1)
 
-        Task { @MainActor in
-            ChatFileDownloader.shared.downloadFile(withFileId: fileId, fromAccount: self.account) { result in
-                guard case .success(let fileStatus) = result, let localPath = fileStatus.fileLocalPath else {
-                    if case .failure(let error) = result {
-                        NCLog.log("Failed to download the file to forward a copy. Error: \(error)")
-                    }
-
-                    self.hud?.hide(animated: true)
-                    self.delegate?.shareConfirmationViewControllerDidFail(self)
-                    self.stopAnimatingSharingIndicator()
-                    bgTask.stopBackgroundTask()
-                    return
+        ChatFileDownloader.shared.downloadFile(withFileId: fileId, fromAccount: self.account) { result in
+            guard case .success(let fileStatus) = result, let localPath = fileStatus.fileLocalPath else {
+                if case .failure(let error) = result {
+                    NCLog.log("Failed to download the file to forward a copy. Error: \(error)")
                 }
 
-                var upload = ChatFileUpload(localPath: localPath, fileName: fileStatus.fileName, room: self.room, account: self.account)
-                upload.metadata = metaData
+                self.hud?.hide(animated: true)
+                self.delegate?.shareConfirmationViewControllerDidFail(self)
+                self.stopAnimatingSharingIndicator()
+                bgTask.stopBackgroundTask()
+                return
+            }
 
-                Task { @MainActor in
-                    defer { bgTask.stopBackgroundTask() }
+            let upload = ChatFileUpload(localPath: localPath, fileName: fileStatus.fileName, room: self.room, account: self.account, metadata: metaData)
 
-                    self.hud?.mode = .annularDeterminate
+            Task { @MainActor in
+                defer { bgTask.stopBackgroundTask() }
 
-                    do {
-                        try await ChatFileUploader.upload(upload, maxNetworkWait: Self.maxNetworkWait) { fractionCompleted in
-                            DispatchQueue.main.async { self.hud?.progress = Float(fractionCompleted) }
-                        }
+                self.hud?.mode = .annularDeterminate
 
-                        NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
-                        self.finishUploads(withErrors: [], succeededItems: [])
-                    } catch {
-                        NCLog.log("Failed to upload the copy of a file. Error: \(error.localizedDescription)")
-                        self.finishUploads(withErrors: [self.message(for: error)], succeededItems: [])
+                do {
+                    try await ChatFileUploader.upload(upload, maxNetworkWait: Self.maxNetworkWait) { fractionCompleted in
+                        DispatchQueue.main.async { self.hud?.progress = Float(fractionCompleted) }
                     }
+
+                    NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
+                    self.finishUploads(withErrors: [], succeededItems: [])
+                } catch {
+                    NCLog.log("Failed to upload the copy of a file. Error: \(error.localizedDescription)")
+                    self.finishUploads(withErrors: [self.message(for: error)], succeededItems: [])
                 }
             }
         }
@@ -1161,6 +1172,12 @@ let kShareConfirmationMaxItems = 10
 
         // We remove the successfully uploaded items, so only the failed ones are kept
         self.shareItemController.remove(succeededItems)
+
+        // A screen that is gone cannot show the alert
+        guard self.viewIfLoaded?.window != nil else {
+            NCLog.log("Upload failed after the screen was left: \(errors.joined(separator: ", "))")
+            return
+        }
 
         let alert = UIAlertController(title: NSLocalizedString("Upload failed", comment: ""),
                                       message: errors.joined(separator: "\n"),

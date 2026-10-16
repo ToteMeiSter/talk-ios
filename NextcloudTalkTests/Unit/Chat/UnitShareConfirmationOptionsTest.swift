@@ -330,6 +330,52 @@ final class UnitShareConfirmationOptionsTest: TestBaseRealm {
         XCTAssertEqual(delegate.failCount, 2)
     }
 
+    func testScreenCannotBeLeftWhileSending() throws {
+        let delegate = ForwardDelegate()
+        let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: "3"), delegate: delegate)
+
+        XCTAssertFalse(viewController.navigationItem.hidesBackButton)
+        XCTAssertFalse(viewController.isModalInPresentation)
+
+        viewController.sendCurrent(silently: false)
+
+        XCTAssertTrue(viewController.navigationItem.hidesBackButton)
+        XCTAssertTrue(viewController.isModalInPresentation)
+
+        viewController.stopAnimatingSharingIndicator()
+        self.waitForMainQueue()
+
+        XCTAssertFalse(viewController.navigationItem.hidesBackButton)
+        XCTAssertFalse(viewController.isModalInPresentation)
+    }
+
+    func testCopyWithoutFileIdFailsAndCanBeRepeated() throws {
+        // The real forwardCopy, only the share is replaced
+        self.updateCapabilities { _ in }
+
+        let account = NCDatabaseManager.sharedInstance().activeAccount()
+        let room = NCRoom(value: self.addRoom(withToken: UUID().uuidString, withName: "Room"))
+        let capabilities = try XCTUnwrap(NCDatabaseManager.sharedInstance().serverCapabilities(forAccountId: account.accountId))
+        let viewController = try XCTUnwrap(ShareConfirmationViewController(room: room, thread: nil, account: account, serverCapabilities: capabilities))
+        let delegate = ForwardDelegate()
+
+        viewController.loadViewIfNeeded()
+        viewController.delegate = delegate
+
+        let message = self.fileMessage(permissions: "3")
+        message.messageParametersJSONString = """
+        { "file": { "type": "file", "name": "a.jpg", "permissions": "3", "path": "Talk/a.jpg" } }
+        """
+        viewController.shareFileMessage(message)
+        self.waitForMainQueue()
+
+        viewController.sendCurrent(silently: false)
+        self.waitForMainQueue()
+
+        XCTAssertEqual(delegate.failCount, 1)
+        XCTAssertFalse(viewController.isSending)
+    }
+
     func testForwardMethod() {
         XCTAssertEqual(ShareConfirmationViewController.forwardMethod(canBeShared: true), .share)
         XCTAssertEqual(ShareConfirmationViewController.forwardMethod(canBeShared: false), .copy)
