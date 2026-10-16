@@ -491,8 +491,9 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
     }
 
     /// Removes the file of a dropped upload from the draft folder, nobody posts it anymore. The file stays on
-    /// the server after a plain failure, because "Resend" posts it. An error is only logged: the file is not
-    /// the user's, and the user can do nothing about it.
+    /// the server after a plain failure, because "Resend" posts it. The file is in the home folder of the user,
+    /// but it is not visible in the conversation and the server never cleans it. With the trash bin app the
+    /// WebDAV DELETE moves it to the deleted files. An error is only logged, the user can do nothing about it.
     private func removeAbandonedDraftFile(of state: ChatUploadState) {
         guard let serverURL = state.abandonedDraftFileURL else { return }
 
