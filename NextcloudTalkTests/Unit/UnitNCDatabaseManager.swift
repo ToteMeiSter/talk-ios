@@ -78,9 +78,23 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         XCTAssertEqual(NCLog.logfileName(dateString: "2026-10-16", processName: ""), "debug-2026-10-16.log")
         XCTAssertEqual(NCLog.logfileName(dateString: "2026-10-16", processName: "ShareExtension"), "debug-2026-10-16-ShareExtension.log")
 
-        // Both names are still picked up by getLogfiles/removeOldLogfiles and sort by date first
-        let names = ["debug-2026-10-15.log", "debug-2026-10-16-ShareExtension.log", "debug-2026-10-16.log"]
-        XCTAssertEqual(names.sorted { $0 > $1 }.first, "debug-2026-10-16.log")
-        XCTAssertTrue(names.allSatisfy { $0.hasPrefix("debug-") && $0.hasSuffix(".log") })
+        // Both names are picked up by the logfile listing, newest date first, other files are ignored
+        let fileManager = FileManager.default
+        let dirA = fileManager.temporaryDirectory.appendingPathComponent("logs-\(UUID().uuidString)")
+        let dirB = fileManager.temporaryDirectory.appendingPathComponent("logs-\(UUID().uuidString)")
+        try fileManager.createDirectory(at: dirA, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: dirB, withIntermediateDirectories: true)
+        defer {
+            try? fileManager.removeItem(at: dirA)
+            try? fileManager.removeItem(at: dirB)
+        }
+
+        for name in ["debug-2026-10-15.log", "debug-2026-10-16-ShareExtension.log", "other.txt"] {
+            fileManager.createFile(atPath: dirA.appendingPathComponent(name).path, contents: Data())
+        }
+        fileManager.createFile(atPath: dirB.appendingPathComponent("debug-2026-10-16.log").path, contents: Data())
+
+        let names = NCLog.logfiles(in: [dirA, dirB]).map { $0.lastPathComponent }
+        XCTAssertEqual(names, ["debug-2026-10-16.log", "debug-2026-10-16-ShareExtension.log", "debug-2026-10-15.log"])
     }
 }

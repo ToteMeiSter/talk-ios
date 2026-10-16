@@ -91,8 +91,9 @@
                     try fileHandle.write(contentsOf: logMessage.data(using: .utf8)!)
                     try fileHandle.close()
                 } else {
-                    // Keep the file readable while the device is locked, e.g. for a notification extension
-                    FileManager.default.createFile(atPath: fullPath, contents: logMessage.data(using: .utf8)!, attributes: [.protectionKey: FileProtectionType.none])
+                    if !FileManager.default.createFile(atPath: fullPath, contents: logMessage.data(using: .utf8)!) {
+                        NSLog("Exception in NCLog.log: could not create logfile %@", fullPath)
+                    }
                 }
 
                 NSLog("%@", logMessage)
@@ -104,14 +105,15 @@
     }
 
     public static func getLogfiles() -> [URL] {
+        return logfiles(in: allLogDirectories)
+    }
+
+    // Sort descending by file name so the most recent logfile is listed first
+    static func logfiles(in directories: [URL]) -> [URL] {
         let fileManager = FileManager.default
 
-        let files = allLogDirectories.flatMap { dir in
-            (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        }
-
-        // Sort descending by file name so the most recent logfile is listed first
-        return files
+        return directories
+            .flatMap { (try? fileManager.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)) ?? [] }
             .filter { isLogfile($0.lastPathComponent) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }

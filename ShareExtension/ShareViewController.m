@@ -351,24 +351,9 @@
     [NCLog log:[NSString stringWithFormat:@"Share extension received %lu input items with %lu attachments",
                 (unsigned long)self.extensionContext.inputItems.count, (unsigned long)attachmentsCount]];
 
-    NSArray<NSString *> *supportedTypes = @[(NSString *)kUTTypeMovie, @"public.file-url", (NSString *)kUTTypeImage, @"com.apple.pkpass",
-                                            @"public.url", @"public.plain-text", (NSString *)kUTTypeVCard];
-
     [self.extensionContext.inputItems enumerateObjectsUsingBlock:^(NSExtensionItem * _Nonnull extItem, NSUInteger idx, BOOL * _Nonnull stop) {
         [extItem.attachments enumerateObjectsUsingBlock:^(NSItemProvider * _Nonnull itemProvider, NSUInteger idx, BOOL * _Nonnull stop) {
-            BOOL isSupported = NO;
-            for (NSString *supportedType in supportedTypes) {
-                if ([itemProvider hasItemConformingToTypeIdentifier:supportedType]) {
-                    isSupported = YES;
-                    break;
-                }
-            }
-
-            if (!isSupported) {
-                [NCLog log:[NSString stringWithFormat:@"Share extension: attachment of unsupported type, registeredTypeIdentifiers: %@",
-                            [itemProvider.registeredTypeIdentifiers componentsJoinedByString:@", "]]];
-                return;
-            }
+            BOOL isHandled = NO;
 
             // Check if shared video
             if ([itemProvider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) {
@@ -444,6 +429,7 @@
             }
             // Check if shared URL
             if ([itemProvider hasItemConformingToTypeIdentifier:@"public.url"]) {
+                isHandled = YES;
                 [itemProvider loadItemForTypeIdentifier:@"public.url"
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
@@ -459,6 +445,7 @@
             }
             // Check if shared text
             if ([itemProvider hasItemConformingToTypeIdentifier:@"public.plain-text"]) {
+                isHandled = YES;
                 [itemProvider loadItemForTypeIdentifier:@"public.plain-text"
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
@@ -474,6 +461,7 @@
             }
             // Check if vcard
             if ([itemProvider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeVCard]) {
+                isHandled = YES;
                 [itemProvider loadItemForTypeIdentifier:(NSString *)kUTTypeVCard
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
@@ -484,6 +472,11 @@
                                               [shareConfirmationVC.shareItemController addItemWithContactData:contactData];
                                           }
                                       }];
+            }
+
+            if (!isHandled) {
+                [NCLog log:[NSString stringWithFormat:@"Share extension: attachment of unsupported type, registeredTypeIdentifiers: %@",
+                            [itemProvider.registeredTypeIdentifiers componentsJoinedByString:@", "]]];
             }
         }];
     }];
