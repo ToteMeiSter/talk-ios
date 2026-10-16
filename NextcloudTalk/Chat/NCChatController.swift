@@ -826,15 +826,23 @@ public class NCChatController: NSObject {
 
         guard !lostMessages.isEmpty else { return }
 
-        // The texts and reference ids are read before the write, the messages are modified in a single transaction
-        let notifications = lostMessages.map { (referenceId: $0.referenceId ?? "", message: $0.message ?? "") }
+        // The messages are modified in a single transaction. Another thread might have removed or changed a message since we read it,
+        // so the state is checked again and only the messages really modified are reported.
+        var notifications: [(referenceId: String, message: String)] = []
 
         RLMRealm.writeTransaction { _ in
             for lostMessage in lostMessages {
+                guard !lostMessage.isInvalidated, !lostMessage.sendingFailed, !lostMessage.isOfflineMessage else { continue }
+
+                notifications.append((referenceId: lostMessage.referenceId ?? "", message: lostMessage.message ?? ""))
                 lostMessage.isOfflineMessage = false
                 lostMessage.sendingFailed = true
             }
         }
+
+        guard !notifications.isEmpty else { return }
+
+        NCLog.log("Marked \(notifications.count) temporary messages as failed, their request was lost with a killed process")
 
         // Inform the chatViewController, the same way as a failed request does it
         for lostMessage in notifications {
@@ -849,17 +857,13 @@ public class NCChatController: NSObject {
         }
     }
 
-    /// We caught up with the server when it had nothing new (304) or returned a valid answer with less than a full page.
-    /// Otherwise more messages might follow, including the server copy of a temporary message, so we need to wait for the next pull.
-    /// A failed, cancelled or malformed (no messages array) answer tells nothing.
+    /// We caught up with the server only when it had nothing new (304). A 200 answer never proves it, even with less than a full page:
+    /// the server drops invisible messages after applying the limit, so more messages might follow, including the server copy
+    /// of a temporary message. A 200 answer is always followed by a next pull, which ends with a 304.
     /// This is decided once per controller: everything this process sends afterwards is in the set of started sends,
     /// so there are no new candidates later.
-    func failLostTemporaryMessagesIfCaughtUp(messages: [[String: Any]]?, error: OcsError?, statusCode: Int, requestTimestamp: Int) {
-        guard !hasCheckedForLostTemporaryMessages, error?.underlyingError.code != NSURLErrorCancelled else { return }
-
-        let isUpToDate = statusCode == 304
-        let isLastPage = error == nil && messages != nil && (messages?.count ?? 0) < NCAPIController.shared.kReceivedChatMessagesLimit
-        guard isUpToDate || isLastPage else { return }
+    func failLostTemporaryMessagesIfCaughtUp(statusCode: Int, requestTimestamp: Int) {
+        guard !hasCheckedForLostTemporaryMessages, statusCode == 304 else { return }
 
         hasCheckedForLostTemporaryMessages = true
         failTemporaryMessagesLostByKilledProcess(createdBefore: requestTimestamp)
@@ -1275,68 +1279,73 @@ public class NCChatController: NSObject {
                 return
             }
 
-            if let error {
-                if self.isChatBeingBlocked(statusCode) {
-                    self.resetChatRelayState()
-                    self.notifyChatIsBlocked()
-                    return
-                }
+            self.handlePullResponse(messages: messages, lastKnownMessage: lastKnownMessage, lastCommonReadMessage: lastCommonReadMessage, error: error, statusCode: statusCode, fromMessageId: messageId, requestTimestamp: requestTimestamp)
+        }
+    }
 
-                if statusCode == 404 {
-                    NCLog.log("Thread not found error: \(error.description)")
-                    self.resetChatRelayState()
-                    NotificationCenter.default.post(name: .NCChatControllerDidReceiveThreadNotFound, object: self, userInfo: nil)
-                    return
-                }
+    /// The handling of an answer of the pull request, in an own method so it can be tested
+    func handlePullResponse(messages: [[String: Any]]?, lastKnownMessage: Int, lastCommonReadMessage: Int, error: OcsError?, statusCode: Int, fromMessageId messageId: Int, requestTimestamp: Int) {
+        if let error {
+            if self.isChatBeingBlocked(statusCode) {
+                self.resetChatRelayState()
+                self.notifyChatIsBlocked()
+                return
+            }
 
-                if statusCode == 429 {
-                    NCLog.log("Brute-force protected, received 429 while receiving messages. No further polling.")
-                    self.resetChatRelayState()
-                    return
-                }
+            if statusCode == 404 {
+                NCLog.log("Thread not found error: \(error.description)")
+                self.resetChatRelayState()
+                NotificationCenter.default.post(name: .NCChatControllerDidReceiveThreadNotFound, object: self, userInfo: nil)
+                return
+            }
 
-                if statusCode != 304, error.underlyingError.code != NSURLErrorCancelled  {
-                    NCLog.log("Could not get new chat messages. Error: \(error.description)")
-                }
-            } else {
-                // Update last chat block
-                self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+            if statusCode == 429 {
+                NCLog.log("Brute-force protected, received 429 while receiving messages. No further polling.")
+                self.resetChatRelayState()
+                return
+            }
 
-                // Store new messages
-                if let messages, !messages.isEmpty {
-                    self.storeMessages(messages)
-                    self.checkForNewMessages(fromMessageId: messageId)
+            if statusCode != 304, error.underlyingError.code != NSURLErrorCancelled  {
+                NCLog.log("Could not get new chat messages. Error: \(error.description)")
+            }
+        } else {
+            // Update last chat block
+            self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
 
-                    for messageDict in messages {
-                        let message = NCChatMessage(dictionary: messageDict as [AnyHashable: Any], andAccountId: self.account.accountId)
+            // Store new messages
+            if let messages, !messages.isEmpty {
+                self.storeMessages(messages)
+                self.checkForNewMessages(fromMessageId: messageId)
 
-                        // When we receive a "history_cleared" message, we don't continue here, as otherwise
-                        // we would request new messages, but instead, we need to request the initial history again
-                        if message?.systemMessage == "history_cleared" {
-                            self.resetChatRelayState()
-                            return
-                        }
+                for messageDict in messages {
+                    let message = NCChatMessage(dictionary: messageDict as [AnyHashable: Any], andAccountId: self.account.accountId)
+
+                    // When we receive a "history_cleared" message, we don't continue here, as otherwise
+                    // we would request new messages, but instead, we need to request the initial history again
+                    if message?.systemMessage == "history_cleared" {
+                        self.resetChatRelayState()
+                        return
                     }
                 }
             }
+        }
 
-            self.hasReceivedMessagesFromServer = true
+        self.hasReceivedMessagesFromServer = true
 
-            self.failLostTemporaryMessagesIfCaughtUp(messages: messages, error: error, statusCode: statusCode, requestTimestamp: requestTimestamp)
+        self.failLostTemporaryMessagesIfCaughtUp(statusCode: statusCode, requestTimestamp: requestTimestamp)
 
-            self.checkLastCommonReadMessage(lastCommonReadMessage)
+        self.checkLastCommonReadMessage(lastCommonReadMessage)
 
-            if error?.underlyingError.code != NSURLErrorCancelled {
-                let chatIsUpToDate = statusCode == 304
-                let lastChatBlock = self.chatBlocksForRoomOrThread().last
+        if error?.underlyingError.code != NSURLErrorCancelled {
+            let chatIsUpToDate = statusCode == 304
+            let lastChatBlock = self.chatBlocksForRoomOrThread().last
 
-                if chatIsUpToDate, self.externalSignalingController?.hasChatRelay == true {
-                    self.handOverPollingToChatRelay(fromMessagesId: lastChatBlock?.newestMessageId ?? 0)
-                    return
-                }
-
-                self.startReceivingChatMessages(fromMessagesId: lastChatBlock?.newestMessageId ?? 0, withTimeout: chatIsUpToDate)
+            if chatIsUpToDate, self.externalSignalingController?.hasChatRelay == true {
+                self.handOverPollingToChatRelay(fromMessagesId: lastChatBlock?.newestMessageId ?? 0)
+                return
             }
+
+            self.startReceivingChatMessages(fromMessagesId: lastChatBlock?.newestMessageId ?? 0, withTimeout: chatIsUpToDate)
         }
     }
 
