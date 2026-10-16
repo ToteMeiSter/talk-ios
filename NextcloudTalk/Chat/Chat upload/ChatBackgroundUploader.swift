@@ -220,6 +220,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             case .failed:
                 if self.isObsolete(state, now: now) {
                     NCLog.log("Removing the failed upload of \(state.fileName), it is obsolete")
+                    self.removeAbandonedDraftFile(of: state)
                     self.store.remove(state)
                 } else {
                     // The process might have died before the message was updated
@@ -478,6 +479,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
         // The state goes first, so the cancellation below finds nothing to carry on with
         self.store.remove(state)
+        self.removeAbandonedDraftFile(of: state)
 
         self.session.getAllTasks { tasks in
             for task in tasks where task.taskDescription == referenceId {
@@ -486,6 +488,25 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
 
         self.transferringIds.remove(referenceId)
+    }
+
+    /// Removes the file of a dropped upload from the draft folder, nobody posts it anymore. The file stays on
+    /// the server after a plain failure, because "Resend" posts it. The file is in the home folder of the user,
+    /// but it is not visible in the conversation and the server never cleans it. With the trash bin app the
+    /// WebDAV DELETE moves it to the deleted files. An error is only logged, the user can do nothing about it.
+    private func removeAbandonedDraftFile(of state: ChatUploadState) {
+        guard let serverURL = state.abandonedDraftFileURL else { return }
+
+        guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: state.accountId) else {
+            NCLog.log("Could not remove \(state.fileName) from the draft folder, the account is gone")
+            return
+        }
+
+        NCAPIController.sharedInstance().deleteFile(atServerURL: serverURL, forAccount: account) { statusCode in
+            if statusCode != 0 {
+                NCLog.log("Could not remove \(state.fileName) from the draft folder, http \(statusCode)")
+            }
+        }
     }
 
     @MainActor
