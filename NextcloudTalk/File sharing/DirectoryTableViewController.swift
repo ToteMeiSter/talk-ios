@@ -138,7 +138,7 @@ class DirectoryTableViewController: UITableViewController {
         self.tableView.reloadData()
     }
 
-    private func shareFile(withPath path: String) {
+    private func shareFile(withPath path: String, canShare: Bool) {
         setSharingFileUI()
 
         var metaData = ChatFileUploadMetadata()
@@ -151,7 +151,8 @@ class DirectoryTableViewController: UITableViewController {
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: NCDatabaseManager.sharedInstance().activeAccount(), atPath: path, toRoom: token, withTalkMetaData: talkMetaData, withReferenceId: nil) { [weak self] error in
             guard let self else { return }
 
-            if let error {
+            // 403 on a file the user may share means it is already shared with the conversation
+            if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
                 self.removeSharingFileUI()
                 self.showErrorSharingItem()
                 print("Error sharing file or folder: \(error)")
@@ -208,12 +209,12 @@ class DirectoryTableViewController: UITableViewController {
         self.tableView.isUserInteractionEnabled = true
     }
 
-    private func showConfirmationDialogForSharingItem(withPath path: String, andName name: String) {
+    private func showConfirmationDialogForSharingItem(withPath path: String, andName name: String, canShare: Bool) {
         let confirmDialog = UIAlertController(title: name,
                                               message: String(format: NSLocalizedString("Do you want to share '%@' in the conversation?", comment: ""), name),
                                               preferredStyle: .alert)
         confirmDialog.addAction(UIAlertAction(title: NSLocalizedString("Share", comment: "Button to share a file into the conversation"), style: .default) { [weak self] _ in
-            self?.shareFile(withPath: path)
+            self?.shareFile(withPath: path, canShare: canShare)
         })
         confirmDialog.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
         self.present(confirmDialog, animated: true)
@@ -273,7 +274,7 @@ class DirectoryTableViewController: UITableViewController {
             let directoryVC = DirectoryTableViewController(path: selectedItemPath, inRoom: token, andThread: threadId)
             self.navigationController?.pushViewController(directoryVC, animated: true)
         } else {
-            showConfirmationDialogForSharingItem(withPath: selectedItemPath, andName: item.fileName)
+            showConfirmationDialogForSharingItem(withPath: selectedItemPath, andName: item.fileName, canShare: NCAPIController.canShare(davPermissions: item.permissions))
         }
 
         tableView.deselectRow(at: indexPath, animated: true)
