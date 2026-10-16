@@ -390,7 +390,9 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         let previousPlayer = try AVAudioPlayer(data: silentWavData())
         baseController.voiceMessagesPlayer = previousPlayer
 
+        NSLog("%@", "G24DIAG test: tap")
         baseController.cellWants(toPlayAudioFile: testMessage)
+        NSLog("%@", "G24DIAG test: tap returned")
 
         // The local file is played directly, no download is requested
         XCTAssertNil(baseController.pendingVoiceMessageDownload)
@@ -405,6 +407,7 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         }
 
         let replacedByTap = baseController.voiceMessagesPlayer !== previousPlayer
+        NSLog("%@", "G24DIAG test: replaced by tap \(replacedByTap)")
 
         if !replacedByTap {
             // Tell apart why the player was not replaced: the selection changed, or no player can be built from the parsed path
@@ -432,6 +435,36 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         XCTAssertTrue(replacedByTap, "The tap did not replace the player")
         XCTAssertNotNil(baseController.voiceMessagesPlayer)
         XCTAssertNil(baseController.pendingVoiceMessageDownload)
+    }
+
+    func testTapOnVoiceMessageWithLocalFileDiagEarlyPlayer() throws {
+        addTeardownBlock { [baseController] in baseController?.stopVoiceMessagePlayer() }
+
+        let previousPlayer = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = previousPlayer
+
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+        let fileLocalPath = try XCTUnwrap(fileStatus.fileLocalPath)
+        testMessage.messageParametersJSONString = """
+        {"file": {"type": "file", "id": "1", "name": "\(fileStatus.fileName)", "path": "\(fileStatus.filePath)", "mimetype": "audio/wav",
+        "fileId": "1", "fileName": "\(fileStatus.fileName)", "filePath": "\(fileStatus.filePath)", "fileLocalPath": "\(fileLocalPath)"}}
+        """
+        testMessage.message = "{file}"
+        testMessage.messageType = "voice-message"
+        XCTAssertNotNil(testMessage.file()?.fileStatus)
+
+        NSLog("%@", "G24DIAG early: tap")
+        baseController.cellWants(toPlayAudioFile: testMessage)
+
+        let deadline = Date().addingTimeInterval(5)
+        while baseController.voiceMessagesPlayer === previousPlayer, Date() < deadline {
+            let mainQueueRan = expectation(description: "Main queue ran")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { mainQueueRan.fulfill() }
+            wait(for: [mainQueueRan], timeout: 1)
+        }
+
+        NSLog("%@", "G24DIAG early: replaced \(baseController.voiceMessagesPlayer !== previousPlayer)")
+        XCTAssertTrue(baseController.voiceMessagesPlayer !== previousPlayer, "Early player: the tap did not replace the player")
     }
 
     func testTapOnVoiceMessageWaitingForItsDownloadIsPending() {

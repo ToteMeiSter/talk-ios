@@ -2505,14 +2505,20 @@ import Toast
         guard self.shouldStartVoiceMessage(selection: selection),
               let fileLocalPath = fileStatus.fileLocalPath
         else {
+            NSLog("%@", "G24DIAG setup: guard failed selection \(selection) current \(self.voiceMessageSelection) path \(fileStatus.fileLocalPath != nil)")
             completion?(false)
             return
         }
 
+        NSLog("%@", "G24DIAG setup: dispatch selection \(selection) completion \(completion != nil)")
+        let dispatched = Date()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            NSLog("%@", "G24DIAG setup: global block started after \(Date().timeIntervalSince(dispatched)) s, selection \(selection)")
             let player = BaseChatViewController.makeVoiceMessagePlayer(atPath: fileLocalPath)
+            NSLog("%@", "G24DIAG setup: built player \(player != nil) after \(Date().timeIntervalSince(dispatched)) s, selection \(selection)")
 
             DispatchQueue.main.async {
+                NSLog("%@", "G24DIAG setup: main block self \(self != nil) player \(player != nil) after \(Date().timeIntervalSince(dispatched)) s, selection \(selection)")
                 guard let self, let player else {
                     completion?(false)
                     return
@@ -2526,6 +2532,7 @@ import Toast
     /// Makes `player` the current one and plays it, unless another voice message was tapped while it was built.
     @discardableResult
     func startVoiceMessagePlayer(_ player: AVAudioPlayer, with fileStatus: NCChatFileStatus, selection: Int) -> Bool {
+        NSLog("%@", "G24DIAG start: selection \(selection) current \(self.voiceMessageSelection)")
         guard self.shouldStartVoiceMessage(selection: selection) else { return false }
 
         self.voiceMessagesPlayer = player
@@ -4290,6 +4297,7 @@ import Toast
            fileId == playerAudioFileStatus.fileId,
            fileParameter.path == playerAudioFileStatus.filePath {
 
+            NSLog("%@", "G24DIAG tap: resume branch")
             self.selectVoiceMessage()
             self.pendingVoiceMessageDownload = nil
             self.playVoiceMessagePlayer()
@@ -4298,6 +4306,7 @@ import Toast
 
         if self.isVoiceMessageDownloadPending(forFileId: fileId, downloadStatus: ChatFileDownloader.shared.downloadStatus(forFileId: fileId)) {
             // Playback starts when the download of the previous tap finishes
+            NSLog("%@", "G24DIAG tap: pending branch")
             return
         }
 
@@ -4309,10 +4318,12 @@ import Toast
            let fileLocalPath = fileStatus.fileLocalPath,
            FileManager.default.fileExists(atPath: fileLocalPath) {
 
+            NSLog("%@", "G24DIAG tap: local branch selection \(selection)")
             self.setupVoiceMessagePlayer(with: fileStatus, selection: selection)
             return
         }
 
+        NSLog("%@", "G24DIAG tap: download branch status \(fileParameter.fileStatus != nil) path \(fileParameter.fileStatus?.fileLocalPath != nil)")
         self.pendingVoiceMessageDownload = (fileId, selection)
 
         self.downloadFile(for: message, completionHandler: { [weak self] fileStatus in
