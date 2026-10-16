@@ -29,10 +29,16 @@ public class NCChatController: NSObject {
     public var threadId: Int = 0
     public var hasReceivedMessagesFromServer = false
 
+    // Reference ids of the messages this process started to send. Ids are never removed: after a successful request the temporary
+    // message lives until its server copy arrives, after a failed one it becomes an offline or failed message.
+    private static let referenceIdsSentByThisProcessLock = NSLock()
+    private static var referenceIdsSentByThisProcess = Set<String>()
+
     private let account: TalkAccount
     private var stopChatMessagesPoll = false
     private var getHistoryTask: URLSessionDataTask?
     private var pullMessagesTask: URLSessionDataTask?
+    private var hasCheckedForLostTemporaryMessages = false
 
     enum ChatRelayState {
         case inactive, active, catchingUp
@@ -832,6 +838,89 @@ public class NCChatController: NSObject {
         return sortedMessages
     }
 
+    /// `sendChatMessage` resets `isOfflineMessage` before the request to prevent duplicates. If the process is killed during the request,
+    /// the text message is neither offline nor failed and nothing would send or fail it. We can't resend it automatically
+    /// as the request might have reached the server, so the user is asked to decide.
+    ///
+    /// This must only run once we caught up with the server: by then `storeMessages` removed every temporary message whose
+    /// server copy (same referenceId) was received, so what is left and was not started by this process was really lost.
+    /// Before that, a message whose request did arrive can't be told apart from a lost one.
+    ///
+    /// Messages with a file (file or voice message placeholders) are not touched, they are no text request.
+    /// Only messages created before `createdBefore` are considered, a message created later might not be sent yet.
+    ///
+    /// A lost message of a thread is only marked while the chat controller of this thread pulls, so when that thread is opened.
+    func failTemporaryMessagesLostByKilledProcess(createdBefore: Int) {
+        // Without a referenceId the server copy doesn't remove the temporary message, so we couldn't tell lost from sent
+        guard NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) else { return }
+
+        let query = NSPredicate(format: "accountId = %@ AND token = %@ AND threadId = %ld AND isTemporary = true AND isOfflineMessage = false AND sendingFailed = false AND timestamp < %ld", account.accountId, room.token, threadId, createdBefore)
+        // The results are live and shrink while we mark messages as failed, so iterate over a copy
+        var lostMessages: [NCChatMessage] = []
+        for case let candidate as NCChatMessage in NCChatMessage.objects(with: query) {
+            guard !candidate.hasFileParameter, !candidate.isVoiceMessage,
+                  let referenceId = candidate.referenceId, !referenceId.isEmpty,
+                  !NCChatController.wasSendStartedByThisProcess(referenceId: referenceId)
+            else { continue }
+
+            lostMessages.append(candidate)
+        }
+
+        guard !lostMessages.isEmpty else { return }
+
+        // The texts and reference ids are read before the write, the messages are modified in a single transaction
+        let notifications = lostMessages.map { (referenceId: $0.referenceId ?? "", message: $0.message ?? "") }
+
+        RLMRealm.writeTransaction { _ in
+            for lostMessage in lostMessages {
+                lostMessage.isOfflineMessage = false
+                lostMessage.sendingFailed = true
+            }
+        }
+
+        // Inform the chatViewController, the same way as a failed request does it
+        for lostMessage in notifications {
+            let userInfo: [AnyHashable: Any] = [
+                "message": lostMessage.message,
+                "referenceId": lostMessage.referenceId,
+                "isOfflineMessage": false,
+                "error": OcsError(withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost), withTask: nil)
+            ]
+
+            NotificationCenter.default.post(name: .NCChatControllerDidSendChatMessage, object: self, userInfo: userInfo)
+        }
+    }
+
+    /// We caught up with the server when it had nothing new (304) or returned a valid answer with less than a full page.
+    /// Otherwise more messages might follow, including the server copy of a temporary message, so we need to wait for the next pull.
+    /// A failed, cancelled or malformed (no messages array) answer tells nothing.
+    /// This is decided once per controller: everything this process sends afterwards is in the set of started sends,
+    /// so there are no new candidates later.
+    func failLostTemporaryMessagesIfCaughtUp(messages: [[String: Any]]?, error: OcsError?, statusCode: Int, requestTimestamp: Int) {
+        guard !hasCheckedForLostTemporaryMessages, error?.underlyingError.code != NSURLErrorCancelled else { return }
+
+        let isUpToDate = statusCode == 304
+        let isLastPage = error == nil && messages != nil && (messages?.count ?? 0) < NCAPIController.shared.kReceivedChatMessagesLimit
+        guard isUpToDate || isLastPage else { return }
+
+        hasCheckedForLostTemporaryMessages = true
+        failTemporaryMessagesLostByKilledProcess(createdBefore: requestTimestamp)
+    }
+
+    private static func wasSendStartedByThisProcess(referenceId: String) -> Bool {
+        referenceIdsSentByThisProcessLock.lock()
+        defer { referenceIdsSentByThisProcessLock.unlock() }
+
+        return referenceIdsSentByThisProcess.contains(referenceId)
+    }
+
+    static func markAsSentByThisProcess(referenceId: String) {
+        referenceIdsSentByThisProcessLock.lock()
+        defer { referenceIdsSentByThisProcessLock.unlock() }
+
+        referenceIdsSentByThisProcess.insert(referenceId)
+    }
+
     public func updateHistoryInBackground(completion: ((_ error: OcsError?) -> Void)?) {
         // If there's a pull task running right now, we should not interfere with that
         if let pullMessagesTask, pullMessagesTask.state == .running {
@@ -1222,6 +1311,7 @@ public class NCChatController: NSObject {
         // sticks, regardless of the queue interleaving.
         guard !stopChatMessagesPoll else { return }
         pullMessagesTask?.cancel()
+        let requestTimestamp = Int(Date().timeIntervalSince1970)
         pullMessagesTask = NCAPIController.sharedInstance().receiveChatMessages(ofRoom: room.token, fromLastMessageId: messageId, inThread: threadId, history: false, includeLastMessage: false, timeout: timeout, limit: NCAPIController.shared.kReceivedChatMessagesLimit, lastCommonReadMessage: room.lastCommonReadMessage, setReadMarker: true, markNotificationsAsRead: true, forAccount: account) { messages, lastKnownMessage, lastCommonReadMessage, error, statusCode in
             if self.stopChatMessagesPoll {
                 return
@@ -1274,6 +1364,8 @@ public class NCChatController: NSObject {
 
             self.hasReceivedMessagesFromServer = true
 
+            self.failLostTemporaryMessagesIfCaughtUp(messages: messages, error: error, statusCode: statusCode, requestTimestamp: requestTimestamp)
+
             self.checkLastCommonReadMessage(lastCommonReadMessage)
 
             if error?.underlyingError.code != NSURLErrorCancelled {
@@ -1319,6 +1411,9 @@ public class NCChatController: NSObject {
         var retryCount = 0
 
         if let referenceId {
+            // Before the offline flag is reset, so failTemporaryMessagesLostByKilledProcess can't see the message in between as lost
+            NCChatController.markAsSentByThisProcess(referenceId: referenceId)
+
             // Reset offline message flag before retrying to send to prevent race conditions and
             // possible ending up with multiple identical messages sent
             transactionForMessage(withReferenceId: referenceId) { message in
