@@ -17,6 +17,9 @@ public class NCMessageFileParameter: NCMessageParameter {
     public var height: Int = 0
     public var blurhash: String?
 
+    /// Permissions of the file node for the current user (`OCP\Constants`), nil when the server did not send them
+    public var permissions: Int?
+
     override init?(dictionary dict: [String: Any]?) {
         super.init(dictionary: dict)
 
@@ -31,12 +34,19 @@ public class NCMessageFileParameter: NCMessageParameter {
         self.height = dict?[intForKey: "height"] ?? 0
 
         self.blurhash = dict?["blurhash"] as? String
+        self.permissions = dict?[intForKey: "permissions"]
 
         if let fileId = dict?["fileId"] as? String, let fileName = dict?["fileName"] as? String,
            let filePath = dict?["filePath"] as? String, let fileLocalPath = dict?["fileLocalPath"] as? String {
 
             self.fileStatus = NCChatFileStatus(fileId: fileId, fileName: fileName, filePath: filePath, fileLocalPath: fileLocalPath)
         }
+    }
+
+    /// Whether the user may share the file (`PERMISSION_SHARE`), true when the server did not send permissions
+    public var canBeShared: Bool {
+        guard let permissions else { return true }
+        return permissions & 16 != 0
     }
 
 }

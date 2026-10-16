@@ -875,8 +875,12 @@ let kShareConfirmationMaxItems = 10
         // Sent only when it was shown on this screen
         metaData.caption = self.forwardedCaption(of: fileMessage)
 
+        // Without the right to share the server refuses with 403, with the right the same 403 means "already shared"
+        let canShare = fileMessage.file()?.canBeShared ?? true
+
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
-            if let error {
+            if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
+                // 403 without the right to share ends up here. This is the place to forward a copy of the file instead.
                 NCLog.log(String(format: "Failed to share file. Error: %@", error.localizedDescription))
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
