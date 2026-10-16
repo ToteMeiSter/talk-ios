@@ -341,10 +341,13 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         // The local file is played directly, no download is requested
         XCTAssertNil(baseController.pendingVoiceMessageDownload)
 
-        // The player is built off the main thread and set on the main thread, so run the main run loop until it replaces the previous one
+        // The player is built off the main thread and set on the main thread. Waiting for an expectation fulfilled
+        // on the main queue lets the main queue run, so wait like that until the player replaces the previous one
         let deadline = Date().addingTimeInterval(5)
         while baseController.voiceMessagesPlayer === previousPlayer, Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let mainQueueRan = expectation(description: "Main queue ran")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { mainQueueRan.fulfill() }
+            wait(for: [mainQueueRan], timeout: 1)
         }
 
         XCTAssertNotNil(baseController.voiceMessagesPlayer)
