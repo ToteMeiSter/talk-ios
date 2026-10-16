@@ -111,6 +111,13 @@ static CGFloat const kShareItemControllerEditedImageMaxPixelSize = 4096.0f;
     return success;
 }
 
+- (void)reportFailedFileName:(NSString *)fileName
+{
+    if ([self.delegate respondsToSelector:@selector(shareItemController:didFailToPrepareFileNamed:)]) {
+        [self.delegate shareItemController:self didFailToPrepareFileNamed:fileName];
+    }
+}
+
 - (void)addItemWithURLAndName:(NSURL *)fileURL withName:(NSString *)fileName
 {
     NSURL *fileLocalURL = [self getFileLocalURL:fileName];
@@ -124,6 +131,7 @@ static CGFloat const kShareItemControllerEditedImageMaxPixelSize = 4096.0f;
 
         if (!preparedSuccessfully) {
             NSLog(@"Failed to prepare file for sharing");
+            [self reportFailedFileName:fileName];
             return;
         }
     }
@@ -208,11 +216,13 @@ static CGFloat const kShareItemControllerEditedImageMaxPixelSize = 4096.0f;
 
         if (![NSFileManager.defaultManager replaceItemAtURL:originalURL withItemAtURL:newURL backupItemName:nil options:0 resultingItemURL:nil error:&replaceError]) {
             [NCLog log:[NSString stringWithFormat:@"Failed to replace shareItem with edited file: %@ %@", item.fileName, replaceError]];
+            [self reportFailedFileName:item.fileName];
         }
     }];
 
     if (error) {
         [NCLog log:[NSString stringWithFormat:@"Failed to coordinate reading edited file: %@ %@", item.fileName, error]];
+        [self reportFailedFileName:item.fileName];
     }
     
     NSLog(@"Updating shareItem: %@ %@", item.fileName, item.fileURL);
