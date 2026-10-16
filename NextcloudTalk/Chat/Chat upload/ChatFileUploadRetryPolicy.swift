@@ -249,7 +249,7 @@ enum ChatFileUploadRetryPolicy {
     /// answer. A 404 of the first attempt means the file is really gone.
     ///
     /// The files sharing API answers 403 "Path is already shared with this conversation" for the second
-    /// share of a path, which `NCAPIController.shareFileOrFolder` already counts as success.
+    /// share of a path, which `ChatFileUploader.announce` counts as success.
     static func isAlreadyAnnounced(_ failure: ChatFileUploadFailure, viaDraftFolder: Bool, earlierAttemptMayHaveSucceeded: Bool) -> Bool {
         return viaDraftFolder && earlierAttemptMayHaveSucceeded && failure.httpStatusCode == 404
     }

@@ -3146,6 +3146,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 <d:getcontenttype />\
                 <d:resourcetype />\
                 <fileid xmlns=\"http://owncloud.org/ns\"/>\
+                <permissions xmlns=\"http://owncloud.org/ns\"/>\
                 <is-encrypted xmlns=\"http://nextcloud.org/ns\"/>\
                 <has-preview xmlns=\"http://nextcloud.org/ns\"/>\
             </d:prop>\
@@ -3186,17 +3187,35 @@ class NCAPIController: NSObject, NKCommonDelegate {
             parameters["talkMetaData"] = jsonString
         }
 
+        // A 403 is not handled here: the server uses it for "already shared" as well as for "no right to share",
+        // so only the caller knows which one it is (see `isAlreadyShared`).
         apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { _, ocsError in
-            if let ocsError {
-                // Do not return error when re-sharing a file or folder.
-                if ocsError.responseStatusCode != 403 {
-                    completionBlock(ocsError)
-                    return
-                }
-            }
-
-            completionBlock(nil)
+            completionBlock(ocsError)
         }
+    }
+
+    /// Whether a failed `shareFileOrFolder` only says that the path is already shared with the conversation.
+    ///
+    /// The server answers 403 for "Path is already shared with this conversation" and for "You are not allowed
+    /// to share ..." (no `PERMISSION_SHARE` on the node). The text is localized, so it can not tell them apart.
+    /// The right to share is checked before the "already shared" check on the server, so for a node the user
+    /// may share, a 403 can only mean "already shared". For a node without the right it means "not allowed".
+    @nonobjc
+    static func isAlreadyShared(statusCode: Int, canShare: Bool) -> Bool {
+        return statusCode == 403 && canShare
+    }
+
+    @nonobjc
+    static func isAlreadyShared(_ error: Error, canShare: Bool) -> Bool {
+        guard let ocsError = error as? OcsError else { return false }
+        return isAlreadyShared(statusCode: ocsError.responseStatusCode, canShare: canShare)
+    }
+
+    /// Whether the WebDAV permissions (`oc:permissions`) of a node include the right to share ("R").
+    /// Without permissions in the listing nothing is known, so the node is treated as shareable.
+    @nonobjc
+    static func canShare(davPermissions: String) -> Bool {
+        return davPermissions.isEmpty || davPermissions.contains("R")
     }
 
     func uniqueNameForFileUpload(withName fileName: String, isOriginalName: Bool, forAccount account: TalkAccount, completionBlock: @escaping (_ fileServerURL: String?, _ fileServerPath: String?, _ errorCode: Int, _ errorDescription: String?) -> Void) {
