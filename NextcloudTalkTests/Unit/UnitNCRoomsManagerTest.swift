@@ -50,6 +50,56 @@ final class UnitNCRoomsManagerTest: TestBaseRealm {
         XCTAssertFalse(realmMessage.isOfflineMessage)
     }
 
+    func testResendOfflineMessagesContinuesWhenChatControllerCannotBeCreated() throws {
+        let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
+        let ghostAccountId = "ghostAccountId"
+
+        // A room of an account which is not available, so no NCChatController can be created for it
+        addRoom(withToken: "ghostToken", withAccountId: ghostAccountId)
+        addRoom(withToken: "offToken")
+
+        func offlineMessage(internalId: String, accountId: String, token: String, age: Int) -> NCChatMessage {
+            let message = NCChatMessage()
+            message.internalId = internalId
+            message.accountId = accountId
+            message.actorId = activeAccount.userId
+            message.actorType = "users"
+            message.token = token
+            message.message = internalId
+            message.isOfflineMessage = true
+            message.sendingFailed = false
+            message.timestamp = Int(Date().timeIntervalSince1970) - age
+            return message
+        }
+
+        // The first message can't be sent. The second one is older than 12h and must be marked as failed
+        let unsendableMessage = offlineMessage(internalId: "internal1", accountId: ghostAccountId, token: "ghostToken", age: 60)
+        let oldMessage = offlineMessage(internalId: "internal2", accountId: activeAccount.accountId, token: "offToken", age: 60 * 60 * 13)
+
+        try? realm.transaction {
+            realm.add(unsendableMessage)
+            realm.add(oldMessage)
+        }
+
+        let exp = expectation(description: "\(#function)\(#line)")
+
+        NCRoomsManager.shared.resendOfflineMessages(forToken: nil) {
+            exp.fulfill()
+        }
+
+        // The completion block is also what the background fetch waits for
+        waitForExpectations(timeout: TestConstants.timeoutShort, handler: nil)
+
+        let realmOldMessage = try XCTUnwrap(NCChatMessage.objects(where: "internalId = %@", "internal2").firstObject() as? NCChatMessage)
+        XCTAssertTrue(realmOldMessage.sendingFailed)
+        XCTAssertFalse(realmOldMessage.isOfflineMessage)
+
+        // The message of the unknown account is not failed, it is sent again on the next start
+        let realmUnsendableMessage = try XCTUnwrap(NCChatMessage.objects(where: "internalId = %@", "internal1").firstObject() as? NCChatMessage)
+        XCTAssertTrue(realmUnsendableMessage.isOfflineMessage)
+        XCTAssertFalse(realmUnsendableMessage.sendingFailed)
+    }
+
     func testUpdateRoomWithDict() throws {
         let dataJson = """
             {

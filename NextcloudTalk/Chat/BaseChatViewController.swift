@@ -2270,14 +2270,16 @@ import Toast
             isFileMessage: !isVoiceMessage
         )
 
-        if temporaryMessage == nil {
+        guard let temporaryMessage else {
             print("Temporary message could not be created")
             return
         }
 
-        let movedFileToTemporaryDirectory = chatFileController.moveFileToTemporaryDirectory(
+        let movedFileToTemporaryDirectory = self.moveRecording(
             fromSourcePath: sourcePath,
-            destinationPath: destinationFilePath
+            destinationPath: destinationFilePath,
+            using: chatFileController,
+            for: temporaryMessage
         )
 
         if !movedFileToTemporaryDirectory {
@@ -2285,7 +2287,7 @@ import Toast
             return
         }
 
-        if let temporaryMessage, NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
+        if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
             self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
         }
 
@@ -2304,9 +2306,21 @@ import Toast
                                     room: self.room,
                                     account: self.account)
         upload.metadata = metaData
-        upload.referenceId = temporaryMessage?.referenceId
+        upload.referenceId = temporaryMessage.referenceId
 
         self.upload(upload)
+    }
+
+    /// Moves a recording to the temporary directory. The temporary message of the recording is stored already,
+    /// when the move fails it is removed again: there is nothing to upload or resend, and it would show as sending until it expires.
+    internal func moveRecording(fromSourcePath sourcePath: String, destinationPath: String, using chatFileController: NCChatFileController, for temporaryMessage: NCChatMessage) -> Bool {
+        let isMoved = chatFileController.moveFileToTemporaryDirectory(fromSourcePath: sourcePath, destinationPath: destinationPath)
+
+        if !isMoved {
+            self.removePermanentlyTemporaryMessage(temporaryMessage: temporaryMessage)
+        }
+
+        return isMoved
     }
 
     func upload(_ upload: ChatFileUpload) {
