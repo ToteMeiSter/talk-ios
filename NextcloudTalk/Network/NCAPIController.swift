@@ -3474,7 +3474,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func setUserProfileImage(_ image: UIImage, forAccount account: TalkAccount, completionBlock: @escaping (_ error: Error?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            // Asynchronous like the network path: callers may still be presenting or dismissing a view controller
+            DispatchQueue.main.async { completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0)) }
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/spreed/temp-user-avatar"
 
@@ -3491,7 +3495,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     @nonobjc
     public func removeUserProfileImage(forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/spreed/temp-user-avatar"
 
@@ -3777,7 +3784,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            // Asynchronous like the network path: callers may still be presenting or dismissing a view controller
+            DispatchQueue.main.async { completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0)) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
@@ -3796,7 +3807,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func setEmojiAvatar(forRoom token: String, withEmoji emoji: String, withColor color: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
         guard let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar/emoji"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
@@ -3821,7 +3835,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let encodedToken = room.token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: room.accountId),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
