@@ -813,9 +813,11 @@ public class NCChatController: NSObject {
         guard NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) else { return }
 
         let query = NSPredicate(format: "accountId = %@ AND token = %@ AND threadId = %ld AND isTemporary = true AND isOfflineMessage = false AND sendingFailed = false AND timestamp < %ld", account.accountId, room.token, threadId, createdBefore)
+        print("G17FN account=\(account.accountId) token=\(room.token ?? "nil") thread=\(threadId) before=\(createdBefore) matches=\(NCChatMessage.objects(with: query).count) tempAll=\(NCChatMessage.objects(where: "isTemporary = true").count) accOnly=\(NCChatMessage.objects(where: "accountId = %@ AND isTemporary = true", account.accountId).count) tokOnly=\(NCChatMessage.objects(where: "token = %@ AND isTemporary = true", room.token).count) thrOnly=\(NCChatMessage.objects(where: "threadId = %ld AND isTemporary = true", threadId).count) tsOnly=\(NCChatMessage.objects(where: "timestamp < %ld AND isTemporary = true", createdBefore).count)")
         // The results are live and shrink while we mark messages as failed, so iterate over a copy
         var lostMessages: [NCChatMessage] = []
         for case let candidate as NCChatMessage in NCChatMessage.objects(with: query) {
+            print("G17FN cand ref=\(candidate.referenceId ?? "nil") file=\(candidate.hasFileParameter) voice=\(candidate.isVoiceMessage) started=\(NCChatController.wasSendStartedByThisProcess(referenceId: candidate.referenceId ?? ""))")
             guard !candidate.hasFileParameter, !candidate.isVoiceMessage,
                   let referenceId = candidate.referenceId, !referenceId.isEmpty,
                   !NCChatController.wasSendStartedByThisProcess(referenceId: referenceId)
