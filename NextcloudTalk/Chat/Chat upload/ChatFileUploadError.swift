@@ -31,8 +31,21 @@ enum ChatFileUploadError: Error {
 }
 
 extension ChatFileUploadError: NCLogDescribable {
+    // Only numbers and the codes of wrapped errors: the description of an upload error can hold names and URLs
     var logDescription: String {
-        let failure = ChatFileUploader.failure(for: self)
-        return "ChatFileUploadError http \(failure.httpStatusCode ?? 0), url error \(failure.urlErrorCode ?? 0)"
+        switch self {
+        case .uploadFailed(let errorCode, _):
+            return errorCode >= 100 ? "ChatFileUploadError http \(errorCode)" : "ChatFileUploadError url error \(errorCode)"
+        case .quotaExceeded:
+            return "ChatFileUploadError http 507"
+        case .tooManyRequests:
+            return "ChatFileUploadError http 429"
+        case .attachmentFolderUnavailable:
+            return "ChatFileUploadError attachment folder unavailable"
+        case .destinationUnavailable(let underlyingError):
+            return "ChatFileUploadError destination unavailable, " + (underlyingError.map { NCLog.errorCode($0) } ?? "no error")
+        case .shareFailed(let underlyingError):
+            return "ChatFileUploadError share failed, " + NCLog.errorCode(underlyingError)
+        }
     }
 }

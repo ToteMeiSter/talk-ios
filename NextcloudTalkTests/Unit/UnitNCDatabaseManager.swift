@@ -92,7 +92,7 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         let ocsError = OcsError(withError: urlError, withTask: nil)
         XCTAssertEqual(NCLog.errorCode(ocsError), "OcsError http 0, NSURLErrorDomain -1202")
         XCTAssertFalse(NCLog.errorCode(ocsError).contains("example.org"))
-        XCTAssertEqual(NCLog.errorCode(ChatFileUploadError.uploadFailed(errorCode: 413, errorDescription: "Alice Passport.pdf")), "ChatFileUploadError http 413, url error 0")
+        XCTAssertEqual(NCLog.errorCode(ChatFileUploadError.uploadFailed(errorCode: 413, errorDescription: "Alice Passport.pdf")), "ChatFileUploadError http 413")
 
         let wrapped = NSError(domain: NSCocoaErrorDomain, code: 4, userInfo: [NSUnderlyingErrorKey: urlError])
         XCTAssertEqual(NCLog.errorCode(wrapped), "NSCocoaErrorDomain 4, underlying NSURLErrorDomain -1202")
