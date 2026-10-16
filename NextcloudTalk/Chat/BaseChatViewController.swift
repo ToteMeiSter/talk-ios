@@ -49,6 +49,8 @@ import Toast
 
     internal var replyMessageView: ReplyMessageView?
     internal var voiceMessagesPlayer: AVAudioPlayer?
+    /// Counts the taps on voice messages. Only the result of the latest tap may start playback.
+    internal var voiceMessageSelection = 0
     internal var interactingMessage: NCChatMessage?
     internal var lastMessageBeforeInteraction: IndexPath?
     internal var contextMenuActionBlock: (() -> Void)?
@@ -2462,8 +2464,22 @@ import Toast
 
     // MARK: - Voice Message Player
 
-    func setupVoiceMessagePlayer(with fileStatus: NCChatFileStatus) {
-        guard let fileLocalPath = fileStatus.fileLocalPath,
+    /// Registers a tap on a voice message and returns its selection. A later tap makes earlier selections outdated.
+    @discardableResult
+    func selectVoiceMessage() -> Int {
+        self.voiceMessageSelection &+= 1
+        return self.voiceMessageSelection
+    }
+
+    /// A voice message may only start when no other voice message was tapped since `selection` was taken.
+    func shouldStartVoiceMessage(selection: Int) -> Bool {
+        return selection == self.voiceMessageSelection
+    }
+
+    /// Starts the voice message unless another one was tapped since `selection` was taken, e.g. while this one was downloading.
+    func setupVoiceMessagePlayer(with fileStatus: NCChatFileStatus, selection: Int) {
+        guard self.shouldStartVoiceMessage(selection: selection),
+              let fileLocalPath = fileStatus.fileLocalPath,
               let data = try? Data(contentsOf: URL(fileURLWithPath: fileLocalPath)),
               let player = try? AVAudioPlayer(data: data)
         else { return }
@@ -4219,6 +4235,8 @@ import Toast
             return
         }
 
+        let selection = self.selectVoiceMessage()
+
         // Resume an already loaded voice message
         if let voiceMessagesPlayer = self.voiceMessagesPlayer,
            let playerAudioFileStatus = self.playerAudioFileStatus,
@@ -4235,12 +4253,12 @@ import Toast
            let fileLocalPath = fileStatus.fileLocalPath,
            FileManager.default.fileExists(atPath: fileLocalPath) {
 
-            self.setupVoiceMessagePlayer(with: fileStatus)
+            self.setupVoiceMessagePlayer(with: fileStatus, selection: selection)
             return
         }
 
         self.downloadFile(for: message) { [weak self] fileStatus in
-            self?.setupVoiceMessagePlayer(with: fileStatus)
+            self?.setupVoiceMessagePlayer(with: fileStatus, selection: selection)
         }
     }
 
