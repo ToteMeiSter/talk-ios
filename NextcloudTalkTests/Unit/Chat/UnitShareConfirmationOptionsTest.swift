@@ -187,4 +187,129 @@ final class UnitShareConfirmationOptionsTest: TestBaseRealm {
         // Its dimensions are untouched either way
         XCTAssertEqual(try self.pixelSize(ofFileAt: upload.localPath), CGSize(width: 2400, height: 1800))
     }
+
+    // MARK: - Forwarding a file
+
+    private func fileMessage(permissions: String?, accountId: String? = TestBaseRealm.fakeAccountId) -> NCChatMessage {
+        let permissionsEntry = permissions.map { "\"permissions\": \"\($0)\"," } ?? ""
+        let message = NCChatMessage()
+        message.message = "{file}"
+        message.accountId = accountId
+        message.messageParametersJSONString = """
+        { "file": { "type": "file", "id": "6160", "name": "a.jpg", \(permissionsEntry) "path": "Talk/a.jpg" } }
+        """
+
+        return message
+    }
+
+    /// The screen of a forwarded file, the real one but for the two requests it would make
+    private func forwardingViewController(of message: NCChatMessage, delegate: ForwardDelegate) throws -> ForwardRecordingViewController {
+        self.updateCapabilities { _ in }
+
+        let account = NCDatabaseManager.sharedInstance().activeAccount()
+        let room = NCRoom(value: self.addRoom(withToken: UUID().uuidString, withName: "Room"))
+        let capabilities = try XCTUnwrap(NCDatabaseManager.sharedInstance().serverCapabilities(forAccountId: account.accountId))
+        let viewController = try XCTUnwrap(ForwardRecordingViewController(room: room, thread: nil, account: account, serverCapabilities: capabilities))
+
+        viewController.loadViewIfNeeded()
+        viewController.delegate = delegate
+        viewController.forwardingMessage = true
+        viewController.shareFileMessage(message)
+        self.waitForMainQueue()
+
+        return viewController
+    }
+
+    /// Lets what the screen did on the main queue run
+    private func waitForMainQueue() {
+        let done = expectation(description: "main queue")
+        DispatchQueue.main.async { done.fulfill() }
+        wait(for: [done], timeout: 5)
+    }
+
+    func testFileWithoutRightToShareIsForwardedAsCopy() throws {
+        let delegate = ForwardDelegate()
+        // Read and update only, e.g. a file shared without reshare
+        let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: "3"), delegate: delegate)
+
+        viewController.sendCurrent(silently: false)
+
+        XCTAssertEqual(viewController.copiedFileIds, ["6160"])
+        XCTAssertEqual(viewController.sharedPaths, [])
+    }
+
+    func testFileWithRightToShareIsShared() throws {
+        let delegate = ForwardDelegate()
+        let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: "27"), delegate: delegate)
+
+        viewController.sendCurrent(silently: false)
+
+        XCTAssertEqual(viewController.sharedPaths, ["Talk/a.jpg"])
+        XCTAssertEqual(viewController.copiedFileIds, [])
+    }
+
+    func testFileWithoutPermissionsFromServerIsShared() throws {
+        let delegate = ForwardDelegate()
+        let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: nil), delegate: delegate)
+
+        viewController.sendCurrent(silently: false)
+
+        XCTAssertEqual(viewController.sharedPaths, ["Talk/a.jpg"])
+        XCTAssertEqual(viewController.copiedFileIds, [])
+    }
+
+    func testSilentSendIsKeptForTheCopy() throws {
+        let delegate = ForwardDelegate()
+        let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: "3"), delegate: delegate)
+
+        viewController.sendCurrent(silently: true)
+
+        XCTAssertEqual(viewController.copiedMetaData?.silent, true)
+    }
+
+    func testFileOfAnotherAccountIsNeitherSharedNorCopied() throws {
+        // Messages of the shared items have no account until the screen that opens them sets it
+        for accountId in [nil, "otherAccountId"] as [String?] {
+            let delegate = ForwardDelegate()
+            let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: "3", accountId: accountId), delegate: delegate)
+
+            viewController.sendCurrent(silently: false)
+
+            XCTAssertEqual(viewController.copiedFileIds, [])
+            XCTAssertEqual(viewController.sharedPaths, [])
+            XCTAssertEqual(delegate.failCount, 1)
+        }
+    }
+
+    func testForwardMethod() {
+        XCTAssertEqual(ShareConfirmationViewController.forwardMethod(canBeShared: true), .share)
+        XCTAssertEqual(ShareConfirmationViewController.forwardMethod(canBeShared: false), .copy)
+    }
+}
+
+/// The screen of a forwarded file without its requests: records what it would share or copy
+private final class ForwardRecordingViewController: ShareConfirmationViewController {
+    var sharedPaths: [String] = []
+    var copiedFileIds: [String] = []
+    var copiedMetaData: ChatFileUploadMetadata?
+
+    override func shareFile(atPath path: String, canShare: Bool, metaData: ChatFileUploadMetadata) {
+        self.sharedPaths.append(path)
+    }
+
+    override func forwardCopy(ofFileWithId fileId: String, metaData: ChatFileUploadMetadata) {
+        self.copiedFileIds.append(fileId)
+        self.copiedMetaData = metaData
+    }
+}
+
+private final class ForwardDelegate: NSObject, ShareConfirmationViewControllerDelegate {
+    var failCount = 0
+
+    func shareConfirmationViewControllerDidFail(_ viewController: ShareConfirmationViewController) {
+        self.failCount += 1
+    }
+
+    func shareConfirmationViewControllerDidFinish(_ viewController: ShareConfirmationViewController) {}
+    func shareConfirmationViewControllerDidCancel(_ viewController: ShareConfirmationViewController) {}
 }

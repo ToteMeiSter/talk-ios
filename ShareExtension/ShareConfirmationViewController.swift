@@ -878,9 +878,42 @@ let kShareConfirmationMaxItems = 10
         // Without the right to share the server refuses with 403, with the right the same 403 means "already shared"
         let canShare = fileMessage.file()?.canBeShared ?? true
 
+        switch Self.forwardMethod(canBeShared: canShare) {
+        case .share:
+            self.shareFile(atPath: path, canShare: canShare, metaData: metaData)
+        case .copy:
+#if !APP_EXTENSION
+            self.forwardCopy(ofFileWithId: fileMessage.file()?.parameterId ?? "", metaData: metaData)
+#else
+            // Not reachable, see `forwardMethod`
+            self.delegate?.shareConfirmationViewControllerDidFail(self)
+            self.stopAnimatingSharingIndicator()
+#endif
+        }
+    }
+
+    /// How a file of a message is forwarded
+    enum FileForwardMethod {
+        /// The file of the author is shared into the conversation, no new file is made.
+        case share
+        /// The file is downloaded and uploaded again as a new file of the user. For a file the user may not share again.
+        case copy
+    }
+
+    /// The server refuses to share a file the user has no right to share (no reshare), so a copy is forwarded for it.
+    /// The share extension cannot download files, but it never forwards messages either.
+    static func forwardMethod(canBeShared: Bool) -> FileForwardMethod {
+#if APP_EXTENSION
+        return .share
+#else
+        return canBeShared ? .share : .copy
+#endif
+    }
+
+    /// Shares the file at the path of the author. A 403 is "already shared" and counts as sent.
+    func shareFile(atPath path: String, canShare: Bool, metaData: ChatFileUploadMetadata) {
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
             if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
-                // 403 without the right to share ends up here. This is the place to forward a copy of the file instead.
                 NCLog.log(String(format: "Failed to share file. Error: %@", error.localizedDescription))
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
@@ -891,6 +924,65 @@ let kShareConfirmationMaxItems = 10
             self.stopAnimatingSharingIndicator()
         }
     }
+
+#if !APP_EXTENSION
+    /// Forwards a copy of the file: downloads it (or takes it from the download cache) and uploads it into the
+    /// conversation as a file of the user, like a file picked by hand.
+    ///
+    /// The upload runs here, while the screen is open, and not in `ChatBackgroundUploader`: that one belongs to the
+    /// chat of the conversation it posts into (it adds the temporary message there), but this screen is for a
+    /// conversation that has no chat open. It is the same way the share extension sends.
+    func forwardCopy(ofFileWithId fileId: String, metaData: ChatFileUploadMetadata) {
+        guard !fileId.isEmpty else {
+            self.delegate?.shareConfirmationViewControllerDidFail(self)
+            self.stopAnimatingSharingIndicator()
+            return
+        }
+
+        let bgTask = BGTaskHelper.startBackgroundTask(withName: "forwardFileCopy")
+
+        self.hud = MBProgressHUD.showAdded(to: self.view, animated: true)
+        self.hud?.mode = .indeterminate
+        self.hud?.label.text = String.localizedStringWithFormat(NSLocalizedString("Uploading %ld elements", comment: ""), 1)
+
+        Task { @MainActor in
+            ChatFileDownloader.shared.downloadFile(withFileId: fileId, fromAccount: self.account) { result in
+                guard case .success(let fileStatus) = result, let localPath = fileStatus.fileLocalPath else {
+                    if case .failure(let error) = result {
+                        NCLog.log("Failed to download the file to forward a copy. Error: \(error)")
+                    }
+
+                    self.hud?.hide(animated: true)
+                    self.delegate?.shareConfirmationViewControllerDidFail(self)
+                    self.stopAnimatingSharingIndicator()
+                    bgTask.stopBackgroundTask()
+                    return
+                }
+
+                var upload = ChatFileUpload(localPath: localPath, fileName: fileStatus.fileName, room: self.room, account: self.account)
+                upload.metadata = metaData
+
+                Task { @MainActor in
+                    defer { bgTask.stopBackgroundTask() }
+
+                    self.hud?.mode = .annularDeterminate
+
+                    do {
+                        try await ChatFileUploader.upload(upload, maxNetworkWait: Self.maxNetworkWait) { fractionCompleted in
+                            DispatchQueue.main.async { self.hud?.progress = Float(fractionCompleted) }
+                        }
+
+                        NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
+                        self.finishUploads(withErrors: [], succeededItems: [])
+                    } catch {
+                        NCLog.log("Failed to upload the copy of a file. Error: \(error.localizedDescription)")
+                        self.finishUploads(withErrors: [self.message(for: error)], succeededItems: [])
+                    }
+                }
+            }
+        }
+    }
+#endif
 
     func updateHudProgress() {
         guard let hud = self.hud else { return }
