@@ -116,6 +116,29 @@ final class UnitExternalSignalingControllerTest: TestBaseRealm {
         drainMainQueue()
     }
 
+    func testNewSessionDropsParticipantsOfTheOldSession() throws {
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-1"))
+        signalingController.roomMessageReceived(messageDict: roomMessage(withRoomToken: "joinedToken"))
+        signalingController.processRoomEvent(eventDict: ["target": "room", "type": "join", "join": [["sessionid": "other-old", "userid": "other"]]])
+        XCTAssertNotNil(signalingController.getParticipant(fromSessionId: "other-old"))
+
+        // Resumed: the server kept us in the room, so the participants stay
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-1"))
+        XCTAssertNotNil(signalingController.getParticipant(fromSessionId: "other-old"))
+
+        // Not resumed: the old session and what we knew about its room are gone. The re-join of the same
+        // room does not change `currentRoom`, so the room message alone would keep the old entries.
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-2"))
+        XCTAssertNil(signalingController.getParticipant(fromSessionId: "other-old"))
+
+        signalingController.roomMessageReceived(messageDict: roomMessage(withRoomToken: "joinedToken"))
+        signalingController.processRoomEvent(eventDict: ["target": "room", "type": "join", "join": [["sessionid": "other-new", "userid": "other"]]])
+        XCTAssertNil(signalingController.getParticipant(fromSessionId: "other-old"))
+        XCTAssertNotNil(signalingController.getParticipant(fromSessionId: "other-new"))
+
+        drainMainQueue()
+    }
+
     func testAlreadyJoinedErrorIsTreatedAsJoined() throws {
         signalingController.roomMessageReceived(messageDict: roomMessage(withRoomToken: "joinedToken"))
         signalingController.resetWebSocket()
