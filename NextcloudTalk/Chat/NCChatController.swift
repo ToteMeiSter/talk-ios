@@ -221,11 +221,7 @@ public class NCChatController: NSObject {
             // messageWithDictionary takes care of setting a potential available parentId
             guard let message = NCChatMessage(dictionary: messageDict, andAccountId: account.accountId) else { continue }
 
-            if let referenceId = message.referenceId, !referenceId.isEmpty {
-                if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage {
-                    realm.delete(managedTemporaryMessage)
-                }
-            }
+            deleteTemporaryMessage(withReferenceId: message.referenceId, with: realm)
 
             if let managedMessage = NCChatMessage.objects(where: "internalId = %@", message.internalId ?? "").firstObject() as? NCChatMessage {
                 NCChatMessage.update(managedMessage, with: message, isRoomLastMessage: false)
@@ -243,6 +239,10 @@ public class NCChatController: NSObject {
 
             let parentDict = messageDict["parent"] as? [AnyHashable: Any]
             if let parent = NCChatMessage(dictionary: parentDict, andAccountId: account.accountId) {
+                // The server copy of a message can reach us only as the parent of another message (e.g. a reply),
+                // in that case its temporary counterpart would otherwise stay in the "sending" state
+                deleteTemporaryMessage(withReferenceId: parent.referenceId, with: realm)
+
                 if let managedParentMessage = NCChatMessage.objects(where: "internalId = %@", parent.internalId ?? "").firstObject() as? NCChatMessage {
                     // updateChatMessage takes care of not setting a parentId to nil if there was one before
                     NCChatMessage.update(managedParentMessage, with: parent, isRoomLastMessage: false)
@@ -250,6 +250,14 @@ public class NCChatController: NSObject {
                     realm.add(parent)
                 }
             }
+        }
+    }
+
+    private func deleteTemporaryMessage(withReferenceId referenceId: String?, with realm: RLMRealm) {
+        guard let referenceId, !referenceId.isEmpty else { return }
+
+        if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage {
+            realm.delete(managedTemporaryMessage)
         }
     }
 

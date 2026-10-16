@@ -196,6 +196,71 @@ final class UnitChatViewControllerTest: TestBaseRealm {
                       "A chat-relay catch-up scheduled before stop() must not resume polling once stop() has run")
     }
 
+    // MARK: - Temporary messages
+
+    private func addTemporaryMessage(referenceId: String, inRoom room: NCRoom) {
+        let temporaryMessage = NCChatMessage()
+        temporaryMessage.internalId = "temp-\(referenceId)"
+        temporaryMessage.referenceId = referenceId
+        temporaryMessage.accountId = room.accountId
+        temporaryMessage.token = room.token
+        temporaryMessage.actorId = TestConstants.username
+        temporaryMessage.actorType = "users"
+        temporaryMessage.message = "Sending"
+        temporaryMessage.timestamp = Int(Date().timeIntervalSince1970)
+        temporaryMessage.isTemporary = true
+
+        try? realm.transaction {
+            realm.add(temporaryMessage)
+        }
+    }
+
+    func testStoreMessagesDeletesTemporaryMessageOfServerCopyReceivedAsParent() throws {
+        let room = addRoom(withToken: "parentTempRoom")
+        let chatController = NCChatController(for: room)!
+        let now = Int(Date().timeIntervalSince1970)
+
+        addTemporaryMessage(referenceId: "ref-parent", inRoom: room)
+        addTemporaryMessage(referenceId: "ref-other", inRoom: room)
+
+        // The reply arrives before the message it replies to: the server copy of our message is only the parent
+        let parentDict: [AnyHashable: Any] = ["id": 10, "token": room.token, "actorId": TestConstants.username, "actorType": "users",
+                                              "message": "Sending", "timestamp": now, "messageType": "comment", "referenceId": "ref-parent"]
+        let replyDict: [AnyHashable: Any] = ["id": 11, "token": room.token, "actorId": "bob", "actorType": "users",
+                                             "message": "Reply", "timestamp": now, "messageType": "comment", "parent": parentDict]
+
+        RLMRealm.writeTransaction { realm in
+            chatController.storeMessages([replyDict], with: realm)
+        }
+
+        // The temporary message with the referenceId of the parent is gone, unrelated ones are kept
+        let remainingTemporary = NCChatMessage.objects(where: "isTemporary = true")
+        XCTAssertEqual(remainingTemporary.count, 1)
+        XCTAssertEqual((remainingTemporary.firstObject() as? NCChatMessage)?.referenceId, "ref-other")
+
+        // The server copy of our message is stored as a regular message next to the reply
+        XCTAssertEqual(NCChatMessage.objects(where: "isTemporary = false").count, 2)
+        XCTAssertNotNil(NCChatMessage.objects(where: "messageId = 10 AND isTemporary = false").firstObject())
+    }
+
+    func testStoreMessagesStillDeletesTemporaryMessageOfReceivedMessage() throws {
+        let room = addRoom(withToken: "ownTempRoom")
+        let chatController = NCChatController(for: room)!
+
+        addTemporaryMessage(referenceId: "ref-own", inRoom: room)
+
+        let messageDict: [AnyHashable: Any] = ["id": 20, "token": room.token, "actorId": TestConstants.username, "actorType": "users",
+                                               "message": "Sending", "timestamp": Int(Date().timeIntervalSince1970),
+                                               "messageType": "comment", "referenceId": "ref-own"]
+
+        RLMRealm.writeTransaction { realm in
+            chatController.storeMessages([messageDict], with: realm)
+        }
+
+        XCTAssertEqual(NCChatMessage.objects(where: "isTemporary = true").count, 0)
+        XCTAssertEqual(NCChatMessage.objects(where: "messageId = 20").count, 1)
+    }
+
     // MARK: - Chat relay
 
     // A signaling controller that advertises the chat relay but never connects: without a websocket
