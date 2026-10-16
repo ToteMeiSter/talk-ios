@@ -2424,7 +2424,9 @@ import Toast
                     return
                 }
 
-                completion?(self.startVoiceMessagePlayer(player, with: fileStatus, selection: selection))
+                // Not inline in completion?(...): without a completion the argument would not be evaluated
+                let didStart = self.startVoiceMessagePlayer(player, with: fileStatus, selection: selection)
+                completion?(didStart)
             }
         }
     }
