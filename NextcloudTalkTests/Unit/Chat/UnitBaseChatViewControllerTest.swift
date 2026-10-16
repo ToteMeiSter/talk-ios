@@ -338,13 +338,17 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
 
         baseController.cellWants(toPlayAudioFile: testMessage)
 
-        // The player is built off the main thread, so wait until it replaces the previous one
-        let replaced = XCTNSPredicateExpectation(predicate: NSPredicate { [baseController] _, _ in
-            baseController?.voiceMessagesPlayer !== previousPlayer
-        }, object: nil)
-        wait(for: [replaced], timeout: 5)
+        // The local file is played directly, no download is requested
+        XCTAssertNil(baseController.pendingVoiceMessageDownload)
+
+        // The player is built off the main thread and set on the main thread, so run the main run loop until it replaces the previous one
+        let deadline = Date().addingTimeInterval(5)
+        while baseController.voiceMessagesPlayer === previousPlayer, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
 
         XCTAssertNotNil(baseController.voiceMessagesPlayer)
+        XCTAssertFalse(baseController.voiceMessagesPlayer === previousPlayer)
         XCTAssertNil(baseController.pendingVoiceMessageDownload)
     }
 
