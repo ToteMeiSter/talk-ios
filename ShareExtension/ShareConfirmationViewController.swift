@@ -875,7 +875,7 @@ let kShareConfirmationMaxItems = 10
         // Sent only when it was shown on this screen
         metaData.caption = self.forwardedCaption(of: fileMessage)
 
-        // Without the right to share the server refuses with 403, with the right the same 403 means "already shared"
+        // Without the right to share and update the server refuses with 403, with both the same 403 means "already shared"
         let canShare = fileMessage.file()?.canBeShared ?? true
 
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in

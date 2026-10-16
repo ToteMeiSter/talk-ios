@@ -151,7 +151,7 @@ class DirectoryTableViewController: UITableViewController {
         NCAPIController.sharedInstance().shareFileOrFolder(forAccount: NCDatabaseManager.sharedInstance().activeAccount(), atPath: path, toRoom: token, withTalkMetaData: talkMetaData, withReferenceId: nil) { [weak self] error in
             guard let self else { return }
 
-            // 403 on a file the user may share means it is already shared with the conversation
+            // 403 on a node the user may share and update means it is already shared with the conversation
             if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
                 self.removeSharingFileUI()
                 self.showErrorSharingItem()

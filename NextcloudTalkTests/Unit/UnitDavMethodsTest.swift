@@ -31,10 +31,15 @@ final class UnitDavMethodsTest: TestBaseRealm {
     }
 
     func testRightToShareFromDavPermissions() throws {
+        // Share ("R") and update ("W")
         XCTAssertTrue(NCAPIController.canShare(davPermissions: "RGDNVW"))
         XCTAssertTrue(NCAPIController.canShare(davPermissions: "SRGDNVW"))
+        // No right to share
         XCTAssertFalse(NCAPIController.canShare(davPermissions: "SGDNVW"))
         XCTAssertFalse(NCAPIController.canShare(davPermissions: "G"))
+        // Right to share, but no update (permissions 17): the server refuses with 403 "more permission"
+        XCTAssertFalse(NCAPIController.canShare(davPermissions: "RG"))
+        XCTAssertFalse(NCAPIController.canShare(davPermissions: "SRGDNV"))
         // Nothing known, e.g. the server did not return the property
         XCTAssertTrue(NCAPIController.canShare(davPermissions: ""))
     }

@@ -43,10 +43,18 @@ public class NCMessageFileParameter: NCMessageParameter {
         }
     }
 
-    /// Whether the user may share the file (`PERMISSION_SHARE`), true when the server did not send permissions
+    /// `OCP\Constants::PERMISSION_UPDATE`
+    private static let permissionUpdate = 2
+    /// `OCP\Constants::PERMISSION_SHARE`
+    private static let permissionShare = 16
+
+    /// Whether the file can be shared again: the user needs the right to share and to update, because the share of
+    /// a file asks for read, update and share by default. Without both the server refuses with 403, so that 403 is
+    /// not "already shared". True when the server did not send permissions.
     public var canBeShared: Bool {
         guard let permissions else { return true }
-        return permissions & 16 != 0
+        let required = Self.permissionShare | Self.permissionUpdate
+        return permissions & required == required
     }
 
 }
