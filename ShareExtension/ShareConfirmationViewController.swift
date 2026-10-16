@@ -94,6 +94,10 @@ let kShareConfirmationMaxItems = 10
         }
     }
 
+    /// Files that could not be prepared and are not reported to the user yet, shown together in one alert
+    private var failedFileNames: [String] = []
+    private var failedFilesAlert: UIAlertController?
+
     private enum ShareConfirmationType {
         case text
         case item
@@ -668,6 +672,8 @@ let kShareConfirmationMaxItems = 10
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+
+        self.presentFailedFilesAlert()
 
         if self.shareType == .text {
             // When we are sharing a text, we want to start editing right away
@@ -1330,6 +1336,52 @@ let kShareConfirmationMaxItems = 10
     }
 
     // MARK: - ShareItemController Delegate
+
+    public func shareItemController(_ shareItemController: ShareItemController, didFailToPrepareFileNamed fileName: String) {
+        DispatchQueue.main.async {
+            self.failedFileNames.append(fileName)
+            self.presentFailedFilesAlert()
+        }
+    }
+
+    /// Shows one alert for all files that failed so far. A failure that comes in while the alert is visible is added to it.
+    private func presentFailedFilesAlert() {
+        guard !self.failedFileNames.isEmpty else { return }
+
+        let message = self.failedFileNames.joined(separator: "\n")
+
+        if let alert = self.failedFilesAlert {
+            alert.message = message
+            return
+        }
+
+        // Without a window we can't present, viewDidAppear tries again
+        guard self.viewIfLoaded?.window != nil else { return }
+
+        let alert = UIAlertController(title: NSLocalizedString("Unable to load file", comment: ""),
+                                      message: message,
+                                      preferredStyle: .alert)
+
+        alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default) { [weak self] _ in
+            guard let self else { return }
+
+            self.failedFileNames.removeAll()
+            self.failedFilesAlert = nil
+
+            // No item is left, there is nothing to confirm. This closes the extension like removing the last item.
+            if self.shareItemController.shareItems.isEmpty {
+                self.shareItemControllerItemsChanged(self.shareItemController)
+            }
+        })
+
+        var presenter: UIViewController = self
+        while let presented = presenter.presentedViewController {
+            presenter = presented
+        }
+
+        self.failedFilesAlert = alert
+        presenter.present(alert, animated: true)
+    }
 
     public func shareItemControllerItemsChanged(_ shareItemController: ShareItemController) {
         DispatchQueue.main.async {

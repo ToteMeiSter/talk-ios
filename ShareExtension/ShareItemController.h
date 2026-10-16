@@ -15,6 +15,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)shareItemControllerItemsChanged:(ShareItemController *)shareItemController;
 
+@optional
+/// Called when a file could not be prepared, so no share item exists (or no edit was applied) for it. Can be called from any thread.
+- (void)shareItemController:(ShareItemController *)shareItemController didFailToPrepareFileNamed:(NSString *)fileName;
+
 @end
 
 

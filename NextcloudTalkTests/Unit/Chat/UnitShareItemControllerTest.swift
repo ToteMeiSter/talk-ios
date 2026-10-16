@@ -45,4 +45,46 @@ final class UnitShareItemControllerTest: XCTestCase {
 
         XCTAssertTrue(shareItemController.shareItems.isEmpty)
     }
+
+    func testAddItemWithMissingFileReportsTheFileNameToTheDelegate() {
+        let delegate = FailureRecordingDelegate()
+        let shareItemController = ShareItemController()
+        shareItemController.delegate = delegate
+
+        shareItemController.addItem(with: self.sourceDirectory.appendingPathComponent("Missing.txt"))
+        shareItemController.addItem(with: self.sourceDirectory.appendingPathComponent("AlsoMissing.txt"))
+
+        XCTAssertTrue(shareItemController.shareItems.isEmpty)
+        XCTAssertEqual(delegate.failedFileNames, ["Missing.txt", "AlsoMissing.txt"])
+        XCTAssertEqual(delegate.changedCount, 0)
+    }
+
+    func testAddItemWithExistingFileReportsNoFailure() throws {
+        let sourceURL = self.sourceDirectory.appendingPathComponent("Document.txt")
+        try Data("content".utf8).write(to: sourceURL)
+
+        let delegate = FailureRecordingDelegate()
+        let shareItemController = ShareItemController()
+        shareItemController.delegate = delegate
+
+        shareItemController.addItem(with: sourceURL)
+
+        XCTAssertEqual(shareItemController.shareItems.count, 1)
+        XCTAssertTrue(delegate.failedFileNames.isEmpty)
+        XCTAssertEqual(delegate.changedCount, 1)
+    }
+}
+
+private final class FailureRecordingDelegate: NSObject, ShareItemControllerDelegate {
+
+    var failedFileNames: [String] = []
+    var changedCount = 0
+
+    func shareItemControllerItemsChanged(_ shareItemController: ShareItemController) {
+        self.changedCount += 1
+    }
+
+    func shareItemController(_ shareItemController: ShareItemController, didFailToPrepareFileNamed fileName: String) {
+        self.failedFileNames.append(fileName)
+    }
 }
