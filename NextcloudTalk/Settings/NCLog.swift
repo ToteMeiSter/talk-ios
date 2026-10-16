@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+import UniformTypeIdentifiers
+
 /// An error that knows what it may write into the exported log.
 public protocol NCLogDescribable {
     var logDescription: String { get }
@@ -133,8 +135,8 @@ public protocol NCLogDescribable {
         return description
     }
 
-    // Describes a file without its name. An "extension" that is not short and plain is part of the name
-    // ("Meeting 10.10 Smith"), so it is not logged.
+    // Describes a file without its name. The extension is written only when the system knows its type: any other
+    // "extension" can be a part of the name ("J.Smith", "Meeting 10.10 Smith"), so it is not logged.
     public static func fileTraits(fileName: String) -> String {
         let fileExtension = (fileName as NSString).pathExtension.lowercased()
 
@@ -142,7 +144,7 @@ public protocol NCLogDescribable {
             return "file without extension"
         }
 
-        if fileExtension.range(of: "^[a-z0-9]{1,10}$", options: .regularExpression) == nil {
+        guard let type = UTType(filenameExtension: fileExtension), !type.isDynamic else {
             return "file with unusual extension"
         }
 

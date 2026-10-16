@@ -88,6 +88,11 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         XCTAssertEqual(NCLog.fileTraits(fileName: "Встреча 10.10 Иванов"), "file without extension")
         XCTAssertEqual(NCLog.fileTraits(fileName: "Договор Петров И.И"), "file with unusual extension")
 
+        // A word after a dot is no extension the system knows
+        XCTAssertEqual(NCLog.fileTraits(fileName: "J.Smith"), "file with unusual extension")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Contract A.Petrov"), "file with unusual extension")
+        XCTAssertEqual(NCLog.fileTraits(fileName: "photo.jpeg"), "file with extension jpeg")
+
         // The error of a request is logged with its status and codes, not with its URL
         let urlError = NSError(domain: NSURLErrorDomain, code: -1202, userInfo: [NSURLErrorFailingURLStringErrorKey: "https://cloud.example.org/ocs/v2.php/search=Alice"])
         let ocsError = OcsError(withError: urlError, withTask: nil)

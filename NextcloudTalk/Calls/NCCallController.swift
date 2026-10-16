@@ -1096,7 +1096,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     public func startRecording() {
         NCAPIController.shared.startRecording(inRoom: self.room.token, forAccount: self.account) { error in
             if let error {
-                NCLog.log("Could not start call recording. Error: \(error.localizedDescription)")
+                NCLog.log("Could not start call recording. Error: \(NCLog.errorCode(error))")
             }
         }
     }
@@ -1104,7 +1104,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     public func stopRecording() {
         NCAPIController.shared.stopRecording(inRoom: self.room.token, forAccount: self.account) { error in
             if let error {
-                NCLog.log("Could not stop call recording. Error: \(error.localizedDescription)")
+                NCLog.log("Could not stop call recording. Error: \(NCLog.errorCode(error))")
             }
         }
     }
