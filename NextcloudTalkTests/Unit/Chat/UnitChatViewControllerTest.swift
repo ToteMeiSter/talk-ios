@@ -707,6 +707,17 @@ final class UnitChatViewControllerTest: TestBaseRealm {
         }
         defer { NotificationCenter.default.removeObserver(observer) }
 
+        do {
+            let db = NCDatabaseManager.sharedInstance()
+            let rows = ServerCapabilities.objects(where: "accountId = %@", TestBaseRealm.fakeAccountId)
+            let realmCaps = (rows.firstObject() as? ServerCapabilities)?.talkCapabilities.value(forKey: "self") as? [String]
+            let cachedCaps = db.serverCapabilities(forAccountId: room.accountId)?.talkCapabilities.value(forKey: "self") as? [String]
+            NSLog("G17DIAG rows=%ld realmCaps=%@ managerCaps=%@ roomHas=%d federated=%d room.accountId=%@ ctrl.accountId=%@", Int(rows.count), String(describing: realmCaps), String(describing: cachedCaps), db.roomHasTalkCapability(.chatReferenceId, for: room), room.isFederated, room.accountId, chatController.account.accountId)
+            let all = NCChatMessage.objects(where: "isTemporary = true")
+            for case let m as NCChatMessage in all {
+                NSLog("G17DIAG msg acc=%@ token=%@ thread=%ld off=%d failed=%d ts=%ld ref=%@ file=%d voice=%d", m.accountId, m.token, m.threadId, m.isOfflineMessage, m.sendingFailed, m.timestamp, m.referenceId ?? "nil", m.hasFileParameter, m.isVoiceMessage)
+            }
+        }
         chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970))
 
         let lost = try XCTUnwrap(storedTemporaryMessage(lostId))
