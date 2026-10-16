@@ -350,32 +350,7 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
             wait(for: [mainQueueRan], timeout: 1)
         }
 
-        let replacedByTap = baseController.voiceMessagesPlayer !== previousPlayer
-
-        if !replacedByTap {
-            // Tell apart why the player was not replaced: the selection changed, or no player can be built from the parsed path
-            XCTAssertEqual(baseController.voiceMessageSelection, 1)
-            let parsedStatus = testMessage.file()?.fileStatus
-            let parsedPath = parsedStatus?.fileLocalPath
-            XCTAssertEqual(parsedPath, fileLocalPath)
-            XCTAssertTrue(parsedPath.map { FileManager.default.fileExists(atPath: $0) } ?? false, "The parsed path does not exist")
-            XCTAssertNotNil(parsedPath.flatMap { BaseChatViewController.makeVoiceMessagePlayer(atPath: $0) },
-                            "No player can be built from the parsed path")
-
-            // Start the parsed file directly. If this starts, the tap did not reach setupVoiceMessagePlayer
-            if let parsedStatus {
-                let handled = expectation(description: "Direct setup handled")
-                var didStartDirectly = false
-                baseController.setupVoiceMessagePlayer(with: parsedStatus, selection: baseController.voiceMessageSelection) { didStart in
-                    didStartDirectly = didStart
-                    handled.fulfill()
-                }
-                wait(for: [handled], timeout: 5)
-                XCTAssertTrue(didStartDirectly, "Direct setup with the parsed file status did not start either")
-            }
-        }
-
-        XCTAssertTrue(replacedByTap, "The tap did not replace the player")
+        XCTAssertFalse(baseController.voiceMessagesPlayer === previousPlayer, "The tap did not replace the player")
         XCTAssertNotNil(baseController.voiceMessagesPlayer)
         XCTAssertNil(baseController.pendingVoiceMessageDownload)
     }
