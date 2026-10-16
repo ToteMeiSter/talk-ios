@@ -274,7 +274,7 @@ class DirectoryTableViewController: UITableViewController {
             let directoryVC = DirectoryTableViewController(path: selectedItemPath, inRoom: token, andThread: threadId)
             self.navigationController?.pushViewController(directoryVC, animated: true)
         } else {
-            showConfirmationDialogForSharingItem(withPath: selectedItemPath, andName: item.fileName, canShare: NCAPIController.canShare(davPermissions: item.permissions))
+            showConfirmationDialogForSharingItem(withPath: selectedItemPath, andName: item.fileName, canShare: NCAPIController.canShare(davPermissions: item.permissions, isDirectory: item.directory))
         }
 
         tableView.deselectRow(at: indexPath, animated: true)
