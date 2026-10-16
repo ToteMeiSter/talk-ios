@@ -252,4 +252,56 @@ final class UnitNCRoomsManagerTest: TestBaseRealm {
         XCTAssertEqual(kept.lastReadMessage, 12)
     }
 
+    func testOlderResponseDoesNotRevertLastActivityToOlderValue() throws {
+        // The response is older than the local write, but carries a newer activity than the stored room
+        var seed = roomDict(token: "activityToken")
+        seed["lastActivity"] = 1000
+        try store(seed, requestStart: NCRoomsManager.shared.nextWriteStamp())
+
+        let requestStart = NCRoomsManager.shared.nextWriteStamp()
+        let room = try XCTUnwrap(managedRoom("activityToken"))
+
+        // Without a last message nothing is written for the last message, so the response wins
+        NCRoomsManager.shared.setNoUnreadMessages(forRoom: room, withLastMessage: nil)
+
+        var response = roomDict(token: "activityToken")
+        response["lastActivity"] = 2000
+        try store(response, requestStart: requestStart)
+        XCTAssertEqual(try XCTUnwrap(managedRoom("activityToken")).lastActivity, 2000)
+
+        // Now a last message is written locally: an older response must not take the activity back to an older value
+        let newRequestStart = NCRoomsManager.shared.nextWriteStamp()
+        let lastMessage = NCChatMessage()
+        lastMessage.internalId = "activityMessage"
+        lastMessage.timestamp = 3000
+        NCRoomsManager.shared.setNoUnreadMessages(forRoom: try XCTUnwrap(managedRoom("activityToken")), withLastMessage: lastMessage)
+
+        var olderResponse = roomDict(token: "activityToken")
+        olderResponse["lastActivity"] = 2500
+        try store(olderResponse, requestStart: newRequestStart)
+
+        let stored = try XCTUnwrap(managedRoom("activityToken"))
+        XCTAssertEqual(stored.lastActivity, 3000)
+        XCTAssertEqual(stored.lastMessageId, "activityMessage")
+    }
+
+    func testCancelledRoomsWriteDoesNotRejectOlderResponse() throws {
+        let olderStart = NCRoomsManager.shared.nextWriteStamp()
+        let listStart = NCRoomsManager.shared.nextWriteStamp()
+
+        // The write is cancelled when the second room is about to be stored
+        var checks = 0
+        let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
+        _ = NCRoomsManager.shared.storeRooms([roomDict(token: "cancelRoomA"), roomDict(token: "cancelRoomB")], forAccount: activeAccount, requestStart: listStart, onlyLastModified: true, isExpired: {
+            checks += 1
+            return checks > 1
+        })
+
+        XCTAssertNil(managedRoom("cancelRoomA"))
+
+        // An older response must still be stored, nothing newer is in the database
+        try store(roomDict(token: "cancelRoomA", name: "FromOlderResponse"), requestStart: olderStart)
+        XCTAssertEqual(managedRoom("cancelRoomA")?.name, "FromOlderResponse")
+    }
+
 }
