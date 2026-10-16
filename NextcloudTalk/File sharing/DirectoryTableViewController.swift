@@ -14,6 +14,8 @@ class DirectoryTableViewController: UITableViewController {
 
     private var userHomePath = ""
     private var itemsInDirectory: [NKFile] = []
+    // oc:permissions of the directory itself, empty until the listing arrived
+    private var currentDirectoryPermissions = ""
     private var sortingButton: UIBarButtonItem?
     private let directoryBackgroundView = PlaceholderView()
     private let sharingFileView = UIActivityIndicatorView()
@@ -71,7 +73,9 @@ class DirectoryTableViewController: UITableViewController {
     }
 
     @objc private func shareButtonPressed() {
-        showConfirmationDialogForSharingItem(withPath: path, andName: (path as NSString).lastPathComponent)
+        showConfirmationDialogForSharingItem(withPath: path,
+                                             andName: (path as NSString).lastPathComponent,
+                                             canShare: NCAPIController.canShare(davPermissions: currentDirectoryPermissions, isDirectory: true))
     }
 
     private func addMenuToSortingButton() {
@@ -99,6 +103,11 @@ class DirectoryTableViewController: UITableViewController {
     private func getItemsInDirectory() {
         NCAPIController.sharedInstance().readFolder(forAccount: NCDatabaseManager.sharedInstance().activeAccount(), atPath: path, withDepth: "1") { [weak self] items, error in
             guard let self, let items, error == nil else { return }
+
+            // The first entry of a listing is the requested directory itself, the loop below filters it out
+            if let directory = items.first, directory.directory {
+                self.currentDirectoryPermissions = directory.permissions
+            }
 
             let currentDirectory = self.path.isEmpty ? "/" : (self.path as NSString).lastPathComponent
             var itemsInDirectory: [NKFile] = []
