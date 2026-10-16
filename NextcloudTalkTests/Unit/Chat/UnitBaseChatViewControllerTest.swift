@@ -206,6 +206,38 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         XCTAssertEqual(baseController.getCellHeight(for: testMessage, with: 300), 133.0)
     }
 
+    func testMoveRecordingRemovesTemporaryMessageWhenMoveFails() throws {
+        let chatFileController = NCChatFileController(account: baseController.account)
+        let sourcePath = NSTemporaryDirectory() + "missing-recording-\(UUID().uuidString).mp3"
+        let destinationPath = NSTemporaryDirectory() + "moved-recording-\(UUID().uuidString).mp3"
+
+        let temporaryMessage = try XCTUnwrap(baseController.createTemporaryMessage(message: "recording.mp3", replyTo: nil, messageParameters: destinationPath, silently: false, isVoiceMessage: true))
+        let referenceId = try XCTUnwrap(temporaryMessage.referenceId)
+        XCTAssertEqual(NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).count, 1)
+
+        let isMoved = baseController.moveRecording(fromSourcePath: sourcePath, destinationPath: destinationPath, using: chatFileController, for: temporaryMessage)
+
+        XCTAssertFalse(isMoved)
+        XCTAssertEqual(NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).count, 0)
+    }
+
+    func testMoveRecordingKeepsTemporaryMessageWhenMoveSucceeds() throws {
+        let chatFileController = NCChatFileController(account: baseController.account)
+        let sourcePath = NSTemporaryDirectory() + "recording-\(UUID().uuidString).mp3"
+        let destinationPath = NSTemporaryDirectory() + "moved-recording-\(UUID().uuidString).mp3"
+        XCTAssertTrue(FileManager.default.createFile(atPath: sourcePath, contents: Data([1, 2, 3])))
+        defer { try? FileManager.default.removeItem(atPath: destinationPath) }
+
+        let temporaryMessage = try XCTUnwrap(baseController.createTemporaryMessage(message: "recording.mp3", replyTo: nil, messageParameters: destinationPath, silently: false, isVoiceMessage: true))
+        let referenceId = try XCTUnwrap(temporaryMessage.referenceId)
+
+        let isMoved = baseController.moveRecording(fromSourcePath: sourcePath, destinationPath: destinationPath, using: chatFileController, for: temporaryMessage)
+
+        XCTAssertTrue(isMoved)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destinationPath))
+        XCTAssertEqual(NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).count, 1)
+    }
+
     func testCellWithQuoteHeight() throws {
         // Add an existing message to the database
         let existingMessage = NCChatMessage()
