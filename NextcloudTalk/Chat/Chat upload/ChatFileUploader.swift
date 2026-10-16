@@ -365,11 +365,16 @@ enum ChatFileUploader {
             case .attachmentFolder(let serverPath, _):
                 // The files sharing API has no way to grant update permissions, which is why the
                 // option is not offered at all without conversation subfolders.
-                try await apiController.shareFileOrFolder(forAccount: account,
-                                                          atPath: serverPath,
-                                                          toRoom: token,
-                                                          withTalkMetaData: talkMetaData,
-                                                          withReferenceId: referenceId)
+                do {
+                    try await apiController.shareFileOrFolder(forAccount: account,
+                                                              atPath: serverPath,
+                                                              toRoom: token,
+                                                              withTalkMetaData: talkMetaData,
+                                                              withReferenceId: referenceId)
+                } catch where NCAPIController.isAlreadyShared(error, canShare: true) {
+                    // The file was just uploaded by the user, so the right to share is there: 403 means an earlier
+                    // attempt already shared it
+                }
             }
         } catch {
             throw ChatFileUploadError.shareFailed(underlyingError: error)
