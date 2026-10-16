@@ -2278,9 +2278,11 @@ import Toast
             silently: false,
             isVoiceMessage: true
         ) {
-            let movedFileToTemporaryDirectory = chatFileController.moveFileToTemporaryDirectory(
+            let movedFileToTemporaryDirectory = self.moveRecording(
                 fromSourcePath: recorder.url.path,
-                destinationPath: destinationFilePath
+                destinationPath: destinationFilePath,
+                using: chatFileController,
+                for: temporaryMessage
             )
 
             if !movedFileToTemporaryDirectory {
@@ -2288,7 +2290,7 @@ import Toast
                 return
             }
 
-            if movedFileToTemporaryDirectory, NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
+            if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
                 self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
             }
 
@@ -2313,6 +2315,18 @@ import Toast
         } else {
             print("Temporary message could not be created")
         }
+    }
+
+    /// Moves a recording to the temporary directory. The temporary message of the recording is stored already,
+    /// when the move fails it is removed again: there is nothing to upload or resend, and it would show as sending until it expires.
+    internal func moveRecording(fromSourcePath sourcePath: String, destinationPath: String, using chatFileController: NCChatFileController, for temporaryMessage: NCChatMessage) -> Bool {
+        let isMoved = chatFileController.moveFileToTemporaryDirectory(fromSourcePath: sourcePath, destinationPath: destinationPath)
+
+        if !isMoved {
+            self.removePermanentlyTemporaryMessage(temporaryMessage: temporaryMessage)
+        }
+
+        return isMoved
     }
 
     func upload(_ upload: ChatFileUpload) {
