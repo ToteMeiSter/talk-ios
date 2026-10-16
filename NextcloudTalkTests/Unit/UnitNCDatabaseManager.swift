@@ -83,8 +83,9 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         XCTAssertEqual(NCLog.fileTraits(fileName: "Notes"), "file without extension")
         XCTAssertFalse(NCLog.fileTraits(fileName: "Alice Passport.pdf").contains("Alice"))
 
-        // A dot inside the name is no extension
-        XCTAssertEqual(NCLog.fileTraits(fileName: "Встреча 10.10 Иванов"), "file with unusual extension")
+        // A dot inside the name is no extension: the part after it is either dropped by pathExtension (a space makes
+        // it "no extension") or reported as unusual, the name is never part of the result
+        XCTAssertEqual(NCLog.fileTraits(fileName: "Встреча 10.10 Иванов"), "file without extension")
         XCTAssertEqual(NCLog.fileTraits(fileName: "Договор Петров И.И"), "file with unusual extension")
 
         // The error of a request is logged with its status and codes, not with its URL
