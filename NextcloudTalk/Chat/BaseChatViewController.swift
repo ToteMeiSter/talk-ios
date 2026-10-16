@@ -2492,18 +2492,48 @@ import Toast
         }
     }
 
+    /// Reads the file and builds the player. Doesn't touch the view controller, so it can run off the main thread.
+    nonisolated static func makeVoiceMessagePlayer(atPath path: String) -> AVAudioPlayer? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? AVAudioPlayer(data: data)
+    }
+
     /// Starts the voice message unless another one was tapped since `selection` was taken, e.g. while this one was downloading.
-    func setupVoiceMessagePlayer(with fileStatus: NCChatFileStatus, selection: Int) {
+    /// Reading the file and building the player happens off the main thread. `completion` is called on the main thread
+    /// with whether the voice message was started.
+    func setupVoiceMessagePlayer(with fileStatus: NCChatFileStatus, selection: Int, completion: ((Bool) -> Void)? = nil) {
         guard self.shouldStartVoiceMessage(selection: selection),
-              let fileLocalPath = fileStatus.fileLocalPath,
-              let data = try? Data(contentsOf: URL(fileURLWithPath: fileLocalPath)),
-              let player = try? AVAudioPlayer(data: data)
-        else { return }
+              let fileLocalPath = fileStatus.fileLocalPath
+        else {
+            completion?(false)
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let player = BaseChatViewController.makeVoiceMessagePlayer(atPath: fileLocalPath)
+
+            DispatchQueue.main.async {
+                guard let self, let player else {
+                    completion?(false)
+                    return
+                }
+
+                completion?(self.startVoiceMessagePlayer(player, with: fileStatus, selection: selection))
+            }
+        }
+    }
+
+    /// Makes `player` the current one and plays it, unless another voice message was tapped while it was built.
+    @discardableResult
+    func startVoiceMessagePlayer(_ player: AVAudioPlayer, with fileStatus: NCChatFileStatus, selection: Int) -> Bool {
+        guard self.shouldStartVoiceMessage(selection: selection) else { return false }
 
         self.voiceMessagesPlayer = player
         self.playerAudioFileStatus = fileStatus
         player.delegate = self
         self.playVoiceMessagePlayer()
+
+        return true
     }
 
     func playVoiceMessagePlayer() {
