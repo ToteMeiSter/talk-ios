@@ -1350,7 +1350,8 @@ let kShareConfirmationMaxItems = 10
 
         let message = self.failedFileNames.joined(separator: "\n")
 
-        if let alert = self.failedFilesAlert {
+        // The alert is only reused while it is really on screen, otherwise the next failure would edit an invisible alert
+        if let alert = self.failedFilesAlert, alert.presentingViewController != nil {
             alert.message = message
             return
         }
@@ -1363,24 +1364,23 @@ let kShareConfirmationMaxItems = 10
                                       preferredStyle: .alert)
 
         alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default) { [weak self] _ in
-            guard let self else { return }
-
-            self.failedFileNames.removeAll()
-            self.failedFilesAlert = nil
-
-            // No item is left, there is nothing to confirm. This closes the extension like removing the last item.
-            if self.shareItemController.shareItems.isEmpty {
-                self.shareItemControllerItemsChanged(self.shareItemController)
-            }
+            self?.failedFileNames.removeAll()
+            self?.failedFilesAlert = nil
         })
 
         var presenter: UIViewController = self
-        while let presented = presenter.presentedViewController {
+        // An alert already on its way (animation running) is not a presenter, its completion shows all names collected so far
+        while let presented = presenter.presentedViewController, !(presented is UIAlertController) {
             presenter = presented
         }
 
-        self.failedFilesAlert = alert
-        presenter.present(alert, animated: true)
+        // The property is set when the presentation really happened. If present is refused, the next failure shows a new alert
+        presenter.present(alert, animated: true) { [weak self] in
+            guard let self else { return }
+
+            self.failedFilesAlert = alert
+            alert.message = self.failedFileNames.joined(separator: "\n")
+        }
     }
 
     public func shareItemControllerItemsChanged(_ shareItemController: ShareItemController) {
