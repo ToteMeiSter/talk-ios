@@ -852,12 +852,16 @@ public class NCChatController: NSObject {
     /// A lost message of a thread is only marked while the chat controller of this thread pulls, so when that thread is opened.
     func failTemporaryMessagesLostByKilledProcess(createdBefore: Int) {
         // Without a referenceId the server copy doesn't remove the temporary message, so we couldn't tell lost from sent
-        guard NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) else { return }
+        let hasReferenceId = NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room)
+        print("G17STACK capability=\(hasReferenceId) account=\(account.accountId) token=\(room.token ?? "nil") thread=\(threadId) before=\(createdBefore)")
+        guard hasReferenceId else { return }
 
         let query = NSPredicate(format: "accountId = %@ AND token = %@ AND threadId = %ld AND isTemporary = true AND isOfflineMessage = false AND sendingFailed = false AND timestamp < %ld", account.accountId, room.token, threadId, createdBefore)
+        print("G17STACK matches=\(NCChatMessage.objects(with: query).count) tempAll=\(NCChatMessage.objects(where: "isTemporary = true").count)")
         // The results are live and shrink while we mark messages as failed, so iterate over a copy
         var lostMessages: [NCChatMessage] = []
         for case let candidate as NCChatMessage in NCChatMessage.objects(with: query) {
+            print("G17STACK candidate ref=\(candidate.referenceId ?? "nil") file=\(candidate.hasFileParameter) voice=\(candidate.isVoiceMessage) started=\(NCChatController.wasSendStartedByThisProcess(referenceId: candidate.referenceId ?? ""))")
             guard !candidate.hasFileParameter, !candidate.isVoiceMessage,
                   let referenceId = candidate.referenceId, !referenceId.isEmpty,
                   !NCChatController.wasSendStartedByThisProcess(referenceId: referenceId)
