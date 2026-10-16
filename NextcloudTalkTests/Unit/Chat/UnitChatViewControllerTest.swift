@@ -641,4 +641,245 @@ final class UnitChatViewControllerTest: TestBaseRealm {
             }
         }
     }
+
+    // MARK: - Temporary messages after the process was killed
+
+    private let fileParameters = "{\"file\":{\"type\":\"file\",\"id\":\"1\",\"name\":\"voice.mp3\",\"path\":\"/tmp/voice.mp3\"}}"
+
+    private func enableChatReferenceId() {
+        updateCapabilities { cap in
+            cap.setValue([TalkCapability.chatReferenceId.rawValue], forKey: "talkCapabilities")
+        }
+    }
+
+    // The reference ids are kept in a static set which lives between the tests, so every test uses unique ones
+    private func uniqueReferenceId() -> String {
+        return "ref-\(UUID().uuidString)"
+    }
+
+    private func addTemporaryMessage(referenceId: String, inRoom room: NCRoom, isOffline: Bool = false, fileParameters: String? = nil) {
+        let temporaryMessage = NCChatMessage()
+        temporaryMessage.internalId = "temp-\(referenceId)"
+        temporaryMessage.referenceId = referenceId
+        temporaryMessage.accountId = room.accountId
+        temporaryMessage.token = room.token
+        temporaryMessage.actorId = TestConstants.username
+        temporaryMessage.actorType = "users"
+        temporaryMessage.message = "Sending"
+        temporaryMessage.timestamp = Int(Date().timeIntervalSince1970) - 3600
+        temporaryMessage.isTemporary = true
+        temporaryMessage.isOfflineMessage = isOffline
+
+        if let fileParameters {
+            temporaryMessage.messageParametersJSONString = fileParameters
+        }
+
+        try? realm.transaction {
+            realm.add(temporaryMessage)
+        }
+    }
+
+    private func storedTemporaryMessage(_ referenceId: String) -> NCChatMessage? {
+        return NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage
+    }
+
+    func testLostTemporaryMessageIsMarkedAsFailedAfterCatchingUp() throws {
+        enableChatReferenceId()
+        let room = addRoom(withToken: "killedProcessRoom")
+        let chatController = NCChatController(for: room)!
+
+        // Created by an earlier process, nobody sends it anymore
+        let lostId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: lostId, inRoom: room)
+        // Waits to be resent
+        let offlineId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: offlineId, inRoom: room, isOffline: true)
+
+        // Loading the chat does not decide anything, the server copy might be still missing
+        let temporaryMessages = chatController.getTemporaryMessages()
+        XCTAssertEqual(temporaryMessages.count, 2)
+        XCTAssertFalse(try XCTUnwrap(storedTemporaryMessage(lostId)).sendingFailed)
+
+        var notifiedReferenceIds: [String] = []
+        let observer = NotificationCenter.default.addObserver(forName: .NCChatControllerDidSendChatMessage, object: chatController, queue: nil) { notification in
+            XCTAssertNotNil(notification.userInfo?["error"])
+            notifiedReferenceIds.append(notification.userInfo?["referenceId"] as? String ?? "")
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970))
+
+        let lost = try XCTUnwrap(storedTemporaryMessage(lostId))
+        XCTAssertTrue(lost.sendingFailed)
+        XCTAssertFalse(lost.isOfflineMessage)
+
+        let offline = try XCTUnwrap(storedTemporaryMessage(offlineId))
+        XCTAssertFalse(offline.sendingFailed)
+        XCTAssertTrue(offline.isOfflineMessage)
+
+        // An open chat is informed the same way as for a failed request
+        XCTAssertEqual(notifiedReferenceIds, [lostId])
+    }
+
+    func testTemporaryMessageWithReceivedServerCopyIsRemovedNotFailed() throws {
+        enableChatReferenceId()
+        let room = addRoom(withToken: "echoRoom")
+        let chatController = NCChatController(for: room)!
+
+        let echoedId = uniqueReferenceId()
+        let lostId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: echoedId, inRoom: room)
+        addTemporaryMessage(referenceId: lostId, inRoom: room)
+
+        // What a pull does with the server copy of the first message
+        let serverCopy: [AnyHashable: Any] = [
+            "id": 100,
+            "token": room.token,
+            "actorType": "users",
+            "actorId": TestConstants.username,
+            "actorDisplayName": "Me",
+            "timestamp": Int(Date().timeIntervalSince1970) - 3500,
+            "message": "Sending",
+            "messageType": "comment",
+            "referenceId": echoedId
+        ]
+
+        RLMRealm.writeTransaction { realm in
+            chatController.storeMessages([serverCopy], with: realm)
+        }
+
+        chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970))
+
+        XCTAssertNil(storedTemporaryMessage(echoedId))
+        XCTAssertTrue(try XCTUnwrap(storedTemporaryMessage(lostId)).sendingFailed)
+    }
+
+    func testTemporaryMessageStartedByThisProcessIsNotMarkedAsFailed() throws {
+        enableChatReferenceId()
+        let room = addRoom(withToken: "startedRoom")
+        let chatController = NCChatController(for: room)!
+
+        let referenceId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: referenceId, inRoom: room)
+
+        // The real entry point, it must remember the message before the request is made
+        chatController.sendChatMessage("Sending", replyTo: 0, referenceId: referenceId, silently: false)
+        chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970))
+
+        XCTAssertFalse(try XCTUnwrap(storedTemporaryMessage(referenceId)).sendingFailed)
+    }
+
+    func testFilePlaceholderIsNotMarkedAsFailed() throws {
+        enableChatReferenceId()
+        let room = addRoom(withToken: "fileRoom")
+        let chatController = NCChatController(for: room)!
+
+        let fileId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: fileId, inRoom: room, fileParameters: fileParameters)
+
+        // More than one file parameter: file() returns nil for it, but it is still a file placeholder
+        let twoFilesId = uniqueReferenceId()
+        let twoFiles = "{\"file1\":{\"type\":\"file\",\"id\":\"1\",\"name\":\"a.jpg\",\"path\":\"/tmp/a.jpg\"},\"file2\":{\"type\":\"file\",\"id\":\"2\",\"name\":\"b.jpg\",\"path\":\"/tmp/b.jpg\"}}"
+        addTemporaryMessage(referenceId: twoFilesId, inRoom: room, fileParameters: twoFiles)
+
+        // Voice message placeholder
+        let voiceId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: voiceId, inRoom: room)
+        try realm.transaction {
+            storedTemporaryMessage(voiceId)?.messageType = kMessageTypeVoiceMessage
+        }
+
+        XCTAssertNil(storedTemporaryMessage(twoFilesId)?.file())
+
+        chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970))
+
+        for referenceId in [fileId, twoFilesId, voiceId] {
+            XCTAssertFalse(try XCTUnwrap(storedTemporaryMessage(referenceId)).sendingFailed, referenceId)
+        }
+    }
+
+    func testTemporaryMessageIsNotMarkedAsFailedWithoutChatReferenceId() throws {
+        // Without the capability the server copy does not remove the temporary message, so it can't be told if it was lost
+        let room = addRoom(withToken: "noCapabilityRoom")
+        let chatController = NCChatController(for: room)!
+
+        let referenceId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: referenceId, inRoom: room)
+
+        chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970))
+
+        XCTAssertFalse(try XCTUnwrap(storedTemporaryMessage(referenceId)).sendingFailed)
+    }
+
+    func testTemporaryMessageCreatedAfterThePullStartedIsNotMarkedAsFailed() throws {
+        enableChatReferenceId()
+        let room = addRoom(withToken: "newMessageRoom")
+        let chatController = NCChatController(for: room)!
+
+        let referenceId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: referenceId, inRoom: room)
+
+        // The message was created (1 hour ago) after the pull started (2 hours ago)
+        chatController.failTemporaryMessagesLostByKilledProcess(createdBefore: Int(Date().timeIntervalSince1970) - 7200)
+
+        XCTAssertFalse(try XCTUnwrap(storedTemporaryMessage(referenceId)).sendingFailed)
+    }
+
+    func testLostTemporaryMessageIsOnlyMarkedWhenCaughtUp() throws {
+        enableChatReferenceId()
+
+        let limit = NCAPIController.shared.kReceivedChatMessagesLimit
+        let messages: (Int) -> [[String: Any]] = { count in Array(repeating: [String: Any](), count: count) }
+        let ocsError: (Int) -> OcsError = { code in OcsError(withError: NSError(domain: NSURLErrorDomain, code: code), withTask: nil) }
+
+        struct PullResult {
+            let name: String
+            let messages: [[String: Any]]?
+            let error: OcsError?
+            let statusCode: Int
+            let expectedFailed: Bool
+        }
+
+        let cases = [
+            PullResult(name: "304", messages: nil, error: ocsError(0), statusCode: 304, expectedFailed: true),
+            PullResult(name: "200 with a partial page", messages: messages(limit - 1), error: nil, statusCode: 200, expectedFailed: true),
+            PullResult(name: "200 with an empty page", messages: messages(0), error: nil, statusCode: 200, expectedFailed: true),
+            PullResult(name: "200 with a full page", messages: messages(limit), error: nil, statusCode: 200, expectedFailed: false),
+            PullResult(name: "error without status code", messages: nil, error: ocsError(NSURLErrorNotConnectedToInternet), statusCode: 0, expectedFailed: false),
+            PullResult(name: "cancelled", messages: nil, error: ocsError(NSURLErrorCancelled), statusCode: 0, expectedFailed: false),
+            PullResult(name: "500", messages: nil, error: ocsError(0), statusCode: 500, expectedFailed: false),
+            PullResult(name: "200 without messages", messages: nil, error: nil, statusCode: 200, expectedFailed: false)
+        ]
+
+        for (index, testCase) in cases.enumerated() {
+            let room = addRoom(withToken: "caughtUpRoom\(index)")
+            let chatController = NCChatController(for: room)!
+
+            let referenceId = uniqueReferenceId()
+            addTemporaryMessage(referenceId: referenceId, inRoom: room)
+
+            chatController.failLostTemporaryMessagesIfCaughtUp(messages: testCase.messages, error: testCase.error, statusCode: testCase.statusCode, requestTimestamp: Int(Date().timeIntervalSince1970))
+
+            XCTAssertEqual(try XCTUnwrap(storedTemporaryMessage(referenceId)).sendingFailed, testCase.expectedFailed, testCase.name)
+        }
+    }
+
+    func testLostTemporaryMessagesAreOnlyCheckedOncePerController() throws {
+        enableChatReferenceId()
+        let room = addRoom(withToken: "checkOnceRoom")
+        let chatController = NCChatController(for: room)!
+
+        let firstId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: firstId, inRoom: room)
+
+        chatController.failLostTemporaryMessagesIfCaughtUp(messages: nil, error: nil, statusCode: 304, requestTimestamp: Int(Date().timeIntervalSince1970))
+        XCTAssertTrue(try XCTUnwrap(storedTemporaryMessage(firstId)).sendingFailed)
+
+        // A message found later is not checked anymore, everything sent by this process is known after the first check
+        let secondId = uniqueReferenceId()
+        addTemporaryMessage(referenceId: secondId, inRoom: room)
+
+        chatController.failLostTemporaryMessagesIfCaughtUp(messages: nil, error: nil, statusCode: 304, requestTimestamp: Int(Date().timeIntervalSince1970))
+        XCTAssertFalse(try XCTUnwrap(storedTemporaryMessage(secondId)).sendingFailed)
+    }
 }
