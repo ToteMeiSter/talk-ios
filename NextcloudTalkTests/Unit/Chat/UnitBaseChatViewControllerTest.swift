@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+import AVFoundation
 import XCTest
 @testable import NextcloudTalk
 
@@ -220,6 +221,66 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         testMessage.message = "test"
         testMessage.parentId = "internal-1"
         XCTAssertEqual(baseController.getCellHeight(for: testMessage, with: 300), 171.0)
+    }
+
+    // MARK: - Voice message playback
+
+    /// One second of silence as 16 bit mono WAV, which AVAudioPlayer can load without any audio hardware
+    private func silentWavData() -> Data {
+        let sampleRate: UInt32 = 8000
+        let dataSize = sampleRate * 2
+
+        func bytes<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
+            withUnsafeBytes(of: value.littleEndian) { Array($0) }
+        }
+
+        var data = Data("RIFF".utf8)
+        data.append(contentsOf: bytes(36 + dataSize))
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        data.append(contentsOf: bytes(UInt32(16)))
+        data.append(contentsOf: bytes(UInt16(1)))
+        data.append(contentsOf: bytes(UInt16(1)))
+        data.append(contentsOf: bytes(sampleRate))
+        data.append(contentsOf: bytes(sampleRate * 2))
+        data.append(contentsOf: bytes(UInt16(2)))
+        data.append(contentsOf: bytes(UInt16(16)))
+        data.append(contentsOf: Array("data".utf8))
+        data.append(contentsOf: bytes(dataSize))
+        data.append(Data(count: Int(dataSize)))
+
+        return data
+    }
+
+    private func makeVoiceMessageFileStatus(fileId: String) throws -> NCChatFileStatus {
+        let fileName = "voice-\(fileId)-\(UUID().uuidString).wav"
+        let fileUrl = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        try silentWavData().write(to: fileUrl)
+        addTeardownBlock { try? FileManager.default.removeItem(at: fileUrl) }
+
+        return NCChatFileStatus(fileId: fileId, fileName: fileName, filePath: "Talk/\(fileName)", fileLocalPath: fileUrl.path)
+    }
+
+    func testVoiceMessageSelectionOutdatedByLaterTap() {
+        let first = baseController.selectVoiceMessage()
+        XCTAssertTrue(baseController.shouldStartVoiceMessage(selection: first))
+
+        let second = baseController.selectVoiceMessage()
+        XCTAssertFalse(baseController.shouldStartVoiceMessage(selection: first))
+        XCTAssertTrue(baseController.shouldStartVoiceMessage(selection: second))
+    }
+
+    func testFinishedDownloadOfOutdatedVoiceMessageKeepsPlayer() throws {
+        // B was tapped last and is playing, while the download of A (tapped earlier) finishes now
+        let playerOfB = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = playerOfB
+
+        let selectionOfA = baseController.selectVoiceMessage()
+        baseController.selectVoiceMessage()
+
+        let fileStatusOfA = try makeVoiceMessageFileStatus(fileId: "1")
+        baseController.setupVoiceMessagePlayer(with: fileStatusOfA, selection: selectionOfA)
+
+        XCTAssertTrue(baseController.voiceMessagesPlayer === playerOfB)
     }
 
 }
