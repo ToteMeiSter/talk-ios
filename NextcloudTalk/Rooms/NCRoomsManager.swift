@@ -56,6 +56,20 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private var showThreadPushNotification: NCPushNotification?
     private var pendingPrivateReplyInternalId: String?
 
+    // Write ordering for rooms: A response must not overwrite a room with data that is older than what is stored.
+    // Request starts and local writes are stamped from one monotonic counter (seconds would not order two requests
+    // started within the same second). The state lives in memory only: a response from an earlier process cannot arrive.
+    private enum RoomFieldGroup {
+        case lastRead
+        case commonRead
+        case unreadState
+    }
+
+    private let writeOrderLock = NSLock()
+    private var writeOrderClock = 0
+    private var appliedRequestStarts = [String: Int]()
+    private var localWriteStamps = [String: [RoomFieldGroup: Int]]()
+
     override init() {
         super.init()
 
@@ -137,6 +151,52 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
     }
 
+    /// Must be called before the request is started, not when the response arrives
+    internal func nextWriteStamp() -> Int {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        writeOrderClock += 1
+        return writeOrderClock
+    }
+
+    /// Returns nil if a request that started later was already stored for this room. Otherwise it records this
+    /// request and returns the field groups that were written locally after the request started.
+    private func claimRoomWrite(internalId: String, requestStart: Int) -> Set<RoomFieldGroup>? {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        if let appliedStart = appliedRequestStarts[internalId], appliedStart > requestStart {
+            return nil
+        }
+
+        appliedRequestStarts[internalId] = requestStart
+
+        let stamps = localWriteStamps[internalId] ?? [:]
+        return Set(stamps.filter { $0.value > requestStart }.keys)
+    }
+
+    private func markLocalWrite(_ groups: Set<RoomFieldGroup>, internalId: String) {
+        guard !groups.isEmpty else { return }
+
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        writeOrderClock += 1
+
+        for group in groups {
+            localWriteStamps[internalId, default: [:]][group] = writeOrderClock
+        }
+    }
+
+    /// Rooms stored by a request that started after `requestStart`. A room list from before that must not delete them.
+    private func internalIdsStored(after requestStart: Int) -> [String] {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        return appliedRequestStarts.filter { $0.value > requestStart }.map { $0.key }
+    }
+
     // TODO: Can be removed when ObjC is gone
     @objc(updateRoomsUpdatingUserStatus: onlyLastModified:)
     public func updateRooms(updatingUserStatus updateStatus: Bool, onlyLastModified: Bool) {
@@ -148,6 +208,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
         let lastReceivedModified = Int(activeAccount.lastReceivedModifiedSince) ?? 0
         let modifiedSince = onlyLastModified ? lastReceivedModified : 0
+        let requestStart = self.nextWriteStamp()
 
         NCAPIController.sharedInstance().getRooms(forAccount: activeAccount, updateStatus: updateStatus, modifiedSince: modifiedSince) { rooms, error in
             if let error {
@@ -165,7 +226,6 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 return
             }
 
-            let realm = RLMRealm.default()
             var roomsWithNewMessages = [NCRoom]()
 
             let bgTask = BGTaskHelper.startBackgroundTask { _ in
@@ -179,58 +239,71 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 completion?(roomsWithNewMessages, activeAccount, nil)
             }
 
-            try? realm.transaction {
-                let updateTimestamp = Int(Date().timeIntervalSince1970)
+            roomsWithNewMessages = self.storeRooms(rooms, forAccount: activeAccount, requestStart: requestStart, onlyLastModified: onlyLastModified, isExpired: { bgTask.isExpired })
+        }
+    }
 
-                // Add or update rooms
-                for roomDict in rooms {
-                    if bgTask.isExpired {
+    /// Stores a rooms response. Returns the rooms with new messages, or an empty list if the write was cancelled.
+    internal func storeRooms(_ rooms: [[String: Any]], forAccount activeAccount: TalkAccount, requestStart: Int, onlyLastModified: Bool, isExpired: () -> Bool) -> [NCRoom] {
+        let realm = RLMRealm.default()
+        var roomsWithNewMessages = [NCRoom]()
+
+        try? realm.transaction {
+            let updateTimestamp = Int(Date().timeIntervalSince1970)
+
+            // Add or update rooms
+            for roomDict in rooms {
+                if isExpired() {
+                    roomsWithNewMessages.removeAll()
+                    realm.cancelWriteTransaction()
+                    return
+                }
+
+                let roomContainsNewMessages = self.updateRoom(withDict: roomDict, withAccount: activeAccount, withTimestamp: updateTimestamp, withRealm: realm, withRequestStart: requestStart)
+
+                if roomContainsNewMessages, let room = NCRoom(dictionary: roomDict, andAccountId: activeAccount.accountId) {
+                    roomsWithNewMessages.append(room)
+                }
+            }
+
+            // Only delete rooms if it was a complete rooms update (not using modifiedSince)
+            if !onlyLastModified {
+                // Delete old rooms, but not the ones that were stored by a request that started after this list
+                let newerRoomIds = self.internalIdsStored(after: requestStart)
+                let roomsQuery = NSPredicate(format: "accountId = %@ AND lastUpdate != %ld AND NOT (internalId IN %@)", activeAccount.accountId, updateTimestamp, newerRoomIds)
+                let managedRoomsToBeDeleted = NCRoom.objects(with: roomsQuery)
+
+                // Delete messages, chat blocks and threads from old rooms
+                for case let managedRoom as NCRoom in managedRoomsToBeDeleted {
+                    if isExpired() {
                         roomsWithNewMessages.removeAll()
                         realm.cancelWriteTransaction()
                         return
                     }
 
-                    let roomContainsNewMessages = self.updateRoom(withDict: roomDict, withAccount: activeAccount, withTimestamp: updateTimestamp, withRealm: realm)
+                    let messagesAndBlocksQuery = NSPredicate(format: "accountId = %@ AND token = %@", activeAccount.accountId, managedRoom.token)
+                    realm.deleteObjects(NCChatMessage.objects(with: messagesAndBlocksQuery))
+                    realm.deleteObjects(NCChatBlock.objects(with: messagesAndBlocksQuery))
 
-                    if roomContainsNewMessages, let room = NCRoom(dictionary: roomDict, andAccountId: activeAccount.accountId) {
-                        roomsWithNewMessages.append(room)
+                    let threadsQuery = NSPredicate(format: "accountId = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.token)
+                    realm.deleteObjects(NCThread.objects(with: threadsQuery))
+
+                    if managedRoom.isFederated {
+                        let federatedCapabilities = NSPredicate(format: "accountId = %@ AND remoteServer = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.remoteServer, managedRoom.token)
+                        realm.deleteObjects(FederatedCapabilities.objects(with: federatedCapabilities))
                     }
                 }
 
-                // Only delete rooms if it was a complete rooms update (not using modifiedSince)
-                if !onlyLastModified {
-                    // Delete old rooms
-                    let roomsQuery = NSPredicate(format: "accountId = %@ AND lastUpdate != %ld", activeAccount.accountId, updateTimestamp)
-                    let managedRoomsToBeDeleted = NCRoom.objects(with: roomsQuery)
-
-                    // Delete messages, chat blocks and threads from old rooms
-                    for case let managedRoom as NCRoom in managedRoomsToBeDeleted {
-                        if bgTask.isExpired {
-                            roomsWithNewMessages.removeAll()
-                            realm.cancelWriteTransaction()
-                            return
-                        }
-
-                        let messagesAndBlocksQuery = NSPredicate(format: "accountId = %@ AND token = %@", activeAccount.accountId, managedRoom.token)
-                        realm.deleteObjects(NCChatMessage.objects(with: messagesAndBlocksQuery))
-                        realm.deleteObjects(NCChatBlock.objects(with: messagesAndBlocksQuery))
-
-                        let threadsQuery = NSPredicate(format: "accountId = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.token)
-                        realm.deleteObjects(NCThread.objects(with: threadsQuery))
-
-                        if managedRoom.isFederated {
-                            let federatedCapabilities = NSPredicate(format: "accountId = %@ AND remoteServer = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.remoteServer, managedRoom.token)
-                            realm.deleteObjects(FederatedCapabilities.objects(with: federatedCapabilities))
-                        }
-                    }
-
-                    realm.deleteObjects(managedRoomsToBeDeleted)
-                }
+                realm.deleteObjects(managedRoomsToBeDeleted)
             }
         }
+
+        return roomsWithNewMessages
     }
 
     public func updateRoom(_ token: String, forAccount account: TalkAccount, withCompletionBlock completion: ((_ roomDict: [String: AnyObject]?, _ error: OcsError?) -> Void)? = nil) {
+        let requestStart = self.nextWriteStamp()
+
         NCAPIController.sharedInstance().getRoom(forAccount: account, withToken: token) { roomDict, error in
             if let error {
                 NCLog.log("Could not update room. Error: \(error.localizedDescription)")
@@ -249,7 +322,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
             }
 
             RLMRealm.writeTransaction { realm in
-                self.updateRoom(withDict: roomDict, withAccount: account, withTimestamp: Int(Date().timeIntervalSince1970), withRealm: realm)
+                self.updateRoom(withDict: roomDict, withAccount: account, withTimestamp: Int(Date().timeIntervalSince1970), withRealm: realm, withRequestStart: requestStart)
             }
 
             var userDict = [String: Any]()
@@ -265,10 +338,14 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     @discardableResult
-    public func updateRoom(withDict roomDict: [String: Any], withAccount account: TalkAccount, withTimestamp timestamp: Int, withRealm realm: RLMRealm) -> Bool {
+    public func updateRoom(withDict roomDict: [String: Any], withAccount account: TalkAccount, withTimestamp timestamp: Int, withRealm realm: RLMRealm, withRequestStart requestStart: Int? = nil) -> Bool {
         var roomContainsNewMessages = false
 
         guard let room = NCRoom(dictionary: roomDict, andAccountId: account.accountId)
+        else { return false }
+
+        // A response from a request that started before the stored data was written must not overwrite it
+        guard let newerLocalWrites = self.claimRoomWrite(internalId: room.internalId, requestStart: requestStart ?? self.nextWriteStamp())
         else { return false }
 
         room.lastUpdate = timestamp
@@ -283,6 +360,23 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
 
         if let managedRoom = NCRoom.objects(where: "internalId = %@", room.internalId).firstObject() as? NCRoom {
+            // Keep the fields that were written locally after the request started
+            if newerLocalWrites.contains(.lastRead) {
+                room.lastReadMessage = managedRoom.lastReadMessage
+            }
+
+            if newerLocalWrites.contains(.commonRead) {
+                room.lastCommonReadMessage = max(room.lastCommonReadMessage, managedRoom.lastCommonReadMessage)
+            }
+
+            if newerLocalWrites.contains(.unreadState) {
+                room.unreadMessages = managedRoom.unreadMessages
+                room.unreadMention = managedRoom.unreadMention
+                room.unreadMentionDirect = managedRoom.unreadMentionDirect
+                room.lastMessageId = managedRoom.lastMessageId
+                room.lastActivity = managedRoom.lastActivity
+            }
+
             if room.lastActivity > managedRoom.lastActivity {
                 roomContainsNewMessages = true
             }
@@ -305,9 +399,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         return roomContainsNewMessages
     }
 
-    private func updateRoom(_ room: NCRoom, withBlock block: @escaping (_ managedRoom: NCRoom) -> Void) {
+    private func updateRoom(_ room: NCRoom, markingGroups groups: Set<RoomFieldGroup> = [], withBlock block: @escaping (_ managedRoom: NCRoom) -> Void) {
         RLMRealm.writeTransaction { _ in
             if let managedRoom = NCRoom.objects(where: "internalId = %@", room.internalId).firstObject() as? NCRoom {
+                self.markLocalWrite(groups, internalId: room.internalId)
                 block(managedRoom)
             }
         }
@@ -320,13 +415,13 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     public func updateLastReadMessage(_ lastReadMessage: Int, forRoom room: NCRoom) {
-        self.updateRoom(room) { managedRoom in
+        self.updateRoom(room, markingGroups: [.lastRead]) { managedRoom in
             managedRoom.lastReadMessage = lastReadMessage
         }
     }
 
     public func updateLastCommonReadMessage(_ messageId: Int, forRoom room: NCRoom) {
-        self.updateRoom(room) { managedRoom in
+        self.updateRoom(room, markingGroups: [.commonRead]) { managedRoom in
             if messageId > managedRoom.lastCommonReadMessage {
                 managedRoom.lastCommonReadMessage = messageId
             }
@@ -334,7 +429,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     public func setNoUnreadMessages(forRoom room: NCRoom, withLastMessage lastMessage: NCChatMessage?) {
-        self.updateRoom(room) { managedRoom in
+        self.updateRoom(room, markingGroups: [.unreadState]) { managedRoom in
             managedRoom.unreadMention = false
             managedRoom.unreadMentionDirect = false
             managedRoom.unreadMessages = 0
