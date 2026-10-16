@@ -281,6 +281,55 @@ final class UnitShareConfirmationOptionsTest: TestBaseRealm {
         }
     }
 
+    func testSecondTapDuringSendDoesNotSendAgain() throws {
+        for permissions in ["3", "27"] {
+            let delegate = ForwardDelegate()
+            let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: permissions), delegate: delegate)
+
+            XCTAssertFalse(viewController.isSending)
+
+            // The button, the button of the keyboard and the silent send
+            viewController.sendButtonPressed()
+            viewController.didPressRightButton(nil)
+            viewController.silentSendPressed()
+
+            XCTAssertTrue(viewController.isSending)
+            XCTAssertEqual(viewController.sharedPaths.count + viewController.copiedFileIds.count, 1, "permissions \(permissions)")
+            // The silent send came last and was ignored: the first one counts
+            XCTAssertNotEqual(viewController.copiedMetaData?.silent, true)
+        }
+    }
+
+    func testFailedSendCanBeRepeated() throws {
+        let delegate = ForwardDelegate()
+        let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: "3"), delegate: delegate)
+
+        viewController.sendCurrent(silently: false)
+        XCTAssertEqual(viewController.copiedFileIds.count, 1)
+
+        // Every end of a send, failed or not, stops the indicator
+        viewController.stopAnimatingSharingIndicator()
+        self.waitForMainQueue()
+        XCTAssertFalse(viewController.isSending)
+
+        viewController.sendCurrent(silently: true)
+        XCTAssertEqual(viewController.copiedFileIds.count, 2)
+        XCTAssertEqual(viewController.copiedMetaData?.silent, true)
+    }
+
+    func testRefusedSendCanBeRepeated() throws {
+        // Another account: the send ends at once with a failure
+        let delegate = ForwardDelegate()
+        let viewController = try self.forwardingViewController(of: self.fileMessage(permissions: "3", accountId: nil), delegate: delegate)
+
+        viewController.sendCurrent(silently: false)
+        self.waitForMainQueue()
+        XCTAssertFalse(viewController.isSending)
+
+        viewController.sendCurrent(silently: false)
+        XCTAssertEqual(delegate.failCount, 2)
+    }
+
     func testForwardMethod() {
         XCTAssertEqual(ShareConfirmationViewController.forwardMethod(canBeShared: true), .share)
         XCTAssertEqual(ShareConfirmationViewController.forwardMethod(canBeShared: false), .copy)

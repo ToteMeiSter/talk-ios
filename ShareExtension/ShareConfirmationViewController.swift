@@ -66,6 +66,11 @@ let kShareConfirmationMaxItems = 10
     private var shareContentView = MediaPreviewPassthroughView()
     private var shareSilently = false
 
+    /// Whether a send has started and not ended yet. Taps on the send buttons while it is true are ignored,
+    /// else a second tap during a slow send (download of a copy, upload) would send the same thing twice.
+    /// Set by `sendCurrent`, cleared by `stopAnimatingSharingIndicator`, which every end of a send, failed or not, calls.
+    private(set) var isSending = false
+
     /// Quality the images are uploaded in. Deliberately not remembered between shares, so an
     /// exception stays an exception.
     private var imageQuality: ChatImageQuality = .standard
@@ -751,7 +756,13 @@ let kShareConfirmationMaxItems = 10
     }
 
     func sendCurrent(silently: Bool) {
+        guard !self.isSending else { return }
+
+        self.isSending = true
         self.shareSilently = silently
+
+        // Before the send: a send that ends at once stops the indicator, which must not be started after that
+        self.startAnimatingSharingIndicator()
 
         if self.shareType == .text {
             self.sendSharedText()
@@ -762,8 +773,6 @@ let kShareConfirmationMaxItems = 10
         } else {
             self.uploadAndShareFiles()
         }
-
-        self.startAnimatingSharingIndicator()
     }
 
     // MARK: - Add additional items
@@ -840,7 +849,10 @@ let kShareConfirmationMaxItems = 10
     }
 
     func sendObjectShare() {
-        guard let richObjectFromObjectShare = objectShareMessage?.richObjectFromObjectShare else { return }
+        guard let richObjectFromObjectShare = objectShareMessage?.richObjectFromObjectShare else {
+            self.stopAnimatingSharingIndicator()
+            return
+        }
 
         NCAPIController.sharedInstance().shareRichObject(richObjectFromObjectShare, inRoom: self.room.token, forAccount: self.account) { error in
             if let error {
@@ -1187,6 +1199,7 @@ let kShareConfirmationMaxItems = 10
 
     func stopAnimatingSharingIndicator() {
         DispatchQueue.main.async {
+            self.isSending = false
             self.sharingIndicatorView.stopAnimating()
             // With a caption there is no send button in the navigation bar, it lives in the input bar
             self.navigationItem.rightBarButtonItem = self.captionAllowed ? nil : self.sendButton
