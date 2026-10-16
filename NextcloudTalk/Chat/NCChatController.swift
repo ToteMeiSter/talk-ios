@@ -858,6 +858,9 @@ public class NCChatController: NSObject {
 
         let query = NSPredicate(format: "accountId = %@ AND token = %@ AND threadId = %ld AND isTemporary = true AND isOfflineMessage = false AND sendingFailed = false AND timestamp < %ld", account.accountId, room.token, threadId, createdBefore)
         print("G17STACK matches=\(NCChatMessage.objects(with: query).count) tempAll=\(NCChatMessage.objects(where: "isTemporary = true").count)")
+        for case let row as NCChatMessage in NCChatMessage.objects(where: "isTemporary = true") {
+            print("G17ROW account=\(row.accountId ?? "nil") token=\(row.token ?? "nil") thread=\(row.threadId) offline=\(row.isOfflineMessage) failed=\(row.sendingFailed) timestamp=\(row.timestamp) before=\(createdBefore) ref=\(row.referenceId ?? "nil")")
+        }
         // The results are live and shrink while we mark messages as failed, so iterate over a copy
         var lostMessages: [NCChatMessage] = []
         for case let candidate as NCChatMessage in NCChatMessage.objects(with: query) {
