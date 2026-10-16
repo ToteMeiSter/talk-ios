@@ -266,7 +266,7 @@ public extension Notification.Name {
             activeAccount?.active = true
         }
 
-        NCLog.log("Set active account to \(accountId)")
+        NCLog.log("Set active account")
     }
 
     public func accountId(forUser user: String, inServer server: String) -> String {
