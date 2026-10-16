@@ -72,4 +72,15 @@ final class UnitNCDatabaseManager: TestBaseRealm {
             XCTAssertEqual(expectedOrder[index].token, element.token)
         }
     }
+
+    func testLogfileNamePerProcess() throws {
+        // The app keeps its name, an extension gets its own file so two processes never write to the same file
+        XCTAssertEqual(NCLog.logfileName(dateString: "2026-10-16", processName: ""), "debug-2026-10-16.log")
+        XCTAssertEqual(NCLog.logfileName(dateString: "2026-10-16", processName: "ShareExtension"), "debug-2026-10-16-ShareExtension.log")
+
+        // Both names are still picked up by getLogfiles/removeOldLogfiles and sort by date first
+        let names = ["debug-2026-10-15.log", "debug-2026-10-16-ShareExtension.log", "debug-2026-10-16.log"]
+        XCTAssertEqual(names.sorted { $0 > $1 }.first, "debug-2026-10-16.log")
+        XCTAssertTrue(names.allSatisfy { $0.hasPrefix("debug-") && $0.hasSuffix(".log") })
+    }
 }
