@@ -3474,7 +3474,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func setUserProfileImage(_ image: UIImage, forAccount account: TalkAccount, completionBlock: @escaping (_ error: Error?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0))
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/spreed/temp-user-avatar"
 
@@ -3777,7 +3780,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0))
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
