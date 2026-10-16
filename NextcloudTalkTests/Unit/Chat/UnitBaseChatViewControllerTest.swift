@@ -283,4 +283,49 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         XCTAssertTrue(baseController.voiceMessagesPlayer === playerOfB)
     }
 
+    func testTapOnVoiceMessageWaitingForItsDownloadIsPending() {
+        let downloading = NCChatFileStatus(fileId: "1", fileName: "", filePath: "")
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: 1)
+
+        XCTAssertTrue(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: downloading))
+    }
+
+    func testTapOnOtherVoiceMessageWhileDownloadingIsNotPending() {
+        let downloading = NCChatFileStatus(fileId: "1", fileName: "", filePath: "")
+        baseController.pendingVoiceMessageDownload = (fileId: "2", selection: 1)
+
+        XCTAssertFalse(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: downloading))
+    }
+
+    func testTapIsNotPendingWithoutDownloadStatus() {
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: 1)
+
+        XCTAssertFalse(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: nil))
+    }
+
+    func testTapIsNotSwallowedByForeignDownloadAfterOwnDownloadEnded() {
+        // Tap on A, its download ends (success, failure or cancellation all call finishVoiceMessageDownload).
+        // Afterwards the same file is downloaded again for another reason, e.g. the transcription.
+        let selection = baseController.selectVoiceMessage()
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: selection)
+        XCTAssertTrue(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: NCChatFileStatus(fileId: "1", fileName: "", filePath: "")))
+
+        baseController.finishVoiceMessageDownload(selection: selection)
+
+        let foreignDownload = NCChatFileStatus(fileId: "1", fileName: "", filePath: "")
+        XCTAssertFalse(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: foreignDownload))
+    }
+
+    func testEndOfOutdatedVoiceMessageDownloadKeepsNewerPendingDownload() {
+        // Tap on A, tap on B, tap on A again: the first A download is outdated and must not clear the third tap
+        let first = baseController.selectVoiceMessage()
+        baseController.selectVoiceMessage()
+        let third = baseController.selectVoiceMessage()
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: third)
+
+        baseController.finishVoiceMessageDownload(selection: first)
+
+        XCTAssertTrue(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: NCChatFileStatus(fileId: "1", fileName: "", filePath: "")))
+    }
+
 }

@@ -52,6 +52,8 @@ import Toast
     internal var voiceMessagesPlayer: AVAudioPlayer?
     /// Counts the taps on voice messages. Only the result of the latest tap may start playback.
     internal var voiceMessageSelection = 0
+    /// The voice message that is downloaded for playback because of the latest tap, until that download ends
+    internal var pendingVoiceMessageDownload: (fileId: String, selection: Int)?
     internal var interactingMessage: NCChatMessage?
     internal var lastMessageBeforeInteraction: IndexPath?
     internal var contextMenuActionBlock: (() -> Void)?
@@ -2382,6 +2384,20 @@ import Toast
         return selection == self.voiceMessageSelection
     }
 
+    /// Whether the latest tap already waits for the download of this file. Another tap would only add a second handler for the same start.
+    /// Only a download requested by that tap counts: a download of the same file started by someone else, e.g. for the transcription, does not.
+    func isVoiceMessageDownloadPending(forFileId fileId: String, downloadStatus: NCChatFileStatus?) -> Bool {
+        return downloadStatus != nil && self.pendingVoiceMessageDownload?.fileId == fileId
+    }
+
+    /// Called when the download requested by the tap with `selection` ended, whether it succeeded, failed or was cancelled.
+    /// A newer tap keeps its own pending download.
+    func finishVoiceMessageDownload(selection: Int) {
+        if self.pendingVoiceMessageDownload?.selection == selection {
+            self.pendingVoiceMessageDownload = nil
+        }
+    }
+
     /// Starts the voice message unless another one was tapped since `selection` was taken, e.g. while this one was downloading.
     func setupVoiceMessagePlayer(with fileStatus: NCChatFileStatus, selection: Int) {
         guard self.shouldStartVoiceMessage(selection: selection),
@@ -4262,18 +4278,28 @@ import Toast
             return
         }
 
-        let selection = self.selectVoiceMessage()
+        let fileId = fileParameter.parameterId
 
         // Resume an already loaded voice message
         if let voiceMessagesPlayer = self.voiceMessagesPlayer,
            let playerAudioFileStatus = self.playerAudioFileStatus,
            !voiceMessagesPlayer.isPlaying,
-           fileParameter.parameterId == playerAudioFileStatus.fileId,
+           fileId == playerAudioFileStatus.fileId,
            fileParameter.path == playerAudioFileStatus.filePath {
 
+            self.selectVoiceMessage()
+            self.pendingVoiceMessageDownload = nil
             self.playVoiceMessagePlayer()
             return
         }
+
+        if self.isVoiceMessageDownloadPending(forFileId: fileId, downloadStatus: ChatFileDownloader.shared.downloadStatus(forFileId: fileId)) {
+            // Playback starts when the download of the previous tap finishes
+            return
+        }
+
+        let selection = self.selectVoiceMessage()
+        self.pendingVoiceMessageDownload = nil
 
         // Temporary voice messages are played from their local file
         if let fileStatus = fileParameter.fileStatus,
@@ -4284,9 +4310,14 @@ import Toast
             return
         }
 
-        self.downloadFile(for: message) { [weak self] fileStatus in
+        self.pendingVoiceMessageDownload = (fileId, selection)
+
+        self.downloadFile(for: message, completionHandler: { [weak self] fileStatus in
+            self?.finishVoiceMessageDownload(selection: selection)
             self?.setupVoiceMessagePlayer(with: fileStatus, selection: selection)
-        }
+        }, failureHandler: { [weak self] in
+            self?.finishVoiceMessageDownload(selection: selection)
+        })
     }
 
     public func cellWants(toPauseAudioFile fileParameter: NCMessageFileParameter) {
@@ -4449,10 +4480,10 @@ import Toast
     /// Downloads the file of a message and hands it to `completionHandler`, or shows why it failed.
     ///
     /// Downloads are deduplicated by file id, so requesting the same file twice downloads it once
-    /// and calls both handlers.
+    /// and calls both handlers. `failureHandler` is called if the file could not be loaded or the download was cancelled.
     ///
     @MainActor
-    private func downloadFile(for message: NCChatMessage, completionHandler: @escaping (_ fileStatus: NCChatFileStatus) -> Void) {
+    private func downloadFile(for message: NCChatMessage, completionHandler: @escaping (_ fileStatus: NCChatFileStatus) -> Void, failureHandler: (() -> Void)? = nil) {
         guard let fileParameter = message.file() else { return }
 
         ChatFileDownloader.shared.downloadFile(withFileId: fileParameter.parameterId, fromAccount: self.account) { [weak self] result in
@@ -4462,9 +4493,10 @@ import Toast
             case .success(let fileStatus):
                 completionHandler(fileStatus)
             case .failure(.fileUnavailable(let errorDescription)), .failure(.downloadFailed(let errorDescription)):
+                failureHandler?()
                 self.showUnableToLoadFileAlert(with: errorDescription)
             case .failure(.cancelled):
-                break
+                failureHandler?()
             }
         }
     }
