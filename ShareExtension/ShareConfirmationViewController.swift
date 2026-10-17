@@ -39,6 +39,9 @@ let kShareConfirmationMaxItems = 10
     public var isModal: Bool = false
     public var forwardingMessage: Bool = false
 
+    /// Files of a forward of several messages that are not forwarded, to tell the user when it is done
+    public private(set) var forwardSkippedFiles: Int = 0
+
     public weak var delegate: ShareConfirmationViewControllerDelegate?
 
     /// Takes over sending the files, once they are compressed. Set by the chat in the app, which shows a message
@@ -116,12 +119,14 @@ let kShareConfirmationMaxItems = 10
     /// Files that could not be prepared and are not reported to the user yet, shown together in one alert
     private var failedFileNames: [String] = []
     private var failedFilesAlert: UIAlertController?
+    private var forwardItems: [ForwardItem] = []
 
     private enum ShareConfirmationType {
         case text
         case item
         case objectShare
         case fileShare
+        case forwardItems
     }
 
     // MARK: - UI Controls
@@ -538,6 +543,22 @@ let kShareConfirmationMaxItems = 10
         }
     }
 
+    /// Several messages are forwarded, each one as a message of its own, in the order of the list
+    @objc public func shareForwardItems(_ items: [ForwardItem], skippedFiles: Int) {
+        self.shareType = .forwardItems
+
+        DispatchQueue.main.async {
+            self.setTextInputbarHidden(true, animated: false)
+            self.showsMediaPreview = false
+            self.shareTextView.isHidden = false
+            self.shareTextView.isUserInteractionEnabled = false
+            self.shareTextView.text = items.map { $0.text }.joined(separator: "\n\n")
+            self.forwardItems = items
+            self.forwardSkippedFiles = skippedFiles
+            self.updateOptionsView()
+        }
+    }
+
     /// The caption of a file message, only when the server can send one along with a shared file
     private func forwardedCaption(of fileMessage: NCChatMessage) -> String? {
         guard fileMessage.message != "{file}",
@@ -790,6 +811,8 @@ let kShareConfirmationMaxItems = 10
             self.sendObjectShare()
         } else if self.shareType == .fileShare {
             self.sendFileShare()
+        } else if self.shareType == .forwardItems {
+            self.sendForwardItems()
         } else {
             self.uploadAndShareFiles()
         }
@@ -868,6 +891,36 @@ let kShareConfirmationMaxItems = 10
         }
     }
 
+    func sendForwardItems() {
+        SequentialSender.send(self.forwardItems, one: { item, done in
+            let task: URLSessionDataTask?
+
+            if let fileMessage = item.fileMessage {
+                self.forwardFile(of: fileMessage, completion: done)
+                return
+            } else if let richObject = item.richObject {
+                task = NCAPIController.sharedInstance().shareRichObject(richObject, inRoom: self.room.token, forAccount: self.account) { error in done(error) }
+            } else {
+                task = NCAPIController.sharedInstance().sendChatMessage(item.text, toRoom: self.room.token, threadTitle: nil, replyTo: -1, referenceId: nil, silently: false, forAccount: self.account) { error in done(error) }
+            }
+
+            // Without a request there is no answer, and the run would wait for ever
+            if task == nil {
+                done(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
+            }
+        }, completion: { sent, error in
+            if let error {
+                NCLog.log(String(format: "Failed to forward messages. Sent: %ld of %ld. Error: %@", sent, self.forwardItems.count, error.localizedDescription))
+                self.delegate?.shareConfirmationViewControllerDidFail(self)
+            } else {
+                NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
+                self.delegate?.shareConfirmationViewControllerDidFinish(self)
+            }
+
+            self.stopAnimatingSharingIndicator()
+        })
+    }
+
     func sendObjectShare() {
         guard let richObjectFromObjectShare = objectShareMessage?.richObjectFromObjectShare else {
             self.stopAnimatingSharingIndicator()
@@ -920,6 +973,60 @@ let kShareConfirmationMaxItems = 10
             // Not reachable, see `forwardMethod`
             self.delegate?.shareConfirmationViewControllerDidFail(self)
             self.stopAnimatingSharingIndicator()
+#endif
+        }
+    }
+
+    /// Forwards the file of a message like `sendFileShare`, but tells the end to the caller instead of the delegate,
+    /// for the forward of several messages. A copy has no progress here, the sharing indicator is shown meanwhile.
+    private func forwardFile(of fileMessage: NCChatMessage, completion: @escaping (Error?) -> Void) {
+        guard fileMessage.accountId == self.account.accountId, let path = fileMessage.file()?.path else {
+            completion(NSError(domain: NSURLErrorDomain, code: NSURLErrorBadURL))
+            return
+        }
+
+        var metaData = ChatFileUploadMetadata()
+        metaData.silent = self.shareSilently
+        metaData.caption = self.forwardedCaption(of: fileMessage)
+
+        let canShare = fileMessage.file()?.canBeShared ?? true
+
+        switch Self.forwardMethod(canBeShared: canShare) {
+        case .share:
+            NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
+                if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
+                    completion(error)
+                } else {
+                    completion(nil)
+                }
+            }
+        case .copy:
+#if !APP_EXTENSION
+            ChatFileDownloader.shared.downloadFile(withFileId: fileMessage.file()?.parameterId ?? "", fromAccount: self.account) { result in
+                guard case .success(let fileStatus) = result, let localPath = fileStatus.fileLocalPath else {
+                    if case .failure(let error) = result {
+                        completion(error)
+                    } else {
+                        completion(NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist))
+                    }
+
+                    return
+                }
+
+                let upload = ChatFileUpload(localPath: localPath, fileName: fileStatus.fileName, room: self.room, account: self.account, metadata: metaData)
+
+                Task { @MainActor in
+                    do {
+                        try await ChatFileUploader.upload(upload, maxNetworkWait: Self.maxNetworkWait) { _ in }
+                        completion(nil)
+                    } catch {
+                        completion(error)
+                    }
+                }
+            }
+#else
+            // Not reachable, see `forwardMethod`
+            completion(NSError(domain: NSURLErrorDomain, code: NSURLErrorUnsupportedURL))
 #endif
         }
     }

@@ -121,6 +121,9 @@
 /* Number of messages selected in a chat, e.g. '3 selected' */
 "%ld selected" = "%ld selected";
 
+/* Files among the selected messages that were left out of a forward */
+"%ld files were not forwarded" = "%ld files were not forwarded";
+
 /* No comment provided by engineer. */
 "'Do not disturb' user status is ignored for important conversations" = "'Do not disturb' user status is ignored for important conversations";
 

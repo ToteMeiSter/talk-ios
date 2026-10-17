@@ -52,11 +52,6 @@ struct MessageSelection {
         return messageId > 0 && self.hasMenu(messageId: messageId, isSystemMessage: isSystemMessage, isDeletedMessage: isDeletedMessage)
     }
 
-    /// Forwarding is off in classified conversations, and needs every selected message to be forwardable.
-    static func canForward(isClassified: Bool, forwardableFlags: [Bool]) -> Bool {
-        return !isClassified && !forwardableFlags.isEmpty && forwardableFlags.allSatisfy { $0 }
-    }
-
     /// Starts the mode with one message selected. Returns false and does nothing for a message that can't be selected.
     @discardableResult
     mutating func begin(with messageId: Int, isSelectable: Bool) -> Bool {
@@ -108,7 +103,7 @@ struct MessageSelection {
         return items.filter { self.selectedIds.contains(id($0)) }
     }
 
-    /// One text for several messages, one message per line.
+    /// One text for several messages to copy, one message per line.
     static func joinedText(of texts: [String]) -> String {
         return texts.joined(separator: self.textSeparator)
     }

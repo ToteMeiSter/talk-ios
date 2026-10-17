@@ -206,8 +206,7 @@ extension BaseChatViewController {
         self.selectionTitleLabel?.text = String.localizedStringWithFormat(NSLocalizedString("%ld selected", comment: "Number of messages selected in a chat, e.g. '3 selected'"), selectedMessages.count)
         self.selectionTitleLabel?.sizeToFit()
 
-        let forwardableFlags = selectedMessages.map { self.isForwardable($0, amongSeveral: selectedMessages.count > 1) }
-        let canForward = MessageSelection.canForward(isClassified: self.room.isClassified, forwardableFlags: forwardableFlags)
+        let canForward = self.forwardPlan(for: selectedMessages) != nil
 
         for item in self.selectionToolbar?.items ?? [] {
             item.isEnabled = item.tag == selectionForwardItemTag ? canForward : true
@@ -293,31 +292,45 @@ extension BaseChatViewController {
 
     // MARK: Actions
 
-    /// A single message is forwarded as in its menu. Several are forwarded as one text, which only plain texts have.
-    private func isForwardable(_ message: NCChatMessage, amongSeveral: Bool) -> Bool {
-        let isForwardable = message.file() == nil && message.poll == nil && !message.isDeletedMessage
+    private func forwardKind(of message: NCChatMessage) -> ForwardKind {
+        if message.poll != nil { return .poll }
+        if message.file() != nil { return .file }
 
-        return amongSeveral ? isForwardable && !message.isObjectShare : isForwardable
+        return message.isObjectShare ? .objectShare : .text
     }
 
+    private func forwardPlan(for messages: [NCChatMessage]) -> ForwardPlan? {
+        return ForwardPlan.make(candidates: messages.map { ForwardPlan.Entry(id: $0.messageId, kind: self.forwardKind(of: $0)) },
+                                isClassified: self.room.isClassified,
+                                supportsFiles: true)
+    }
+
+    /// One message is forwarded as in its menu. Several are forwarded one by one, in the order of the chat.
     private func didPressForwardSelected() {
         let selectedMessages = self.selectedMessages()
 
-        guard !selectedMessages.isEmpty,
-              MessageSelection.canForward(isClassified: self.room.isClassified,
-                                          forwardableFlags: selectedMessages.map { self.isForwardable($0, amongSeveral: selectedMessages.count > 1) })
-        else {
+        guard let plan = self.forwardPlan(for: selectedMessages) else {
             self.updateSelectionUI()
             return
         }
 
         self.endSelectionMode()
 
-        if selectedMessages.count == 1, let message = selectedMessages.first {
+        if selectedMessages.count == 1, let message = selectedMessages.first, self.forwardKind(of: message) != .file {
             self.didPressForward(for: message)
-        } else {
-            self.didPressForward(text: MessageSelection.joinedText(of: selectedMessages.map { $0.parsedMessage().string }))
+            return
         }
+
+        let messagesById = Dictionary(selectedMessages.map { ($0.messageId, $0) }, uniquingKeysWith: { first, _ in first })
+        let items = plan.entries.compactMap { messagesById[$0.id] }.map { message -> ForwardItem in
+            if message.file() != nil {
+                return ForwardItem(text: message.file()?.name ?? "", fileMessage: NCChatMessage(value: message))
+            }
+
+            return ForwardItem(text: message.parsedMessage().string, richObject: message.isObjectShare ? message.richObjectFromObjectShare : nil)
+        }
+
+        self.didPressForward(items: items, skippedFiles: plan.skippedFiles)
     }
 
     private func didPressCopySelected() {
