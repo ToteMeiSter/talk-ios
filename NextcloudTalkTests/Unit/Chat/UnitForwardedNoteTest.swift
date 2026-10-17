@@ -110,7 +110,7 @@ final class UnitForwardedNoteTest: TestBaseRealm {
     func testChatShowsTheNoteOfAForwardedMessageSmall() throws {
         let forwarded = message("Forwarded from Alice\nHello", author: "Bob")
 
-        let shown = forwarded.parsedMarkdownForChat()
+        let shown = try XCTUnwrap(forwarded.parsedMarkdownForChatWithForwardedNote())
 
         let noteFont = try XCTUnwrap(shown.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)
         let bodyFont = try XCTUnwrap(shown.attribute(.font, at: 21, effectiveRange: nil) as? UIFont)

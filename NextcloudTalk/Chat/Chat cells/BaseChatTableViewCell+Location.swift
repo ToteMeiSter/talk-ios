@@ -110,7 +110,7 @@ extension BaseChatTableViewCell {
             UIGraphicsEndImageContext()
         }
 
-        messageTextView.attributedText = message.parsedMarkdownForChat()
+        messageTextView.attributedText = message.parsedMarkdownForChatWithForwardedNote()
     }
 
     func prepareForReuseLocationCell() {

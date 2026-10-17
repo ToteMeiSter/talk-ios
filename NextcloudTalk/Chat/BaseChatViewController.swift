@@ -3746,7 +3746,7 @@ import Toast
 
         // Chat messages
         let isOwnMessage = message.isMessage(from: self.account.userId)
-        let messageString = message.parsedMarkdownForChat() ?? NSMutableAttributedString()
+        let messageString = message.parsedMarkdownForChatWithForwardedNote() ?? NSMutableAttributedString()
         var width = originalWidth
 
         if message.isSystemMessage {

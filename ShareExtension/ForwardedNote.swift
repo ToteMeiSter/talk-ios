@@ -8,7 +8,7 @@ import UIKit
 /// The first line of a forwarded message: "Forwarded from <author>". The server has no field for the author of
 /// the original message, so the note is part of the text (or the caption of a file). The clients tell it from
 /// the rest by its wording and draw it small, bold and italic. The wording is the same as in the Android client.
-@objc(NCForwardedNote) public final class ForwardedNote: NSObject {
+public final class ForwardedNote: NSObject {
 
     private static let key = "Forwarded from %@"
     private static let placeholder = "%@"
@@ -77,11 +77,20 @@ import UIKit
     private static let appTemplates = templates()
 
     /// Draws the first line of `text` as a note if it is one. Other text is not touched.
-    @objc(styleNoteIn:) public static func styleNote(in text: NSMutableAttributedString) -> NSMutableAttributedString {
+    static func styleNote(in text: NSMutableAttributedString) -> NSMutableAttributedString {
         if let range = noteRange(in: text.string, templates: appTemplates) {
             text.addAttribute(.font, value: noteFont, range: range)
         }
 
         return text
+    }
+}
+
+extension NCChatMessage {
+
+    /// The text of the message as the chat shows it, with the note of a forwarded message drawn as such.
+    /// Here and not in `parsedMarkdownForChat`, which is compiled into targets that have no `ForwardedNote`.
+    func parsedMarkdownForChatWithForwardedNote() -> NSMutableAttributedString? {
+        return self.parsedMarkdownForChat().map { ForwardedNote.styleNote(in: $0) }
     }
 }
