@@ -72,20 +72,38 @@ final class UnitNCChatControllerChatBlockAtomicTest: TestBaseRealm {
 
     /// Reads what other processes / connections see, that is only what is committed, from another thread.
     private func committedState(ofRoom room: NCRoom) -> (newestBlockMessageId: Int, serverMessageStored: Bool) {
-        var state = (newestBlockMessageId: 0, serverMessageStored: false)
+        // The managed room must not be touched on another thread
+        let internalId: String = room.internalId
+        let accountId: String = room.accountId
+        let token: String = room.token
+        let messageId = serverMessageId
 
-        DispatchQueue.global().sync {
-            RLMRealm.default().refresh()
-
-            let blockQuery = NSPredicate(format: "internalId = %@ AND threadId = 0", room.internalId)
-            let block = NCChatBlock.objects(with: blockQuery).sortedResults(usingKeyPath: "newestMessageId", ascending: true).lastObject() as? NCChatBlock
-            state.newestBlockMessageId = block?.newestMessageId ?? 0
-
-            let messageQuery = NSPredicate(format: "accountId = %@ AND token = %@ AND messageId = %ld AND isTemporary = false", room.accountId, room.token, self.serverMessageId)
-            state.serverMessageStored = NCChatMessage.objects(with: messageQuery).count > 0
+        final class Result: @unchecked Sendable {
+            var newestBlockMessageId = 0
+            var serverMessageStored = false
         }
 
-        return state
+        let result = Result()
+
+        // dispatch_sync may run its block on the calling thread, which would read the open transaction. A new thread does not.
+        let finished = DispatchSemaphore(value: 0)
+
+        let reader = Thread {
+            RLMRealm.default().refresh()
+
+            let blockQuery = NSPredicate(format: "internalId = %@ AND threadId = 0", internalId)
+            let block = NCChatBlock.objects(with: blockQuery).sortedResults(usingKeyPath: "newestMessageId", ascending: true).lastObject() as? NCChatBlock
+            result.newestBlockMessageId = block?.newestMessageId ?? 0
+
+            let messageQuery = NSPredicate(format: "accountId = %@ AND token = %@ AND messageId = %ld AND isTemporary = false", accountId, token, messageId)
+            result.serverMessageStored = NCChatMessage.objects(with: messageQuery).count > 0
+
+            finished.signal()
+        }
+        reader.start()
+        finished.wait()
+
+        return (result.newestBlockMessageId, result.serverMessageStored)
     }
 
     func testPullResponseCommitsChatBlockAndMessagesTogether() throws {
