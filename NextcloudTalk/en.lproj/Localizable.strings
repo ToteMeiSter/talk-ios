@@ -118,6 +118,9 @@
 /* Replies in a thread */
 "%ld replies" = "%ld replies";
 
+/* Number of messages selected in a chat, e.g. '3 selected' */
+"%ld selected" = "%ld selected";
+
 /* No comment provided by engineer. */
 "'Do not disturb' user status is ignored for important conversations" = "'Do not disturb' user status is ignored for important conversations";
 
