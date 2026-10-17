@@ -4,6 +4,7 @@
 name: Check for localizable changes
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main

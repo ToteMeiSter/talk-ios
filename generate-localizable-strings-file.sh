@@ -13,7 +13,7 @@ STABLE_BRANCH=$(<.tx/backport)
 if [[ "$CURRENT_BRANCH" != $STABLE_BRANCH && ! "$CURRENT_BRANCH" =~ ^backport/[[:digit:]]+/"$STABLE_BRANCH"$ ]]; then
   echo "Not on $STABLE_BRANCH branch, cloning $STABLE_BRANCH branch"
 
-  REMOTE_URL=$(git config --get remote.origin.url)
+  REMOTE_URL=https://github.com/nextcloud/talk-ios.git
   if [ -z "$REMOTE_URL" ]; then
   	echo "No remote URL found. Please check your git config."
   	exit 1
