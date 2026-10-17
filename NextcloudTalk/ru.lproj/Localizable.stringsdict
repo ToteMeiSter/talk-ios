@@ -242,6 +242,26 @@
 			<string>ответов: %ld</string>
 		</dict>
 	</dict>
+	<key>%ld selected</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@selected@</string>
+		<key>selected</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>Выбрано: %ld</string>
+			<key>few</key>
+			<string>Выбрано: %ld</string>
+			<key>many</key>
+			<string>Выбрано: %ld</string>
+			<key>other</key>
+			<string>Выбрано: %ld</string>
+		</dict>
+	</dict>
 	<key>Password needs to be at least %d characters long</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
