@@ -87,11 +87,12 @@ struct MessageSelection {
         self.isActive = false
     }
 
-    /// Drops messages that are not in the chat anymore, e.g. removed by a reload. Ends the mode when none is left.
-    mutating func prune(keeping existingIds: Set<Int>) {
+    /// Drops messages that are not in the chat anymore or can't be selected anymore, e.g. removed by a reload or deleted.
+    /// Ends the mode when none is left.
+    mutating func prune<T>(to items: [T], id: (T) -> Int, isSelectable: (T) -> Bool) {
         guard self.isActive else { return }
 
-        self.selectedIds.formIntersection(existingIds)
+        self.selectedIds.formIntersection(items.filter(isSelectable).map(id))
 
         if self.selectedIds.isEmpty {
             self.isActive = false

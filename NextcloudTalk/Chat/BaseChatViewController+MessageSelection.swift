@@ -186,7 +186,7 @@ extension BaseChatViewController {
             allMessages.append(contentsOf: self.messages[sectionDate] ?? [])
         }
 
-        self.messageSelection.prune(keeping: Set(allMessages.map { $0.messageId }))
+        self.messageSelection.prune(to: allMessages, id: { $0.messageId }, isSelectable: { self.canSelect($0) })
 
         return self.messageSelection.selectedItems(of: allMessages, id: { $0.messageId }, isSelectable: { self.canSelect($0) })
     }
