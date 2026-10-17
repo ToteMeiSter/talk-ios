@@ -1278,6 +1278,10 @@ import Toast
         self.present(shareViewController: ShareViewController(toForwardMessage: text, fromChatViewController: self))
     }
 
+    func didPressForward(items: [ForwardItem], skippedFiles: Int) {
+        self.present(shareViewController: ShareViewController(toForwardItems: items, skippedFiles: skippedFiles, fromChatViewController: self))
+    }
+
     private func present(shareViewController: ShareViewController) {
         shareViewController.delegate = self
         self.presentWithNavigation(shareViewController, animated: true)
@@ -1781,6 +1785,10 @@ import Toast
                 userInfo["token"] = viewController.room.token
                 userInfo["accountId"] = viewController.account.accountId
                 NotificationCenter.default.post(name: .NCChatViewControllerForwardNotification, object: self, userInfo: userInfo)
+
+                if viewController.forwardSkippedFiles > 0 {
+                    NotificationPresenter.shared().present(text: String.localizedStringWithFormat(NSLocalizedString("%ld files were not forwarded", comment: "Files among the selected messages that were left out of a forward"), viewController.forwardSkippedFiles), dismissAfterDelay: 5.0, includedStyle: .dark)
+                }
             }
         }
     }

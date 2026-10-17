@@ -200,13 +200,97 @@ final class UnitMessageSelectionTest: TestBaseRealm {
 
     // MARK: - Forward
 
-    func testForwardNeedsEveryMessageToBeForwardableAndNoClassifiedConversation() {
-        XCTAssertTrue(MessageSelection.canForward(isClassified: false, forwardableFlags: [true]))
-        XCTAssertTrue(MessageSelection.canForward(isClassified: false, forwardableFlags: [true, true, true]))
-        XCTAssertFalse(MessageSelection.canForward(isClassified: false, forwardableFlags: [true, false, true]), "One file in the selection")
-        XCTAssertFalse(MessageSelection.canForward(isClassified: true, forwardableFlags: [true]), "Classified conversation")
-        XCTAssertFalse(MessageSelection.canForward(isClassified: true, forwardableFlags: [true, true]), "Classified conversation")
-        XCTAssertFalse(MessageSelection.canForward(isClassified: false, forwardableFlags: []), "Nothing selected")
+    private func entry(_ id: Int, _ kind: ForwardKind) -> ForwardPlan.Entry {
+        return ForwardPlan.Entry(id: id, kind: kind)
+    }
+
+    func testForwardPlanSendsEveryMessageOnceInTheOrderOfTheChat() throws {
+        let candidates = [entry(10, .text), entry(20, .objectShare), entry(30, .text)]
+
+        let plan = try XCTUnwrap(ForwardPlan.make(candidates: candidates, isClassified: false, supportsFiles: false))
+
+        XCTAssertEqual(plan.entries.map { $0.id }, [10, 20, 30], "One send per message, not one for all")
+        XCTAssertEqual(plan.skippedFiles, 0)
+    }
+
+    func testForwardPlanLeavesFilesOutWhenTheyCantBeForwardedAndCountsThem() throws {
+        let candidates = [entry(10, .text), entry(20, .file), entry(30, .text), entry(40, .file)]
+
+        let plan = try XCTUnwrap(ForwardPlan.make(candidates: candidates, isClassified: false, supportsFiles: false))
+
+        XCTAssertEqual(plan.entries.map { $0.id }, [10, 30])
+        XCTAssertEqual(plan.skippedFiles, 2)
+    }
+
+    func testForwardPlanKeepsFilesInTheOrderOfTheChatWhenTheyCanBeForwarded() throws {
+        let candidates = [entry(10, .text), entry(20, .file), entry(30, .text)]
+
+        let plan = try XCTUnwrap(ForwardPlan.make(candidates: candidates, isClassified: false, supportsFiles: true))
+
+        XCTAssertEqual(plan.entries.map { $0.id }, [10, 20, 30], "Text, file, text stays in this order")
+        XCTAssertEqual(plan.skippedFiles, 0)
+    }
+
+    func testForwardPlanIsOffInClassifiedConversationWithAPollOrWithNothingToSend() {
+        XCTAssertNil(ForwardPlan.make(candidates: [entry(10, .text)], isClassified: true, supportsFiles: true), "Classified conversation")
+        XCTAssertNil(ForwardPlan.make(candidates: [entry(10, .text), entry(20, .poll)], isClassified: false, supportsFiles: true), "Poll")
+        XCTAssertNil(ForwardPlan.make(candidates: [entry(10, .file), entry(20, .file)], isClassified: false, supportsFiles: false), "Only files")
+        XCTAssertNil(ForwardPlan.make(candidates: [], isClassified: false, supportsFiles: true), "Nothing selected")
+    }
+
+    // MARK: - Sending one after the other
+
+    func testSenderStartsTheNextSendOnlyWhenThePreviousOneIsDone() {
+        var started: [Int] = []
+        var finishers: [(Error?) -> Void] = []
+        var result: (sent: Int, error: Error?)?
+
+        SequentialSender.send([1, 2, 3], one: { item, done in
+            started.append(item)
+            finishers.append(done)
+        }, completion: { sent, error in
+            result = (sent, error)
+        })
+
+        XCTAssertEqual(started, [1], "The second send waits for the first one")
+
+        finishers[0](nil)
+        XCTAssertEqual(started, [1, 2])
+
+        finishers[1](nil)
+        XCTAssertEqual(started, [1, 2, 3])
+        XCTAssertNil(result, "Not done while the last send runs")
+
+        finishers[2](nil)
+        XCTAssertEqual(result?.sent, 3)
+        XCTAssertNil(result?.error)
+    }
+
+    func testSenderStopsAtTheFirstError() {
+        var started: [Int] = []
+        var result: (sent: Int, error: Error?)?
+
+        SequentialSender.send([1, 2, 3], one: { item, done in
+            started.append(item)
+            done(item == 2 ? NSError(domain: "test", code: 1) : nil)
+        }, completion: { sent, error in
+            result = (sent, error)
+        })
+
+        XCTAssertEqual(started, [1, 2], "Nothing is sent after the failed one")
+        XCTAssertEqual(result?.sent, 1)
+        XCTAssertNotNil(result?.error)
+    }
+
+    func testSenderWithoutItemsIsDoneAtOnce() {
+        var result: (sent: Int, error: Error?)?
+
+        SequentialSender.send([Int](), one: { _, _ in XCTFail("Nothing to send") }, completion: { sent, error in
+            result = (sent, error)
+        })
+
+        XCTAssertEqual(result?.sent, 0)
+        XCTAssertNil(result?.error)
     }
 
     // MARK: - Text of several messages
