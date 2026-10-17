@@ -8,8 +8,12 @@ import Foundation
 @objc public protocol NCExternalSignalingControllerDelegate {
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedSignalingMessage signalingMessageDict: [AnyHashable: Any])
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedParticipantListMessage participantListMessageDict: [AnyHashable: Any])
+    @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceiveLeaveOfSessions sessionIds: [String])
     @objc func externalSignalingControllerShouldRejoinCall(_ externalSignalingController: NCExternalSignalingController)
     @objc func externalSignalingControllerWillRejoinCall(_ externalSignalingController: NCExternalSignalingController)
+    /// Joining the room for the call again failed, so the call must not be joined (POST /call) without a new session.
+    /// `statusCode` is the HTTP status of the failed request, or 0 if there was none.
+    @objc optional func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didFailRejoiningCallWithStatusCode statusCode: Int, error: Error?)
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, shouldSwitchToCall roomToken: String)
 }
 
@@ -65,10 +69,17 @@ public enum NCExternalSignalingSendMessageStatus {
     private var resumeId: String?
     private var authenticationBackendUrl: String
     private var helloResponseReceived = false
+
+    // Counts the sessions which started a join of the room again (main thread only), see `rejoinRoomForCall`
+    private var rejoinGeneration = 0
     private var nextMessageId: Int = 0
     private var pendingMessages = [WSMessage]()
     private var helloMessage: WSMessage?
     private var messagesWithCompletionBlock = [WSMessage]()
+
+    // Reason of the last error response of the signaling server to a join message (e.g. "no_such_room: ..."),
+    // read and cleared by the completion of `joinRoom` (main thread only)
+    private var lastJoinFailureReason: String?
     private var reconnectInterval: Int = 0
     private var reconnectTimer: Timer?
     private var disconnectTime: TimeInterval?
@@ -131,18 +142,16 @@ public enum NCExternalSignalingSendMessageStatus {
         self.messagesWithCompletionBlock = []
         self.helloResponseReceived = false
 
-        NCLog.log("Connecting to: \(self.serverUrl)")
+        NCLog.log("Connecting to the signaling server")
 
         let wsSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         var wsRequest = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: webSocketTimeoutInterval)
         wsRequest.setValue(NCAppBranding.userAgent(), forHTTPHeaderField: "User-Agent")
 
         if self.resumeId != nil {
-            let currentTimestamp = Date().timeIntervalSince1970
-
-            // We are only allowed to resume a session 30s after disconnect
-            if self.disconnectTime == nil || (currentTimestamp - (self.disconnectTime ?? 0)) >= 30 {
-                NCLog.log("We have a resumeId, but we disconnected outside of the 30s resume window. Connecting without resumeId.")
+            // We are only allowed to resume a session shortly after the connection was lost
+            if !NCSignalingResumePolicy.canResume(resumeId: self.resumeId, connectionLostTime: self.disconnectTime, now: Date().timeIntervalSince1970) {
+                NCLog.log("We have a resumeId, but the connection was lost outside of the resume window. Connecting without resumeId.")
                 self.resumeId = nil
             }
         }
@@ -160,7 +169,11 @@ public enum NCExternalSignalingSendMessageStatus {
 
         guard self.reconnectTimer == nil else { return }
 
-        NCLog.log("Reconnecting to: \(self.serverUrl)")
+        NCLog.log("Reconnecting to the signaling server")
+
+        // Remember when the connection was lost, so we can try to resume the session (like the web client does).
+        // Keep the first moment, as failed reconnect attempts end up here again.
+        self.disconnectTime = NCSignalingResumePolicy.connectionLostTime(existing: self.disconnectTime, now: Date().timeIntervalSince1970)
 
         self.resetWebSocket()
 
@@ -177,6 +190,26 @@ public enum NCExternalSignalingSendMessageStatus {
             self.resumeId = nil
             self.currentRoom = nil
             self.reconnect()
+        }
+    }
+
+    /// The device changed its network. The websocket is bound to the address of the old network: it dies by itself
+    /// only when the old network goes away completely, otherwise it stays silent until a timeout, and there is no
+    /// ping of the client. A call needs the signaling right now (offers of an ICE restart, a new join), so the socket
+    /// is replaced. The session is kept (resume), if the server still holds it.
+    func reconnectAfterNetworkChange() {
+        DispatchQueue.main.async {
+            NCLog.log("Reconnecting to the signaling server because the network changed")
+
+            // A new network deserves a new attempt now, not after the rest of the growing pause
+            self.reconnectInterval = self.initialReconnectInterval
+
+            if self.reconnectTimer != nil {
+                // The connection was lost already and a reconnect is waiting for its time
+                self.connect(force: true)
+            } else {
+                self.reconnect()
+            }
         }
     }
 
@@ -200,11 +233,13 @@ public enum NCExternalSignalingSendMessageStatus {
     }
 
     func disconnect() {
-        NCLog.log("Disconnecting from: \(self.serverUrl)")
-
-        self.disconnectTime = Date().timeIntervalSince1970
+        NCLog.log("Disconnecting from the signaling server")
 
         DispatchQueue.main.async {
+            // Keep an earlier moment of a lost connection, so the resume window is not extended.
+            // `disconnectTime` is only accessed on the main thread.
+            self.disconnectTime = NCSignalingResumePolicy.connectionLostTime(existing: self.disconnectTime, now: Date().timeIntervalSince1970)
+
             self.invalidateReconnectionTimer()
             self.resetWebSocket()
         }
@@ -226,7 +261,7 @@ public enum NCExternalSignalingSendMessageStatus {
         // Wiggle interval a little bit to prevent all clients from connecting
         // simultaneously in case the server connection is interrupted.
         let interval = self.reconnectInterval - (self.reconnectInterval / 2) + Int.random(in: 1...self.reconnectInterval)
-        print("Reconnecting in \(interval)")
+        NCLog.log("Reconnecting in \(interval)s")
 
         DispatchQueue.main.async {
             self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(interval), repeats: false, block: { [weak self] _ in
@@ -342,12 +377,25 @@ public enum NCExternalSignalingSendMessageStatus {
 
         self.resumeId = helloDict["resumeid"] as? String
 
+        // We are connected again, the next connection loss starts a new resume window
+        DispatchQueue.main.async {
+            self.disconnectTime = nil
+        }
+
         let sessionChanged = self.sessionId != newSessionId
+
+        // The very first session has no predecessor, so there is nothing a queued message could be stale for
+        let sessionReplaced = sessionChanged && self.sessionId != nil
+        let rejoinToken = sessionChanged ? self.currentRoom : nil
         self.sessionId = newSessionId
 
         if sessionChanged {
             // The new session did not join any room yet, the re-join below takes care of that
             self.joinedRoomToken = nil
+
+            // The sessions of the old signaling session are gone and their leave events are not replayed. The re-join
+            // reports the sessions of the room again, but `roomMessageReceived` keeps the map for an unchanged room
+            self.participantsMap = [:]
         } else {
             // The session was resumed, so the server kept us in the room and replays what we missed
             self.joinedRoomToken = self.currentRoom
@@ -367,32 +415,106 @@ public enum NCExternalSignalingSendMessageStatus {
         self.hasChatRelay = serverFeatures.contains(where: { $0 == "chat-relay" })
 
         DispatchQueue.main.async {
+            // The new session starts a new join of the room. What the joins of the old session report from now on
+            // (e.g. the failure of a queued join which is dropped below) is stale, see `rejoinRoomForCall`
+            if sessionChanged {
+                self.rejoinGeneration += 1
+            }
+
             let bgTask = BGTaskHelper.startBackgroundTask(withName: "NCUpdateSignalingVersionTransaction")
             NCDatabaseManager.sharedInstance().setExternalSignalingServerVersion(serverVersion, forAccountId: self.account.accountId)
 
-            // Send pending messages
-            for wsMessage in self.pendingMessages {
-                self.send(message: wsMessage)
-            }
-
+            let queuedMessages = self.pendingMessages
             self.pendingMessages = []
 
-            bgTask.stopBackgroundTask()
-        }
+            var droppedCount = 0
 
-        // Re-join if user was in a room
-        if let currentRoom, sessionChanged {
-            self.delegate?.externalSignalingControllerWillRejoinCall(self)
+            // Send pending messages. With a new session, the ones for the old session are dropped
+            for wsMessage in queuedMessages {
+                let messageType = wsMessage.message["type"] as? String
+                let action = NCSignalingResumePolicy.queuedMessageAction(messageType: messageType, sessionReplaced: sessionReplaced, rejoinFollows: rejoinToken != nil)
 
-            NCRoomsManager.shared.rejoinRoomForCall(currentRoom, forAccount: self.account) { _, _, _, _, _ in
-                self.delegate?.externalSignalingControllerShouldRejoinCall(self)
+                switch action {
+                case .send:
+                    self.send(message: wsMessage)
+                case .drop:
+                    droppedCount += 1
+                    wsMessage.executeCompletionBlock(withStatus: .applicationError)
+                case .dropSilently:
+                    droppedCount += 1
+                    wsMessage.ignoreCompletionBlock()
+                }
             }
+
+            if droppedCount > 0 {
+                NCLog.log("Hello with a new session: dropped \(droppedCount) of \(queuedMessages.count) pending messages of the old session")
+            }
+
+            // Re-join if user was in a room. On the main thread, as the rooms manager needs it, and after the queue
+            // above was dealt with, so a dropped message can not report its failure for the new join
+            if let rejoinToken {
+                self.delegate?.externalSignalingControllerWillRejoinCall(self)
+
+                self.rejoinRoomForCall(rejoinToken)
+            }
+
+            bgTask.stopBackgroundTask()
         }
 
         // Notify that we (re)connected, passing whether the session changed. If the session was
         // resumed the server replays the chat relay messages we missed while disconnected (within
         // its ~30s resume window); if a new session was created those messages are lost.
         NotificationCenter.default.post(name: .extSignalingDidReconnect, object: self, userInfo: ["sessionChanged": sessionChanged])
+    }
+
+    /// Joins the room of the call again (a new room session, then the join at the signaling server) and tells the
+    /// delegate to join the call only if that worked. POST /call without a joined room fails with 404, so a failure
+    /// is reported to the delegate, which decides about a repeat (see `retryRejoinRoomForCall`).
+    ///
+    /// Main thread only. The result of a join which belongs to an older session than the current one (a new hello came
+    /// in the meantime, which started a join of its own) is dropped: it is not the answer to the question of the call.
+    private func rejoinRoomForCall(_ token: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        let generation = self.rejoinGeneration
+
+        NCRoomsManager.shared.rejoinRoomForCall(token, forAccount: self.account) { [weak self] sessionId, _, error, statusCode, _ in
+            // Hop to the main thread, where the generation is counted. Also puts the result behind the code which
+            // is on the main thread now, e.g. the drop of the queue in `helloResponseReceived`.
+            DispatchQueue.main.async {
+                guard let self else { return }
+
+                guard generation == self.rejoinGeneration else {
+                    NCLog.log("Ignoring the result of an old re-join of room \(token) (StatusCode \(statusCode))")
+                    return
+                }
+
+                guard error == nil, sessionId != nil else {
+                    NCLog.log("Re-joining room \(token) failed, StatusCode: \(statusCode), Error: \(error.map { NCLog.errorCode($0) } ?? "none")")
+                    self.delegate?.externalSignalingController?(self, didFailRejoiningCallWithStatusCode: statusCode, error: error)
+                    return
+                }
+
+                self.delegate?.externalSignalingControllerShouldRejoinCall(self)
+            }
+        }
+    }
+
+    /// Repeats a failed re-join of the room. Uses the given token, as `currentRoom` is cleared when the join at
+    /// the signaling server fails (that forces a reconnect without resuming).
+    func retryRejoinRoomForCall(_ token: String) {
+        // The rooms manager is used from the main thread, the delegate calls this from the WebRTC queue
+        DispatchQueue.main.async {
+            // The call was left while the retry was on its way (the delegate is removed then). The room may still be
+            // open for a chat, a join would only create a room session nobody needs
+            guard self.delegate != nil else {
+                NCLog.log("Not retrying to re-join room \(token), the call is over")
+                return
+            }
+
+            NCLog.log("Retrying to re-join room \(token)")
+            self.rejoinRoomForCall(token)
+        }
     }
 
     func errorResponseReceived(messageDict: [AnyHashable: Any]) {
@@ -402,6 +524,15 @@ public enum NCExternalSignalingSendMessageStatus {
         else { return }
 
         NCLog.log("Received error response \(errorCode)")
+
+        let errorReason = [errorCode, errorDict["message"] as? String].compactMap { $0 }.joined(separator: ": ")
+
+        DispatchQueue.main.async {
+            // Queued before the completion block is executed, so the reason is available there
+            if let message = self.messagesWithCompletionBlock.first(where: { messageId == $0.messageId }), message.isJoinMessage {
+                self.lastJoinFailureReason = errorReason
+            }
+        }
 
         if errorCode == "no_such_session" || errorCode == "too_many_requests" {
             // We could not resume the previous session, but the websocket is still alive -> resend the hello message without a resumeId
@@ -465,12 +596,24 @@ public enum NCExternalSignalingSendMessageStatus {
                 self.forceReconnect()
             }
 
-            if let block {
-                if status != .success {
-                    block(NSError(domain: NSCocoaErrorDomain, code: 0))
-                } else {
-                    block(nil)
+            let failureReason = self.lastJoinFailureReason
+            self.lastJoinFailureReason = nil
+
+            if status != .success {
+                let reason: String
+
+                switch status {
+                case .socketError:
+                    reason = "websocket error or no answer from the signaling server in time"
+                default:
+                    reason = failureReason ?? "request was dropped or rejected without an error response"
                 }
+
+                NCLog.log("Room request (roomId '\(roomId)') at the signaling server failed: \(reason)")
+
+                block?(NSError(domain: "NCExternalSignalingController", code: status == .socketError ? 1 : 2, userInfo: [NSLocalizedDescriptionKey: reason]))
+            } else {
+                block?(nil)
             }
         }
     }
@@ -481,7 +624,7 @@ public enum NCExternalSignalingSendMessageStatus {
             self.joinedRoomToken = nil
             self.joinRoom(withRoomId: "", withSessionId: "", withFederation: nil, withCompletionBlock: nil)
         } else {
-            print("External signaling: Not leaving because it's not the room we joined")
+            NCLog.log("External signaling: Not leaving because it's not the room we joined")
         }
     }
 
@@ -592,7 +735,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if eventTarget == "participants" {
             self.processRoomParticipantsEvents(eventDict: eventDict)
         } else {
-            print("Unsupported event target: \(eventDict)")
+            NCLog.log("Unsupported event target: \(eventTarget ?? "nil")")
         }
     }
 
@@ -612,12 +755,12 @@ public enum NCExternalSignalingSendMessageStatus {
                 self.participantsMap[signalingSessionId] = participant
 
                 if !participant.isFederated, participant.userId == self.account.userId {
-                    print("App user joined room")
+                    NCLog.log("App user joined room")
                     continue
                 }
 
                 // Only notify if another participant joined the room and not ourselves from a different device
-                print("Participant joined room")
+                NCLog.log("Participant joined room")
 
                 guard let currentRoom else { continue }
 
@@ -631,9 +774,16 @@ public enum NCExternalSignalingSendMessageStatus {
             guard let leftSessions = eventDict["leave"] as? [String]
             else { return }
 
+            // The call needs to know every session that left, also the ones not in the participants map
+            let otherSessions = leftSessions.filter { $0 != self.sessionId }
+
+            if !otherSessions.isEmpty {
+                self.delegate?.externalSignalingController(self, didReceiveLeaveOfSessions: otherSessions)
+            }
+
             for sessionId in leftSessions {
                 guard let participant = self.getParticipant(fromSessionId: sessionId)
-                else { return }
+                else { continue }
 
                 self.participantsMap.removeValue(forKey: sessionId)
 
@@ -659,7 +809,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if eventType == "switchto", let wrappedMessage = eventDict["switchto"] as? [AnyHashable: Any] {
             self.processSwitchToMessageEvent(messageDict: wrappedMessage)
         } else {
-            print("Unknown room event: \(eventDict)")
+            NCLog.log("Unknown room event: \(eventType)")
         }
     }
 
@@ -681,7 +831,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if messageType == "recording" {
             self.delegate?.externalSignalingController(self, didReceivedSignalingMessage: messageDict)
         } else {
-            print("Unknown room message type \(messageDict)")
+            NCLog.log("Unknown room message type \(messageType)")
         }
     }
 
@@ -691,7 +841,7 @@ public enum NCExternalSignalingSendMessageStatus {
         if let roomToken, !roomToken.isEmpty {
             self.delegate?.externalSignalingController(self, shouldSwitchToCall: roomToken)
         } else {
-            print("Unknown switchTo message: \(messageDict)")
+            NCLog.log("Unknown switchTo message without a room token")
         }
     }
 
@@ -730,7 +880,7 @@ public enum NCExternalSignalingSendMessageStatus {
 
             NotificationCenter.default.post(name: .extSignalingDidUpdateParticipants, object: self, userInfo: userInfo)
         } else {
-            print("Unknown room event: \(eventDict)")
+            NCLog.log("Unknown participants event: \(eventType)")
         }
     }
 
@@ -821,7 +971,7 @@ public enum NCExternalSignalingSendMessageStatus {
             guard task == self.webSocket else { return }
 
             if let error = error as? URLError, error.code == .serverCertificateUntrusted {
-                NCLog.log("WebSocket session didCompleteWithError: \(error)")
+                NCLog.log("WebSocket session didCompleteWithError: \(NCLog.errorCode(error))")
 
                 DispatchQueue.main.async {
                     CCCertificate.sharedManager()
@@ -835,7 +985,7 @@ public enum NCExternalSignalingSendMessageStatus {
             }
 
             if let error {
-                NCLog.log("WebSocket session didCompleteWithError: \(error)")
+                NCLog.log("WebSocket session didCompleteWithError: \(NCLog.errorCode(error))")
                 self.reconnect()
             }
         }
@@ -880,7 +1030,7 @@ public enum NCExternalSignalingSendMessageStatus {
                         return
                     }
 
-                    NCLog.log("WebSocket receiveMessageWithCompletionHandler error \(error)")
+                    NCLog.log("WebSocket receiveMessageWithCompletionHandler error \(NCLog.errorCode(error))")
                     self.reconnect()
                 }
             }

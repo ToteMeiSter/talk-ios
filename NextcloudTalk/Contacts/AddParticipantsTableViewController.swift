@@ -270,7 +270,7 @@ class AddParticipantsTableViewController: UITableViewController, UISearchBarDele
                     self.tableView.reloadData()
                 }
             } else if let error {
-                NCLog.log("Error while trying to get participants: \(error)")
+                NCLog.log("Error while trying to get participants: \(NCLog.errorCode(error))")
             }
         }
     }
@@ -289,7 +289,7 @@ class AddParticipantsTableViewController: UITableViewController, UISearchBarDele
                     self.resultTableViewController.setSearchResultContacts(NSMutableDictionary(dictionary: participants), withIndexes: sortedIndexes)
                 }
             } else if let error, error.underlyingError.code != NSURLErrorCancelled {
-                NCLog.log("Error while searching for participants: \(error)")
+                NCLog.log("Error while searching for participants: \(NCLog.errorCode(error))")
             }
         }
     }

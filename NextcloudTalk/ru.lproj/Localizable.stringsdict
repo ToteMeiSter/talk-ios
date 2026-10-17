@@ -242,6 +242,66 @@
 			<string>ответов: %ld</string>
 		</dict>
 	</dict>
+	<key>Forwarded %1$ld of %2$ld messages</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Переслано %1$ld из %2$#@messages@</string>
+		<key>messages</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%2$ld сообщения</string>
+			<key>few</key>
+			<string>%2$ld сообщений</string>
+			<key>many</key>
+			<string>%2$ld сообщений</string>
+			<key>other</key>
+			<string>%2$ld сообщения</string>
+		</dict>
+	</dict>
+	<key>%ld files were not forwarded</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@files@</string>
+		<key>files</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>Не переслан %ld файл</string>
+			<key>few</key>
+			<string>Не переслано %ld файла</string>
+			<key>many</key>
+			<string>Не переслано %ld файлов</string>
+			<key>other</key>
+			<string>Не переслано %ld файла</string>
+		</dict>
+	</dict>
+	<key>%ld selected</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@selected@</string>
+		<key>selected</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>Выбрано: %ld</string>
+			<key>few</key>
+			<string>Выбрано: %ld</string>
+			<key>many</key>
+			<string>Выбрано: %ld</string>
+			<key>other</key>
+			<string>Выбрано: %ld</string>
+		</dict>
+	</dict>
 	<key>Password needs to be at least %d characters long</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>

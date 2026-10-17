@@ -998,7 +998,7 @@ import SwiftUI
             oooView.setupAbsence(withData: absenceData, inRoom: self.room)
             oooView.alpha = 0
 
-            self.view.addSubview(oooView)
+            self.addBelowVideoMessageScrim(oooView)
 
             NSLayoutConstraint.activate([
                 oooView.leadingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.leadingAnchor),
@@ -1041,7 +1041,7 @@ import SwiftUI
             view.setupPinnedMessage(withMessage: message, inRoom: self.room)
             view.alpha = 0
 
-            self.view.addSubview(view)
+            self.addBelowVideoMessageScrim(view)
 
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.leadingAnchor),
@@ -1223,8 +1223,7 @@ import SwiftUI
 
         // If in offline mode, we don't want to show the voice button
         if !offlineMode, !canPress, !presentedInCall,
-           NCDatabaseManager.sharedInstance().roomHasTalkCapability(.voiceMessage, for: room),
-           !room.isFederated {
+           self.isVoiceMessageRecordingAvailable || self.isVideoMessageRecordingAvailable {
 
             self.showVoiceMessageRecordButton()
             return true
@@ -1452,6 +1451,18 @@ import SwiftUI
         self.checkPinnedMessage()
 
         if self.hasStopped {
+            return
+        }
+
+        // A join can finish after the app resigned active (the join was already running). appWillResignActive
+        // already stopped the chat, so starting to receive now would poll in the background with
+        // markNotificationsAsRead enabled and remove the notifications of this conversation.
+        // The next join in appDidBecomeActive continues here.
+        if UIApplication.shared.applicationState != .active {
+            if self.hasReceiveInitialHistory {
+                self.startReceivingMessagesAfterJoin = true
+            }
+
             return
         }
 
@@ -2166,9 +2177,9 @@ import SwiftUI
         }
 
         if started {
-            self.addTypingIndicator(withUserIdentifier: userIdentifier, andDisplayName: displayName)
+            self.addTypingIndicator(withUserIdentifier: userIdentifier, andDisplayName: displayName, sessionId: sessionId)
         } else {
-            self.removeTypingIndicator(withUserIdentifier: userIdentifier)
+            self.removeTypingIndicator(withUserIdentifier: userIdentifier, sessionId: sessionId)
         }
     }
 
@@ -2206,7 +2217,7 @@ import SwiftUI
             userIdentifier = userId
         }
 
-        self.removeTypingIndicator(withUserIdentifier: userIdentifier)
+        self.removeTypingIndicator(withUserIdentifier: userIdentifier, sessionId: sessionId)
     }
 
     // MARK: - Lobby functions
@@ -2406,10 +2417,21 @@ import SwiftUI
         })
     }
 
+    // MARK: - NCMediaViewerViewController Delegate
+
+    override func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool {
+        // Same as in the message menu, no reply while a message is edited. The message itself is checked by the viewer.
+        return !self.textInputbar.isEditing
+    }
+
+    override func mediaViewerViewControllerCanDelete(_ viewController: NCMediaViewerViewController) -> Bool {
+        return true
+    }
+
     // MARK: - ContextMenu (Long press on message)
 
     func isMessageReplyable(message: NCChatMessage) -> Bool {
-        return message.isReplyable && !message.isDeleting
+        return message.canBeRepliedTo
     }
 
     func isMessageReactable(message: NCChatMessage) -> Bool {
@@ -2595,34 +2617,7 @@ import SwiftUI
     }
 
     // swiftlint:disable:next cyclomatic_complexity
-    public override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        if tableView == self.autoCompletionView {
-            return nil
-        }
-
-        let cell = tableView.cellForRow(at: indexPath)
-
-        if let cell = cell as? BaseChatTableViewCell {
-            let pointInCell = tableView.convert(point, to: cell)
-            let pointInBubbleView = cell.convert(pointInCell, to: cell.bubbleView)
-
-            if let reactionPart = cell.reactionPart, reactionPart.frame.contains(pointInBubbleView), let message = cell.message, !message.reactionsArray().isEmpty {
-                self.showReactionsSummary(of: message)
-                return nil
-            }
-        }
-
-        guard let message = self.message(for: indexPath)
-        else { return nil }
-
-        if message.isSystemMessage || message.isDeletedMessage ||
-            message.messageId == MessageSeparatorTableViewCell.unreadMessagesSeparatorId ||
-            message.messageId == MessageSeparatorTableViewCell.unreadMessagesWithSummarySeparatorId ||
-            message.messageId == MessageSeparatorTableViewCell.chatBlockSeparatorId {
-
-            return nil
-        }
-
+    override func messageMenu(for message: NCChatMessage, at indexPath: IndexPath) -> UIMenu {
         var actions: [UIMenuElement] = []
         var informationalActions: [UIMenuElement] = []
 
@@ -2656,7 +2651,7 @@ import SwiftUI
         }
 
         // Reply option
-        if self.isMessageReplyable(message: message), self.room.canChat, !self.textInputbar.isEditing {
+        if message.canReply(in: self.room), !self.textInputbar.isEditing {
             actions.append(UIAction(title: NSLocalizedString("Reply", comment: ""), image: .init(systemName: "arrowshape.turn.up.left")) { _ in
                 self.didPressReply(for: message)
             })
@@ -2808,7 +2803,7 @@ import SwiftUI
         }
 
         // Delete option
-        if message.sendingFailed || message.isOfflineMessage || (message.isDeletable(for: self.account, in: self.room) && self.room.canChat) {
+        if message.canDelete(for: self.account, in: self.room) {
             destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
                 self.didPressDelete(for: message)
             })
@@ -2825,13 +2820,11 @@ import SwiftUI
             menu = UIMenu(children: [reactionShortcutMenu, UIMenu(options: [.displayInline], children: actions)])
         }
 
-        let configuration = UIContextMenuConfiguration(identifier: indexPath as NSIndexPath) { [weak self] in
-            return self?.getContextMenuPreviewController(forRowAt: indexPath)
-        } actionProvider: { _ in
-            return menu
-        }
+        return menu
+    }
 
-        return configuration
+    override var supportsMessageSelection: Bool {
+        return true
     }
 
     // MARK: - NCChatTitleViewDelegate

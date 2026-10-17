@@ -61,3 +61,10 @@ import Foundation
         return OcsError(withError: NSError(domain: NSCocoaErrorDomain, code: 0, userInfo: nil), withTask: nil)
     }
 }
+
+extension OcsError: NCLogDescribable {
+    // The description of the underlying error holds the URL of the request and the headers of the answer
+    public var logDescription: String {
+        return "OcsError http \(responseStatusCode), \(underlyingError.domain) \(underlyingError.code)"
+    }
+}

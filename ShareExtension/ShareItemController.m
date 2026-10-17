@@ -12,6 +12,11 @@
 // be encoded here. The sender picks the quality later on, so nothing is thrown away yet.
 CGFloat const kShareItemControllerImageQuality = 1.0f;
 
+// An edited (cropped or rotated) photo is stored as JPEG with this quality, a PNG stays a PNG.
+// Its longest side is limited, so a crop of a huge photo stays a reasonable file.
+static CGFloat const kShareItemControllerEditedImageQuality = 0.95f;
+static CGFloat const kShareItemControllerEditedImageMaxPixelSize = 4096.0f;
+
 @interface ShareItemController ()
 
 @property (nonatomic, strong) NSString *tempDirectoryPath;
@@ -80,6 +85,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
 {
     NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
     __block NSError *error;
+    __block NSError *transferError;
 
     // Make a local copy to prevent bug where file is removed after some time from inbox
     // See: https://stackoverflow.com/a/48007752/2512312
@@ -88,11 +94,28 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
             [NSFileManager.defaultManager removeItemAtPath:fileLocalURL.path error:nil];
         }
 
-        [NSFileManager.defaultManager moveItemAtPath:newURL.path toPath:fileLocalURL.path error:nil];
+        if (options & NSFileCoordinatorReadingForUploading) {
+            // newURL is a temporary snapshot that the coordinator unlinks after this block, so we take it over
+            [NSFileManager.defaultManager moveItemAtPath:newURL.path toPath:fileLocalURL.path error:&transferError];
+        } else {
+            // newURL is the original file, which does not belong to us and must stay in place
+            [NSFileManager.defaultManager copyItemAtPath:newURL.path toPath:fileLocalURL.path error:&transferError];
+        }
     }];
 
-    BOOL success = (error == nil);
+    if (transferError) {
+        NSLog(@"Failed to transfer file for sharing: %@", transferError);
+    }
+
+    BOOL success = (error == nil && transferError == nil);
     return success;
+}
+
+- (void)reportFailedFileName:(NSString *)fileName
+{
+    if ([self.delegate respondsToSelector:@selector(shareItemController:didFailToPrepareFileNamed:)]) {
+        [self.delegate shareItemController:self didFailToPrepareFileNamed:fileName];
+    }
 }
 
 - (void)addItemWithURLAndName:(NSURL *)fileURL withName:(NSString *)fileName
@@ -108,6 +131,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
 
         if (!preparedSuccessfully) {
             NSLog(@"Failed to prepare file for sharing");
+            [self reportFailedFileName:fileName];
             return;
         }
     }
@@ -186,12 +210,20 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
     __block NSError *error;
     
     [coordinator coordinateReadingItemAtURL:fileURL options:NSFileCoordinatorReadingForUploading error:&error byAccessor:^(NSURL *newURL) {
-        if ([NSFileManager.defaultManager fileExistsAtPath:item.filePath]) {
-            [NSFileManager.defaultManager removeItemAtPath:item.filePath error:nil];
+        // Replace atomically: the original is only removed after the edited file was moved in
+        NSError *replaceError;
+        NSURL *originalURL = [NSURL fileURLWithPath:item.filePath];
+
+        if (![NSFileManager.defaultManager replaceItemAtURL:originalURL withItemAtURL:newURL backupItemName:nil options:0 resultingItemURL:nil error:&replaceError]) {
+            [NCLog log:[NSString stringWithFormat:@"Failed to replace shareItem with edited file: %@, error %@", [NCLog fileTraitsWithFileName:item.fileName], [NCLog errorCode:replaceError]]];
+            [self reportFailedFileName:item.fileName];
         }
-        
-        [NSFileManager.defaultManager moveItemAtPath:newURL.path toPath:item.filePath error:nil];
     }];
+
+    if (error) {
+        [NCLog log:[NSString stringWithFormat:@"Failed to coordinate reading edited file: %@, error %@", [NCLog fileTraitsWithFileName:item.fileName], [NCLog errorCode:error]]];
+        [self reportFailedFileName:item.fileName];
+    }
     
     NSLog(@"Updating shareItem: %@ %@", item.fileName, item.fileURL);
     
@@ -200,12 +232,43 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
 
 - (void)updateItem:(ShareItem *)item withImage:(UIImage *)image
 {
-    NSData *jpegData = UIImageJPEGRepresentation(image, kShareItemControllerImageQuality);
-    [jpegData writeToFile:item.filePath atomically:YES];
+    UIImage *limitedImage = [self image:image limitedToMaxPixelSize:kShareItemControllerEditedImageMaxPixelSize];
+    NSData *imageData;
+
+    if ([[item.filePath.pathExtension lowercaseString] isEqualToString:@"png"]) {
+        imageData = UIImagePNGRepresentation(limitedImage);
+    } else {
+        imageData = UIImageJPEGRepresentation(limitedImage, kShareItemControllerEditedImageQuality);
+    }
+
+    [imageData writeToFile:item.filePath atomically:YES];
     
     NSLog(@"Updating shareItem with Image: %@ %@", item.fileName, item.fileURL);
     
     [self.delegate shareItemControllerItemsChanged:self];
+}
+
+- (UIImage *)image:(UIImage *)image limitedToMaxPixelSize:(CGFloat)maxPixelSize
+{
+    CGFloat pixelWidth = image.size.width * image.scale;
+    CGFloat pixelHeight = image.size.height * image.scale;
+    CGFloat longestSide = MAX(pixelWidth, pixelHeight);
+
+    if (longestSide <= maxPixelSize) {
+        return image;
+    }
+
+    CGFloat ratio = maxPixelSize / longestSide;
+    CGSize targetSize = CGSizeMake(floor(pixelWidth * ratio), floor(pixelHeight * ratio));
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:targetSize format:format];
+
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull context) {
+        [image drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
+    }];
 }
 
 - (void)removeItem:(ShareItem *)item

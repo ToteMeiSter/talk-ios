@@ -36,6 +36,17 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private static let statusCodeShouldIgnoreAttemptButJoinedSuccessfully = 998
     private static let statusCodeIgnoreJoinAttempt = 999
 
+    // Re-joining a room for a call is not possible, because the room is not active anymore (it was left meanwhile)
+    static let statusCodeRoomNotActive = 995
+
+    private static let answeredCallReadyTimeoutSeconds: TimeInterval = 30
+
+    private struct PendingAnsweredCall {
+        let token: String
+        let accountId: String
+        let hasVideo: Bool
+    }
+
     public var chatViewController: ChatViewController?
     public var callViewController: CallViewController?
 
@@ -46,15 +57,33 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private var leavingRoomToken: String?
     private var joiningSessionId: String?
     private var joinRoomTask: URLSessionTask?
+    private var rejoinAttemptId: UUID?
     private var leaveRoomTask: URLSessionTask?
     private var upgradeCallToken: String?
     private var upgradeCallAccountId: String?
     private var pendingToStartCallToken: String?
     private var pendingToStartCallAccountId: String?
     private var pendingToStartCallHasVideo: Bool = false
+    private var pendingAnsweredCall: PendingAnsweredCall?
+    private var pendingAnsweredCallTimeout: DispatchWorkItem?
     private var highlightMessageDict: [AnyHashable: Any]?
     private var showThreadPushNotification: NCPushNotification?
     private var pendingPrivateReplyInternalId: String?
+
+    // Write ordering for rooms: A response must not overwrite a room with data that is older than what is stored.
+    // Request starts and local writes are stamped from one monotonic counter (seconds would not order two requests
+    // started within the same second). The state lives in memory only: a response from an earlier process cannot arrive.
+    private enum RoomFieldGroup {
+        case lastRead
+        case commonRead
+        case unreadState
+        case lastMessage
+    }
+
+    private let writeOrderLock = NSLock()
+    private var writeOrderClock = 0
+    private var appliedRequestStarts = [String: Int]()
+    private var localWriteStamps = [String: [RoomFieldGroup: Int]]()
 
     override init() {
         super.init()
@@ -75,6 +104,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(joinOrCreateChatWithURL(notification:)), name: NSNotification.Name.NCURLWantsToOpenConversation, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(joinChatHighlightingMessage(notification:)), name: NSNotification.Name.NCPresentChatHighlightingMessage, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(connectionStateHasChanged(notification:)), name: NSNotification.Name.NCConnectionStateHasChangedNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appStateHasChanged(notification:)), name: NSNotification.Name.NCAppStateHasChangedNotification, object: nil)
     }
 
     deinit {
@@ -137,6 +167,68 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
     }
 
+    /// Must be called before the request is started, not when the response arrives
+    internal func nextWriteStamp() -> Int {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        writeOrderClock += 1
+        return writeOrderClock
+    }
+
+    /// Returns nil if a request that started later was already stored for this room. Otherwise it records this
+    /// request and returns the field groups that were written locally after the request started.
+    private func claimRoomWrite(internalId: String, requestStart: Int) -> Set<RoomFieldGroup>? {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        if let appliedStart = appliedRequestStarts[internalId], appliedStart > requestStart {
+            return nil
+        }
+
+        appliedRequestStarts[internalId] = requestStart
+
+        let stamps = localWriteStamps[internalId] ?? [:]
+        return Set(stamps.filter { $0.value > requestStart }.keys)
+    }
+
+    private func markLocalWrite(_ groups: Set<RoomFieldGroup>, internalId: String) {
+        guard !groups.isEmpty else { return }
+
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        writeOrderClock += 1
+
+        for group in groups {
+            localWriteStamps[internalId, default: [:]][group] = writeOrderClock
+        }
+    }
+
+    private func appliedRequestStartsSnapshot() -> [String: Int] {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        return appliedRequestStarts
+    }
+
+    /// Used when a write transaction was rolled back. Claims are only made inside write transactions, so none can
+    /// have been added by someone else since the snapshot was taken.
+    private func restoreAppliedRequestStarts(_ snapshot: [String: Int]) {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        appliedRequestStarts = snapshot
+    }
+
+    /// Rooms stored by a request that started after `requestStart`. A room list from before that must not delete them.
+    private func internalIdsStored(after requestStart: Int) -> [String] {
+        writeOrderLock.lock()
+        defer { writeOrderLock.unlock() }
+
+        return appliedRequestStarts.filter { $0.value > requestStart }.map { $0.key }
+    }
+
     // TODO: Can be removed when ObjC is gone
     @objc(updateRoomsUpdatingUserStatus: onlyLastModified:)
     public func updateRooms(updatingUserStatus updateStatus: Bool, onlyLastModified: Bool) {
@@ -148,10 +240,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
         let lastReceivedModified = Int(activeAccount.lastReceivedModifiedSince) ?? 0
         let modifiedSince = onlyLastModified ? lastReceivedModified : 0
+        let requestStart = self.nextWriteStamp()
 
         NCAPIController.sharedInstance().getRooms(forAccount: activeAccount, updateStatus: updateStatus, modifiedSince: modifiedSince) { rooms, error in
             if let error {
-                NCLog.log("Could not update rooms. Error: \(error.localizedDescription)")
+                NCLog.log("Could not update rooms. Error: \(NCLog.errorCode(error))")
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidUpdateRooms, object: self, userInfo: ["error": error])
                 completion?([], activeAccount, error)
@@ -165,7 +258,6 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 return
             }
 
-            let realm = RLMRealm.default()
             var roomsWithNewMessages = [NCRoom]()
 
             let bgTask = BGTaskHelper.startBackgroundTask { _ in
@@ -179,61 +271,90 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 completion?(roomsWithNewMessages, activeAccount, nil)
             }
 
-            try? realm.transaction {
-                let updateTimestamp = Int(Date().timeIntervalSince1970)
-
-                // Add or update rooms
-                for roomDict in rooms {
-                    if bgTask.isExpired {
-                        roomsWithNewMessages.removeAll()
-                        realm.cancelWriteTransaction()
-                        return
-                    }
-
-                    let roomContainsNewMessages = self.updateRoom(withDict: roomDict, withAccount: activeAccount, withTimestamp: updateTimestamp, withRealm: realm)
-
-                    if roomContainsNewMessages, let room = NCRoom(dictionary: roomDict, andAccountId: activeAccount.accountId) {
-                        roomsWithNewMessages.append(room)
-                    }
-                }
-
-                // Only delete rooms if it was a complete rooms update (not using modifiedSince)
-                if !onlyLastModified {
-                    // Delete old rooms
-                    let roomsQuery = NSPredicate(format: "accountId = %@ AND lastUpdate != %ld", activeAccount.accountId, updateTimestamp)
-                    let managedRoomsToBeDeleted = NCRoom.objects(with: roomsQuery)
-
-                    // Delete messages, chat blocks and threads from old rooms
-                    for case let managedRoom as NCRoom in managedRoomsToBeDeleted {
-                        if bgTask.isExpired {
-                            roomsWithNewMessages.removeAll()
-                            realm.cancelWriteTransaction()
-                            return
-                        }
-
-                        let messagesAndBlocksQuery = NSPredicate(format: "accountId = %@ AND token = %@", activeAccount.accountId, managedRoom.token)
-                        realm.deleteObjects(NCChatMessage.objects(with: messagesAndBlocksQuery))
-                        realm.deleteObjects(NCChatBlock.objects(with: messagesAndBlocksQuery))
-
-                        let threadsQuery = NSPredicate(format: "accountId = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.token)
-                        realm.deleteObjects(NCThread.objects(with: threadsQuery))
-
-                        if managedRoom.isFederated {
-                            let federatedCapabilities = NSPredicate(format: "accountId = %@ AND remoteServer = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.remoteServer, managedRoom.token)
-                            realm.deleteObjects(FederatedCapabilities.objects(with: federatedCapabilities))
-                        }
-                    }
-
-                    realm.deleteObjects(managedRoomsToBeDeleted)
-                }
-            }
+            roomsWithNewMessages = self.storeRooms(rooms, forAccount: activeAccount, requestStart: requestStart, onlyLastModified: onlyLastModified, isExpired: { bgTask.isExpired })
         }
     }
 
+    /// Stores a rooms response. Returns the rooms with new messages, or an empty list if the write was cancelled.
+    internal func storeRooms(_ rooms: [[String: Any]], forAccount activeAccount: TalkAccount, requestStart: Int, onlyLastModified: Bool, isExpired: () -> Bool) -> [NCRoom] {
+        let realm = RLMRealm.default()
+        var roomsWithNewMessages = [NCRoom]()
+
+        var startsSnapshot: [String: Int]?
+
+        let committed: Void? = try? realm.transaction {
+            // A rolled back transaction must not leave claims behind: they would reject older responses for rooms that were not stored
+            let snapshot = self.appliedRequestStartsSnapshot()
+            startsSnapshot = snapshot
+            let updateTimestamp = Int(Date().timeIntervalSince1970)
+
+            // Add or update rooms
+            for roomDict in rooms {
+                if isExpired() {
+                    roomsWithNewMessages.removeAll()
+                    realm.cancelWriteTransaction()
+                    self.restoreAppliedRequestStarts(snapshot)
+                    return
+                }
+
+                let roomContainsNewMessages = self.updateRoom(withDict: roomDict, withAccount: activeAccount, withTimestamp: updateTimestamp, withRealm: realm, withRequestStart: requestStart)
+
+                if roomContainsNewMessages, let room = NCRoom(dictionary: roomDict, andAccountId: activeAccount.accountId) {
+                    roomsWithNewMessages.append(room)
+                }
+            }
+
+            // Only delete rooms if it was a complete rooms update (not using modifiedSince)
+            if !onlyLastModified {
+                // Delete old rooms, but not the ones that were stored by a request that started after this list
+                let newerRoomIds = self.internalIdsStored(after: requestStart)
+                let roomsQuery = NSPredicate(format: "accountId = %@ AND lastUpdate != %ld AND NOT (internalId IN %@)", activeAccount.accountId, updateTimestamp, newerRoomIds as NSArray)
+                let managedRoomsToBeDeleted = NCRoom.objects(with: roomsQuery)
+
+                // Delete messages, chat blocks and threads from old rooms
+                for case let managedRoom as NCRoom in managedRoomsToBeDeleted {
+                    if isExpired() {
+                        roomsWithNewMessages.removeAll()
+                        realm.cancelWriteTransaction()
+                        self.restoreAppliedRequestStarts(snapshot)
+                        return
+                    }
+
+                    let messagesAndBlocksQuery = NSPredicate(format: "accountId = %@ AND token = %@", activeAccount.accountId, managedRoom.token)
+                    realm.deleteObjects(NCChatMessage.objects(with: messagesAndBlocksQuery))
+                    realm.deleteObjects(NCChatBlock.objects(with: messagesAndBlocksQuery))
+
+                    let threadsQuery = NSPredicate(format: "accountId = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.token)
+                    realm.deleteObjects(NCThread.objects(with: threadsQuery))
+
+                    if managedRoom.isFederated {
+                        let federatedCapabilities = NSPredicate(format: "accountId = %@ AND remoteServer = %@ AND roomToken = %@", activeAccount.accountId, managedRoom.remoteServer, managedRoom.token)
+                        realm.deleteObjects(FederatedCapabilities.objects(with: federatedCapabilities))
+                    }
+                }
+
+                realm.deleteObjects(managedRoomsToBeDeleted)
+            }
+        }
+
+        if committed == nil {
+            // The commit failed
+            roomsWithNewMessages.removeAll()
+
+            if let startsSnapshot {
+                self.restoreAppliedRequestStarts(startsSnapshot)
+            }
+        }
+
+        return roomsWithNewMessages
+    }
+
     public func updateRoom(_ token: String, forAccount account: TalkAccount, withCompletionBlock completion: ((_ roomDict: [String: AnyObject]?, _ error: OcsError?) -> Void)? = nil) {
+        let requestStart = self.nextWriteStamp()
+
         NCAPIController.sharedInstance().getRoom(forAccount: account, withToken: token) { roomDict, error in
             if let error {
-                NCLog.log("Could not update room. Error: \(error.localizedDescription)")
+                NCLog.log("Could not update room. Error: \(NCLog.errorCode(error))")
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidUpdateRoom, object: self, userInfo: ["error": error])
                 completion?([:], error)
@@ -249,7 +370,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
             }
 
             RLMRealm.writeTransaction { realm in
-                self.updateRoom(withDict: roomDict, withAccount: account, withTimestamp: Int(Date().timeIntervalSince1970), withRealm: realm)
+                self.updateRoom(withDict: roomDict, withAccount: account, withTimestamp: Int(Date().timeIntervalSince1970), withRealm: realm, withRequestStart: requestStart)
             }
 
             var userDict = [String: Any]()
@@ -264,11 +385,39 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
     }
 
+    /// Keeps the fields of the stored room that were written locally after the request of `room` started
+    private func keepFields(of managedRoom: NCRoom, in room: NCRoom, writtenLocally groups: Set<RoomFieldGroup>) {
+        // Keep the fields that were written locally after the request started
+        if groups.contains(.lastRead) {
+            room.lastReadMessage = managedRoom.lastReadMessage
+        }
+
+        if groups.contains(.commonRead) {
+            room.lastCommonReadMessage = max(room.lastCommonReadMessage, managedRoom.lastCommonReadMessage)
+        }
+
+        if groups.contains(.unreadState) {
+            room.unreadMessages = managedRoom.unreadMessages
+            room.unreadMention = managedRoom.unreadMention
+            room.unreadMentionDirect = managedRoom.unreadMentionDirect
+        }
+
+        // The response can already contain a newer message than the stored one, so only keep the stored one if it is not older
+        if groups.contains(.lastMessage), managedRoom.lastActivity >= room.lastActivity {
+            room.lastMessageId = managedRoom.lastMessageId
+            room.lastActivity = managedRoom.lastActivity
+        }
+    }
+
     @discardableResult
-    public func updateRoom(withDict roomDict: [String: Any], withAccount account: TalkAccount, withTimestamp timestamp: Int, withRealm realm: RLMRealm) -> Bool {
+    public func updateRoom(withDict roomDict: [String: Any], withAccount account: TalkAccount, withTimestamp timestamp: Int, withRealm realm: RLMRealm, withRequestStart requestStart: Int? = nil) -> Bool {
         var roomContainsNewMessages = false
 
         guard let room = NCRoom(dictionary: roomDict, andAccountId: account.accountId)
+        else { return false }
+
+        // A response from a request that started before the stored data was written must not overwrite it
+        guard let newerLocalWrites = self.claimRoomWrite(internalId: room.internalId, requestStart: requestStart ?? self.nextWriteStamp())
         else { return false }
 
         room.lastUpdate = timestamp
@@ -283,6 +432,8 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
 
         if let managedRoom = NCRoom.objects(where: "internalId = %@", room.internalId).firstObject() as? NCRoom {
+            self.keepFields(of: managedRoom, in: room, writtenLocally: newerLocalWrites)
+
             if room.lastActivity > managedRoom.lastActivity {
                 roomContainsNewMessages = true
             }
@@ -305,9 +456,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         return roomContainsNewMessages
     }
 
-    private func updateRoom(_ room: NCRoom, withBlock block: @escaping (_ managedRoom: NCRoom) -> Void) {
+    private func updateRoom(_ room: NCRoom, markingGroups groups: Set<RoomFieldGroup> = [], withBlock block: @escaping (_ managedRoom: NCRoom) -> Void) {
         RLMRealm.writeTransaction { _ in
             if let managedRoom = NCRoom.objects(where: "internalId = %@", room.internalId).firstObject() as? NCRoom {
+                self.markLocalWrite(groups, internalId: room.internalId)
                 block(managedRoom)
             }
         }
@@ -320,13 +472,13 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     public func updateLastReadMessage(_ lastReadMessage: Int, forRoom room: NCRoom) {
-        self.updateRoom(room) { managedRoom in
+        self.updateRoom(room, markingGroups: [.lastRead]) { managedRoom in
             managedRoom.lastReadMessage = lastReadMessage
         }
     }
 
     public func updateLastCommonReadMessage(_ messageId: Int, forRoom room: NCRoom) {
-        self.updateRoom(room) { managedRoom in
+        self.updateRoom(room, markingGroups: [.commonRead]) { managedRoom in
             if messageId > managedRoom.lastCommonReadMessage {
                 managedRoom.lastCommonReadMessage = messageId
             }
@@ -334,7 +486,13 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     public func setNoUnreadMessages(forRoom room: NCRoom, withLastMessage lastMessage: NCChatMessage?) {
-        self.updateRoom(room) { managedRoom in
+        // The last message is only written (and so only protected) if there is one that may be used
+        var groups: Set<RoomFieldGroup> = [.unreadState]
+        if lastMessage != nil, !room.isSensitive {
+            groups.insert(.lastMessage)
+        }
+
+        self.updateRoom(room, markingGroups: groups) { managedRoom in
             managedRoom.unreadMention = false
             managedRoom.unreadMentionDirect = false
             managedRoom.unreadMessages = 0
@@ -440,7 +598,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
     public func startChat(inRoom room: NCRoom) {
         guard self.callViewController == nil else {
-            print("Not starting chat due to in a call.")
+            NCLog.log("Not starting chat due to in a call.")
             return
         }
 
@@ -545,9 +703,9 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // MARK: - Call
 
     // swiftlint:disable:next function_parameter_count
-    public func startCall(withVideo video: Bool, inRoom room: NCRoom, withVideoEnabled videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, withRecordingConsent recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool) {
+    public func startCall(withVideo video: Bool, inRoom room: NCRoom, withVideoEnabled videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, withRecordingConsent recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool, answeredIncomingCall: Bool = false) {
         guard self.callViewController == nil else {
-            print("Not starting call due to in another call.")
+            NCLog.log("Not starting call due to in another call.")
             return
         }
 
@@ -560,6 +718,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         self.callViewController = callViewController
 
         callViewController.videoDisabledAtStart = !videoEnabled
+        callViewController.receivesVideoInVoiceCall = answeredIncomingCall
         callViewController.voiceChatModeAtStart = voiceChatMode
         callViewController.initiator = initiator
         callViewController.silentCall = silently
@@ -644,7 +803,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         if let pendingToStartCallToken = self.pendingToStartCallToken, let pendingToStartCallAccountId = self.pendingToStartCallAccountId {
             // Pending calls can only happen when answering a new call. That's why we start with video disabled at start and in voice chat mode.
             // We also can start call silently because we are joining an already started call so no need to notify.
-            self.startCall(withToken: pendingToStartCallToken, withAccountId: pendingToStartCallAccountId, withVideo: pendingToStartCallHasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true)
+            self.answerCall(withToken: pendingToStartCallToken, withAccountId: pendingToStartCallAccountId, withVideo: pendingToStartCallHasVideo)
             self.pendingToStartCallToken = nil
         }
     }
@@ -678,7 +837,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 completionBlock(error)
             }
         } else {
-            print("Couldn't find a room controller from the room we are switching from")
+            NCLog.log("Couldn't find a room controller from the room we are switching from")
             completionBlock(nil)
         }
     }
@@ -744,6 +903,17 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // MARK: - Notifications
 
     func checkForCallUpgrades(notification: Notification) {
+        // The user ended the CallKit call while we were still waiting to show it
+        if let pending = self.pendingAnsweredCall, pending.token == notification.userInfo?[stringForKey: "roomToken"] {
+            self.pendingAnsweredCall = nil
+            self.pendingAnsweredCallTimeout?.cancel()
+        }
+
+        if self.pendingToStartCallToken == notification.userInfo?[stringForKey: "roomToken"] {
+            self.pendingToStartCallToken = nil
+            self.pendingToStartCallAccountId = nil
+        }
+
         guard let upgradeCallToken, let upgradeCallAccountId else { return }
         let token = upgradeCallToken
         let accountId = upgradeCallAccountId
@@ -757,7 +927,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
     }
 
-    private func checkForAccountChange(_ accountId: String?) {
+    func checkForAccountChange(_ accountId: String?) {
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
 
         guard let accountId, accountId != activeAccount.accountId else { return }
@@ -779,13 +949,102 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         let activeCalls = self.areThereActiveCalls
 
         if !waitForcallEnd || (!activeCalls && leaveRoomTask == nil) {
-            // Calls that have been answered start with video disabled by default, in voice chat mode and silently (without notification).
-            self.startCall(withToken: roomToken, withAccountId: accountId, withVideo: hasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true)
+            self.answerCall(withToken: roomToken, withAccountId: accountId, withVideo: hasVideo)
         } else {
             self.pendingToStartCallToken = roomToken
             self.pendingToStartCallHasVideo = hasVideo
             self.pendingToStartCallAccountId = accountId
         }
+    }
+
+    private func answerCall(withToken token: String, withAccountId accountId: String, withVideo video: Bool) {
+        guard CallKitManager.sharedInstance().hasCall(forToken: token) else {
+            NCLog.log("Not showing the call screen for room \(token), the CallKit call is gone")
+            return
+        }
+
+        let shownCallToken = self.callViewController?.room.token
+
+        switch AnsweredCallPolicy.action(appState: NCConnectionController.shared.appState, shownCallToken: shownCallToken, answeredToken: token) {
+        case .keep:
+            // The call screen of this room is already shown, the CallKit call belongs to it
+            return
+        case .fail:
+            self.failAnsweredCall(withToken: token, reason: "another call is shown")
+        case .wait:
+            // The app was probably started by the VoIP push and is not ready yet, so wait for it like the other CallKit entry points
+            NCLog.log("Answered call for token \(token) is waiting for the app to become ready")
+            self.pendingAnsweredCall = PendingAnsweredCall(token: token, accountId: accountId, hasVideo: video)
+            self.pendingAnsweredCallTimeout?.cancel()
+
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, let pending = self.pendingAnsweredCall else { return }
+                self.pendingAnsweredCall = nil
+                self.failAnsweredCall(withToken: pending.token, reason: "app is not ready")
+            }
+
+            self.pendingAnsweredCallTimeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.answeredCallReadyTimeoutSeconds, execute: timeout)
+        case .start:
+            self.startAnsweredCall(withToken: token, withAccountId: accountId, withVideo: video)
+        }
+    }
+
+    private func startAnsweredCall(withToken token: String, withAccountId accountId: String, withVideo video: Bool) {
+        guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: accountId) else {
+            self.failAnsweredCall(withToken: token, reason: "account not found")
+            return
+        }
+
+        NCAPIController.sharedInstance().getRoom(forAccount: account, withToken: token) { roomDict, error in
+            guard error == nil, let room = NCRoom(dictionary: roomDict, andAccountId: account.accountId) else {
+                self.failAnsweredCall(withToken: token, reason: "room could not be retrieved")
+                return
+            }
+
+            guard CallKitManager.sharedInstance().hasCall(forToken: token) else {
+                NCLog.log("Not showing the call screen for room \(token), the CallKit call is gone")
+                return
+            }
+
+            // A call screen might have been presented while the room was requested
+            switch AnsweredCallPolicy.action(appState: .ready, shownCallToken: self.callViewController?.room.token, answeredToken: token) {
+            case .fail:
+                self.failAnsweredCall(withToken: token, reason: "another call is shown")
+                return
+            case .keep, .wait:
+                return
+            case .start:
+                break
+            }
+
+            // The answer may come before CallKit knows the kind of the call (or its request failed), but this response is fresh
+            let callFlag = (roomDict?["callFlag"] as? Int).map { CallFlag(rawValue: $0) }
+            let hasCallFlags = NCDatabaseManager.sharedInstance().serverHasTalkCapability(.callFlags, forAccountId: accountId)
+            let callType = CallVideoPolicy.callType(callFlag: callFlag, hasCallFlagsCapability: hasCallFlags)
+            let startsAsVideoCall = CallVideoPolicy.startsAsVideoCall(callKitHasVideo: video, serverCallType: callType)
+
+            // Calls that have been answered start with video disabled by default, in voice chat mode and silently (without notification).
+            // They receive video also when they are voice calls, because their kind can be unknown or outdated when they are answered.
+            self.startCall(withVideo: startsAsVideoCall, inRoom: room, withVideoEnabled: false, asInitiator: false, silently: true, withRecordingConsent: false, withVoiceChatMode: true, answeredIncomingCall: true)
+        }
+    }
+
+    private func failAnsweredCall(withToken token: String, reason: String) {
+        NCLog.log("Failed to show the call screen for the answered call in room \(token): \(reason)")
+        CallKitManager.sharedInstance().endAnsweredCall(withToken: token)
+    }
+
+    func appStateHasChanged(notification: Notification) {
+        // Read the state from the notification, accessing NCConnectionController.shared here would be recursive while it is initializing
+        guard let pending = self.pendingAnsweredCall,
+              let rawAppState = (notification.userInfo?["appState"] as? NSNumber)?.intValue,
+              AppState(rawValue: rawAppState) == .ready
+        else { return }
+
+        self.pendingAnsweredCall = nil
+        self.pendingAnsweredCallTimeout?.cancel()
+        self.answerCall(withToken: pending.token, withAccountId: pending.accountId, withVideo: pending.hasVideo)
     }
 
     func startCallForRoom(notification: Notification) {
@@ -1034,7 +1293,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                     userInfo["isBanned"] = true
                 }
 
-                NCLog.log("Could not join room. Status code: \(statusCode). Error: \(error?.localizedDescription ?? "")")
+                NCLog.log("Could not join room. Status code: \(statusCode). Error: \(error.map { NCLog.errorCode($0) } ?? "none")")
             }
 
             self.joiningRoomToken = nil
@@ -1168,10 +1427,34 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     public func rejoinRoomForCall(_ token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ sessionId: String?, _ room: NCRoom?, _ error: Error?, _ statusCode: Int, _ statusReason: String?) -> Void) {
         NCLog.log("Rejoining room \(token)")
 
-        guard let roomController = self.activeRooms[token] else { return }
+        guard let roomController = self.activeRooms[token] else {
+            // Report it, otherwise the caller waits for the answer forever (the call stays "reconnecting")
+            NCLog.log("Could not re-join room \(token), the room is not active anymore")
+            completionBlock(nil, nil, NSError(domain: NSCocoaErrorDomain, code: 0), NCRoomsManager.statusCodeRoomNotActive, nil)
+            return
+        }
+
+        // A second re-join of the same room replaces the first one. Its request is cancelled (the caller gets the
+        // cancellation as the result), so two requests do not create two room sessions of which one stays behind.
+        if self.rejoinAttemptId != nil, self.isJoiningRoom(withToken: token) {
+            NCLog.log("Re-joining room \(token) while a re-join of it is running, cancelling the earlier one")
+            self.joinRoomTask?.cancel()
+        }
+
+        let attemptId = UUID()
+        self.rejoinAttemptId = attemptId
 
         self.joiningRoomToken = token
         self.joinRoomTask = NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: { sessionId, room, error, statusCode, statusReason in
+            // The result of a cancelled earlier attempt must not clear what the later attempt has set
+            defer {
+                if self.rejoinAttemptId == attemptId {
+                    self.rejoinAttemptId = nil
+                    self.joiningRoomToken = nil
+                    self.joiningSessionId = nil
+                }
+            }
+
             if error == nil, let sessionId {
                 roomController.userSessionId = sessionId
                 roomController.inCall = true
@@ -1202,12 +1485,9 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                     }
                 }
             } else {
-                NCLog.log("Could not re-join room \(token). Status code: \(statusCode). Error: \(error?.localizedDescription ?? "Unknown")")
+                NCLog.log("Could not re-join room \(token). Status code: \(statusCode). Error: \(error.map { NCLog.errorCode($0) } ?? "none")")
                 completionBlock(nil, nil, error, statusCode, statusReason)
             }
-
-            self.joiningRoomToken = nil
-            self.joiningSessionId = nil
         })
     }
 
@@ -1242,10 +1522,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
                 if let error {
                     userInfo["error"] = error
-                    NCLog.log("Could not exit room. Error: \(error.localizedDescription)")
-                } else {
-                    self.checkForPendingToStartCalls()
+                    NCLog.log("Could not exit room. Error: \(NCLog.errorCode(error))")
                 }
+
+                // Leaving the old room is not needed to join the answered call, so don't leave it hanging in CallKit on errors
+                self.checkForPendingToStartCalls()
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidLeaveRoom, object: self, userInfo: userInfo)
             })
@@ -1323,10 +1604,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 if let accountId = offlineMessage.accountId,
                    let room = NCDatabaseManager.sharedInstance().room(withToken: offlineMessage.token, forAccountId: accountId) {
                     if offlineMessage.threadId > 0 && offlineMessage.isThread {
-                        guard let chatController = NCChatController(forThreadId: offlineMessage.threadId, in: room) else { return }
+                        guard let chatController = NCChatController(forThreadId: offlineMessage.threadId, in: room) else { continue }
                         chatController.send(offlineMessage)
                     } else {
-                        guard let chatController = NCChatController(for: room) else { return }
+                        guard let chatController = NCChatController(for: room) else { continue }
                         chatController.send(offlineMessage)
                     }
                 }

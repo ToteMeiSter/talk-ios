@@ -40,7 +40,7 @@ static NSInteger const kMaxConsecutiveSessionGoneFailures = 5;
 
 - (void)dealloc
 {
-    NSLog(@"NCSignalingController dealloc");
+    [NCLog log:@"NCSignalingController dealloc"];
 }
 
 - (void)updateSignalingSettingsWithCompletionBlock:(SignalingSettingsUpdatedCompletionBlock)block
@@ -54,7 +54,7 @@ static NSInteger const kMaxConsecutiveSessionGoneFailures = 5;
             }
 
             // TODO: Error handling
-            [NCLog log:[NSString stringWithFormat:@"Could not get signaling settings. Error: %@", error.description]];
+            [NCLog log:[NSString stringWithFormat:@"Could not get signaling settings. Error: %@", [NCLog errorCode:error]]];
         }
 
         if (settings) {
@@ -177,9 +177,8 @@ static NSInteger const kMaxConsecutiveSessionGoneFailures = 5;
     [[NCAPIController sharedInstance] sendSignalingMessages:JSONSerializedMessages toRoom:_room.token forAccount:[[NCDatabaseManager sharedInstance] activeAccount] completionHandler:^(NSError *error) {
         if (error) {
             //TODO: Error handling
-            NSLog(@"Error sending signaling message.");
+            [NCLog log:[NSString stringWithFormat:@"Error sending internal signaling message to %@: %@", self->_room.token, [NCLog errorCode:error]]];
         }
-        NSLog(@"Sent %@", JSONSerializedMessages);
     }];
 }
 
@@ -191,7 +190,7 @@ static NSInteger const kMaxConsecutiveSessionGoneFailures = 5;
                                                        options:0
                                                          error:&error];
     if (!jsonData) {
-        NSLog(@"Error serializing signaling message: %@", error);
+        [NCLog log:[NSString stringWithFormat:@"Error serializing internal signaling message: %@", error.localizedDescription]];
     } else {
         jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     }

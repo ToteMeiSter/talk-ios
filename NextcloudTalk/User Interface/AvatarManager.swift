@@ -99,7 +99,11 @@ import SDWebImage
         } else {
             switch room.type {
             case .oneToOne:
-                guard let account = room.account else { return nil }
+                guard let account = room.account else {
+                    completionBlock(nil)
+                    return nil
+                }
+
                 return self.getUserAvatar(forId: room.name, withStyle: style, usingAccount: account, completionBlock: completionBlock)
             case .formerOneToOne:
                 completionBlock(UIImage(named: "user-avatar", in: nil, compatibleWith: traitCollection))

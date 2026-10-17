@@ -58,6 +58,31 @@
     return self;
 }
 
+- (id)initToForwardFileMessage:(NCChatMessage *)fileMessage fromChatViewController:(UIViewController *)chatViewController
+{
+    self = [super init];
+    if (self) {
+        self.chatViewController = chatViewController;
+        self.forwardFileMessage = fileMessage;
+        self.forwarding = YES;
+    }
+    
+    return self;
+}
+
+- (id)initToForwardItems:(NSArray<NCForwardItem *> *)items skippedFiles:(NSInteger)skippedFiles fromChatViewController:(UIViewController *)chatViewController
+{
+    self = [super init];
+    if (self) {
+        self.chatViewController = chatViewController;
+        self.forwardItems = items;
+        self.forwardSkippedFiles = skippedFiles;
+        self.forwarding = YES;
+    }
+    
+    return self;
+}
+
 - (void)viewDidLoad
 {
     [super viewDidLoad];
@@ -271,7 +296,8 @@
     }
     
     // Show account button selector if there are more than one account
-    if ([TalkAccount allObjectsInRealm:_realm].count > 1) {
+    // Not when forwarding a file: its path belongs to the account of the message, another account must not send it
+    if (!_forwardFileMessage && [TalkAccount allObjectsInRealm:_realm].count > 1) {
         [self setProfileButtonForAccount:_shareAccount];
     }
     
@@ -316,17 +342,38 @@
 
 #pragma mark - Shared items
 
+- (void)logShareLoadResultForType:(NSString *)typeIdentifier item:(id)item error:(NSError *)error
+{
+    // Only the type, the error and the class of the item are logged, never the content, a path or the full error (its userInfo can contain a path)
+    NSString *itemClass = item ? NSStringFromClass([(NSObject *)item class]) : @"nil";
+
+    if (error) {
+        [NCLog log:[NSString stringWithFormat:@"Share extension: loading attachment of type %@ failed: %@ %ld (item class: %@)", typeIdentifier, error.domain, (long)error.code, itemClass]];
+    } else {
+        [NCLog log:[NSString stringWithFormat:@"Share extension: loaded attachment of type %@, item class: %@", typeIdentifier, itemClass]];
+    }
+}
+
 - (void)setSharedItemToShareConfirmationViewController:(ShareConfirmationViewController *)shareConfirmationVC
 {
-    NSLog(@"Received %lu files to share", [self.extensionContext.inputItems count]);
-    
+    NSUInteger attachmentsCount = 0;
+    for (NSExtensionItem *extensionItem in self.extensionContext.inputItems) {
+        attachmentsCount += extensionItem.attachments.count;
+    }
+
+    [NCLog log:[NSString stringWithFormat:@"Share extension received %lu input items with %lu attachments",
+                (unsigned long)self.extensionContext.inputItems.count, (unsigned long)attachmentsCount]];
+
     [self.extensionContext.inputItems enumerateObjectsUsingBlock:^(NSExtensionItem * _Nonnull extItem, NSUInteger idx, BOOL * _Nonnull stop) {
         [extItem.attachments enumerateObjectsUsingBlock:^(NSItemProvider * _Nonnull itemProvider, NSUInteger idx, BOOL * _Nonnull stop) {
+            BOOL isHandled = NO;
+
             // Check if shared video
             if ([itemProvider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) {
                 [itemProvider loadItemForTypeIdentifier:(NSString *)kUTTypeMovie
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
+                                          [self logShareLoadResultForType:(NSString *)kUTTypeMovie item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
                                               NSLog(@"Shared Video = %@", item);
                                               NSURL *videoURL = (NSURL *)item;
@@ -342,6 +389,7 @@
                 [itemProvider loadItemForTypeIdentifier:@"public.file-url"
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
+                                          [self logShareLoadResultForType:@"public.file-url" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
                                               NSLog(@"Shared File URL = %@", item);
                                               NSURL *fileURL = (NSURL *)item;
@@ -356,6 +404,7 @@
                 [itemProvider loadItemForTypeIdentifier:(NSString *)kUTTypeImage
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
+                                          [self logShareLoadResultForType:(NSString *)kUTTypeImage item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
                                               NSLog(@"Shared Image = %@", item);
                                               NSURL *imageURL = (NSURL *)item;
@@ -379,6 +428,7 @@
                 [itemProvider loadItemForTypeIdentifier:@"com.apple.pkpass"
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
+                                          [self logShareLoadResultForType:@"com.apple.pkpass" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSData class]]) {
                                               NSLog(@"Shared Pass = %@", item);
                                               NSData *passData = (NSData *)item;
@@ -392,9 +442,11 @@
             }
             // Check if shared URL
             if ([itemProvider hasItemConformingToTypeIdentifier:@"public.url"]) {
+                isHandled = YES;
                 [itemProvider loadItemForTypeIdentifier:@"public.url"
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
+                                          [self logShareLoadResultForType:@"public.url" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
                                               NSLog(@"Shared URL = %@", item);
                                               NSURL *sharedURL = (NSURL *)item;
@@ -406,9 +458,11 @@
             }
             // Check if shared text
             if ([itemProvider hasItemConformingToTypeIdentifier:@"public.plain-text"]) {
+                isHandled = YES;
                 [itemProvider loadItemForTypeIdentifier:@"public.plain-text"
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
+                                          [self logShareLoadResultForType:@"public.plain-text" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSString class]]) {
                                               NSLog(@"Shared Text = %@", item);
                                               NSString *sharedText = (NSString *)item;
@@ -420,15 +474,22 @@
             }
             // Check if vcard
             if ([itemProvider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeVCard]) {
+                isHandled = YES;
                 [itemProvider loadItemForTypeIdentifier:(NSString *)kUTTypeVCard
                                                 options:nil
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
+                                          [self logShareLoadResultForType:(NSString *)kUTTypeVCard item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSData class]]) {
                                               NSLog(@"Shared Contact = %@", item);
                                               NSData *contactData = (NSData *)item;
                                               [shareConfirmationVC.shareItemController addItemWithContactData:contactData];
                                           }
                                       }];
+            }
+
+            if (!isHandled) {
+                [NCLog log:[NSString stringWithFormat:@"Share extension: attachment of unsupported type, registeredTypeIdentifiers: %@",
+                            [itemProvider.registeredTypeIdentifiers componentsJoinedByString:@", "]]];
             }
         }];
     }];
@@ -539,10 +600,18 @@
         shareConfirmationVC.delegate = (id<ShareConfirmationViewControllerDelegate>)_chatViewController;
         shareConfirmationVC.forwardingMessage = YES;
         [shareConfirmationVC shareText:_forwardMessage];
+    } else if (_forwardItems) {
+        shareConfirmationVC.delegate = (id<ShareConfirmationViewControllerDelegate>)_chatViewController;
+        shareConfirmationVC.forwardingMessage = YES;
+        [shareConfirmationVC shareForwardItems:_forwardItems skippedFiles:_forwardSkippedFiles];
     } else if (_forwardObjectShareMessage) {
         shareConfirmationVC.delegate = (id<ShareConfirmationViewControllerDelegate>)_chatViewController;
         shareConfirmationVC.forwardingMessage = YES;
         [shareConfirmationVC shareObjectShareMessage:_forwardObjectShareMessage];
+    } else if (_forwardFileMessage) {
+        shareConfirmationVC.delegate = (id<ShareConfirmationViewControllerDelegate>)_chatViewController;
+        shareConfirmationVC.forwardingMessage = YES;
+        [shareConfirmationVC shareFileMessage:_forwardFileMessage];
     } else {
         [self setSharedItemToShareConfirmationViewController:shareConfirmationVC];
     }

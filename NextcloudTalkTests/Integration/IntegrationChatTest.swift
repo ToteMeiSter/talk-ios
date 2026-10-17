@@ -281,7 +281,7 @@ final class IntegrationChatTest: TestBase {
 
         let exp = expectation(description: "\(#function)\(#line)")
         // Set read marker to a specific messageId
-        NCAPIController.sharedInstance().setChatReadMarker(message1.messageId, inRoom: room.token, forAccount: activeAccount) { error in
+        NCAPIController.sharedInstance().setChatReadMarker(message1.messageId, inRoom: room.token, forAccount: activeAccount) { error, _ in
             XCTAssertNil(error)
 
             // Check if the set ID is correctly reflected in rooms list

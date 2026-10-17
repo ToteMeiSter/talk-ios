@@ -346,6 +346,23 @@ import PassKit
         isPreviewControllerShown = false
     }
 
+    // MARK: - Media viewer
+
+    func presentMediaViewer(for message: NCChatMessage) {
+        guard let account = self.room.account else { return }
+
+        // Shared items are parsed without an account, but forwarding and "Show in chat" need the account of the message
+        let accountMessage = NCChatMessage(value: message)
+        accountMessage.accountId = account.accountId
+        accountMessage.internalId = "\(account.accountId)@\(self.room.token)@\(message.messageId)"
+
+        let mediaViewController = NCMediaViewerViewController(initialMessage: accountMessage, room: self.room, account: account)
+        mediaViewController.isOpenedFromSharedItems = true
+
+        let navController = CustomPresentableNavigationController(rootViewController: mediaViewController)
+        self.present(navController, interactiveDismissalType: .standard)
+    }
+
     // MARK: - Locations
 
     func presentLocation(location: GeoLocationRichObject) {
@@ -478,7 +495,9 @@ import PassKit
 
         switch currentItemType {
         case kSharedItemTypeMedia, kSharedItemTypeFile, kSharedItemTypeVoice, kSharedItemTypeAudio, kSharedItemTypeRecording:
-            if let file = message.file() {
+            if NCMediaViewerViewController.canDisplay(message) {
+                presentMediaViewer(for: message)
+            } else if let file = message.file() {
                 downloadFileForCell(cell: cell, file: file)
             }
         case kSharedItemTypeLocation:

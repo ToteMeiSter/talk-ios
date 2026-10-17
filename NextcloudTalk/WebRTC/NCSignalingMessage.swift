@@ -80,7 +80,7 @@ public class NCSignalingMessage: NSObject {
     public class func messageFromJSONString(_ jsonString: String) -> NCSignalingMessage? {
         guard let data = jsonString.data(using: .utf8),
               let values = (try? JSONSerialization.jsonObject(with: data)) as? [AnyHashable: Any] else {
-            NSLog("Error parsing signaling message JSON.")
+            NCLog.log("Error parsing signaling message JSON.")
             return nil
         }
 
@@ -110,7 +110,7 @@ public class NCSignalingMessage: NSObject {
         case MessageTypeValue.reaction:
             return NCReactionMessage(values: jsonDict)
         default:
-            NSLog("Unexpected type: \(typeString ?? "nil")")
+            NCLog.log("Unexpected type: \(typeString ?? "nil")")
             return nil
         }
     }
@@ -153,7 +153,7 @@ public class NCSignalingMessage: NSObject {
             }
         }
 
-        NSLog("Unexpected external signaling message: \(jsonDict)")
+        NCLog.log("Unexpected external signaling message of type \(data?[SignalingKey.type] as? String ?? "nil")")
         return nil
     }
 
@@ -179,7 +179,7 @@ public class NCSignalingMessage: NSObject {
     func functionJSONSerialization() -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: self.functionDict(), options: []),
               let string = String(data: data, encoding: .utf8) else {
-            NSLog("Error serializing JSON")
+            NCLog.log("Error serializing signaling message JSON")
             return ""
         }
 
