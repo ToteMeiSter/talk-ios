@@ -333,7 +333,11 @@ extension BaseChatViewController {
                 return ForwardItem(text: message.file()?.name ?? "", fileMessage: NCChatMessage(value: message))
             }
 
-            return ForwardItem(text: message.parsedMessage().string, richObject: message.isObjectShare ? message.richObjectFromObjectShare : nil)
+            if message.isObjectShare {
+                return ForwardItem(text: message.parsedMessage().string, richObject: message.richObjectFromObjectShare)
+            }
+
+            return ForwardItem(text: ForwardedNote.text(message.parsedMessage().string, author: ForwardedNote.author(of: message)))
         }
 
         self.didPressForward(items: items, skippedFiles: plan.skippedFiles)
