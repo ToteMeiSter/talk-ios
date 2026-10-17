@@ -109,7 +109,8 @@ final class UnitNCChatControllerChatBlockAtomicTest: TestBaseRealm {
         temporaryMessage.addObserver(observer, forKeyPath: "invalidated", options: [.new], context: nil)
         defer { if !temporaryMessage.isInvalidated { temporaryMessage.removeObserver(observer, forKeyPath: "invalidated") } }
 
-        chatController.handlePullResponse(messages: [serverCopy(referenceId: referenceId, inRoom: room)], lastKnownMessage: serverMessageId, lastCommonReadMessage: 0, error: nil, statusCode: 200, fromMessageId: 50, requestTimestamp: Int(Date().timeIntervalSince1970))
+        // Nothing newer than the server copy is stored, so no new-message notification touches the room
+        chatController.handlePullResponse(messages: [serverCopy(referenceId: referenceId, inRoom: room)], lastKnownMessage: serverMessageId, lastCommonReadMessage: 0, error: nil, statusCode: 200, fromMessageId: serverMessageId, requestTimestamp: Int(Date().timeIntervalSince1970))
 
         XCTAssertEqual(observer.deletionCount, 1, "The temporary message must be deleted while storing the server copy")
         let state = try XCTUnwrap(stateWhileStoring)
