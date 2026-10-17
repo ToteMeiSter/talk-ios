@@ -61,7 +61,7 @@ struct ForwardPlan: Equatable {
 }
 
 /// Runs asynchronous sends strictly one after the other: the next one starts when the previous one is done,
-/// so the messages arrive in the order of the list. Stops at the first error.
+/// so the messages arrive in the order of the list. Stops at the first error. A second answer for a send is ignored.
 enum SequentialSender {
 
     /// `completion` gets the number of sends that succeeded and the error that stopped the run, if any.
@@ -74,7 +74,13 @@ enum SequentialSender {
                 return
             }
 
+            var isDone = false
+
             one(items[index]) { error in
+                // A second answer for the same send must neither run the next send twice nor end the run twice
+                guard !isDone else { return }
+                isDone = true
+
                 if let error {
                     completion(index, error)
                 } else {

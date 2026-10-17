@@ -1274,6 +1274,10 @@ import Toast
         }
     }
 
+    func didPressForward(file message: NCChatMessage) {
+        self.present(shareViewController: ShareViewController(toForwardFile: NCChatMessage(value: message), fromChatViewController: self))
+    }
+
     func didPressForward(text: String) {
         self.present(shareViewController: ShareViewController(toForwardMessage: text, fromChatViewController: self))
     }
@@ -1773,7 +1777,12 @@ import Toast
     public func shareConfirmationViewControllerDidFail(_ viewController: ShareConfirmationViewController) {
         self.dismiss(animated: true) {
             if viewController.forwardingMessage {
-                NotificationPresenter.shared().present(text: NSLocalizedString("Failed to forward message", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                // Some of the messages are sent already, the user must know it to not send them twice
+                if viewController.forwardSentCount > 0 {
+                    NotificationPresenter.shared().present(text: String.localizedStringWithFormat(NSLocalizedString("Forwarded %1$ld of %2$ld messages", comment: "A forward of several messages stopped by an error, e.g. 'Forwarded 2 of 5 messages'"), viewController.forwardSentCount, viewController.forwardTotalCount), dismissAfterDelay: 5.0, includedStyle: .error)
+                } else {
+                    NotificationPresenter.shared().present(text: NSLocalizedString("Failed to forward message", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                }
             }
         }
     }

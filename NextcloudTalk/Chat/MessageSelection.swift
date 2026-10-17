@@ -99,8 +99,9 @@ struct MessageSelection {
     }
 
     /// The selected items of `items`, in the order of `items` (the messages of the chat from the oldest).
-    func selectedItems<T>(of items: [T], id: (T) -> Int) -> [T] {
-        return items.filter { self.selectedIds.contains(id($0)) }
+    /// An item that is not selectable anymore, e.g. a message deleted while it was selected, is left out.
+    func selectedItems<T>(of items: [T], id: (T) -> Int, isSelectable: (T) -> Bool = { _ in true }) -> [T] {
+        return items.filter { self.selectedIds.contains(id($0)) && isSelectable($0) }
     }
 
     /// One text for several messages to copy, one message per line.

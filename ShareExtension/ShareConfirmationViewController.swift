@@ -42,6 +42,10 @@ let kShareConfirmationMaxItems = 10
     /// Files of a forward of several messages that are not forwarded, to tell the user when it is done
     public private(set) var forwardSkippedFiles: Int = 0
 
+    /// How many of the messages of a forward of several messages are sent, and how many there are
+    public private(set) var forwardSentCount: Int = 0
+    public private(set) var forwardTotalCount: Int = 0
+
     public weak var delegate: ShareConfirmationViewControllerDelegate?
 
     /// Takes over sending the files, once they are compressed. Set by the chat in the app, which shows a message
@@ -892,6 +896,11 @@ let kShareConfirmationMaxItems = 10
     }
 
     func sendForwardItems() {
+        self.forwardTotalCount = self.forwardItems.count
+
+        // The run goes on while the app is in the background, e.g. a copy of a file takes a while
+        let bgTask = BGTaskHelper.startBackgroundTask(withName: "forwardItems")
+
         SequentialSender.send(self.forwardItems, one: { item, done in
             let task: URLSessionDataTask?
 
@@ -909,8 +918,11 @@ let kShareConfirmationMaxItems = 10
                 done(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
             }
         }, completion: { sent, error in
+            self.forwardSentCount = sent
+            bgTask.stopBackgroundTask()
+
             if let error {
-                NCLog.log(String(format: "Failed to forward messages. Sent: %ld of %ld. Error: %@", sent, self.forwardItems.count, error.localizedDescription))
+                NCLog.log("Failed to forward messages. Sent: \(sent) of \(self.forwardItems.count). Error: \(NCLog.errorCode(error))")
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
@@ -993,37 +1005,10 @@ let kShareConfirmationMaxItems = 10
 
         switch Self.forwardMethod(canBeShared: canShare) {
         case .share:
-            NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
-                if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
-                    completion(error)
-                } else {
-                    completion(nil)
-                }
-            }
+            self.performFileShare(atPath: path, canShare: canShare, metaData: metaData, completion: completion)
         case .copy:
 #if !APP_EXTENSION
-            ChatFileDownloader.shared.downloadFile(withFileId: fileMessage.file()?.parameterId ?? "", fromAccount: self.account) { result in
-                guard case .success(let fileStatus) = result, let localPath = fileStatus.fileLocalPath else {
-                    if case .failure(let error) = result {
-                        completion(error)
-                    } else {
-                        completion(NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist))
-                    }
-
-                    return
-                }
-
-                let upload = ChatFileUpload(localPath: localPath, fileName: fileStatus.fileName, room: self.room, account: self.account, metadata: metaData)
-
-                Task { @MainActor in
-                    do {
-                        try await ChatFileUploader.upload(upload, maxNetworkWait: Self.maxNetworkWait) { _ in }
-                        completion(nil)
-                    } catch {
-                        completion(error)
-                    }
-                }
-            }
+            self.performFileCopy(ofFileWithId: fileMessage.file()?.parameterId ?? "", metaData: metaData, progress: { _ in }, completion: completion)
 #else
             // Not reachable, see `forwardMethod`
             completion(NSError(domain: NSURLErrorDomain, code: NSURLErrorUnsupportedURL))
@@ -1051,9 +1036,8 @@ let kShareConfirmationMaxItems = 10
 
     /// Shares the file at the path of the author. A 403 is "already shared" and counts as sent.
     func shareFile(atPath path: String, canShare: Bool, metaData: ChatFileUploadMetadata) {
-        NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
-            if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
-                NCLog.log("Failed to share file. Error: \(NCLog.errorCode(error))")
+        self.performFileShare(atPath: path, canShare: canShare, metaData: metaData) { error in
+            if error != nil {
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
@@ -1061,6 +1045,18 @@ let kShareConfirmationMaxItems = 10
             }
 
             self.stopAnimatingSharingIndicator()
+        }
+    }
+
+    /// The share itself, for a single file and for the forward of several messages. The caller tells the end to the user.
+    private func performFileShare(atPath path: String, canShare: Bool, metaData: ChatFileUploadMetadata, completion: @escaping (Error?) -> Void) {
+        NCAPIController.sharedInstance().shareFileOrFolder(forAccount: self.account, atPath: path, toRoom: self.room.token, withTalkMetaData: metaData.asDictionary(), withReferenceId: nil) { error in
+            if let error, !NCAPIController.isAlreadyShared(error, canShare: canShare) {
+                NCLog.log("Failed to share file. Error: \(NCLog.errorCode(error))")
+                completion(error)
+            } else {
+                completion(nil)
+            }
         }
     }
 
@@ -1072,17 +1068,44 @@ let kShareConfirmationMaxItems = 10
     /// chat of the conversation it posts into (it adds the temporary message there), but this screen is for a
     /// conversation that has no chat open. It is the same way the share extension sends.
     func forwardCopy(ofFileWithId fileId: String, metaData: ChatFileUploadMetadata) {
+        self.hud = MBProgressHUD.showAdded(to: self.view, animated: true)
+        self.hud?.mode = .indeterminate
+        self.hud?.label.text = String.localizedStringWithFormat(NSLocalizedString("Uploading %ld elements", comment: ""), 1)
+
+        self.performFileCopy(ofFileWithId: fileId, metaData: metaData, progress: { [weak self] fractionCompleted in
+            DispatchQueue.main.async {
+                self?.hud?.mode = .annularDeterminate
+                self?.hud?.progress = Float(fractionCompleted)
+            }
+        }, completion: { error in
+            if let error {
+                self.hud?.hide(animated: true)
+
+                if error is FileCopyNotDownloaded {
+                    self.delegate?.shareConfirmationViewControllerDidFail(self)
+                    self.stopAnimatingSharingIndicator()
+                } else {
+                    self.finishUploads(withErrors: [self.message(for: error)], succeededItems: [])
+                }
+            } else {
+                NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
+                self.finishUploads(withErrors: [], succeededItems: [])
+            }
+        })
+    }
+
+    /// Why a copy ended before the upload: there is no file to upload
+    private struct FileCopyNotDownloaded: Error {}
+
+    /// The copy itself, for a single file and for the forward of several messages: downloads the file (or takes it
+    /// from the download cache) and uploads it. The caller tells the end to the user.
+    private func performFileCopy(ofFileWithId fileId: String, metaData: ChatFileUploadMetadata, progress: @escaping (Double) -> Void, completion: @escaping (Error?) -> Void) {
         guard !fileId.isEmpty else {
-            self.delegate?.shareConfirmationViewControllerDidFail(self)
-            self.stopAnimatingSharingIndicator()
+            completion(FileCopyNotDownloaded())
             return
         }
 
         let bgTask = BGTaskHelper.startBackgroundTask(withName: "forwardFileCopy")
-
-        self.hud = MBProgressHUD.showAdded(to: self.view, animated: true)
-        self.hud?.mode = .indeterminate
-        self.hud?.label.text = String.localizedStringWithFormat(NSLocalizedString("Uploading %ld elements", comment: ""), 1)
 
         ChatFileDownloader.shared.downloadFile(withFileId: fileId, fromAccount: self.account) { result in
             guard case .success(let fileStatus) = result, let localPath = fileStatus.fileLocalPath else {
@@ -1090,10 +1113,8 @@ let kShareConfirmationMaxItems = 10
                     NCLog.log("Failed to download the file to forward a copy. Error: \(NCLog.errorCode(error))")
                 }
 
-                self.hud?.hide(animated: true)
-                self.delegate?.shareConfirmationViewControllerDidFail(self)
-                self.stopAnimatingSharingIndicator()
                 bgTask.stopBackgroundTask()
+                completion(FileCopyNotDownloaded())
                 return
             }
 
@@ -1102,18 +1123,15 @@ let kShareConfirmationMaxItems = 10
             Task { @MainActor in
                 defer { bgTask.stopBackgroundTask() }
 
-                self.hud?.mode = .annularDeterminate
-
                 do {
                     try await ChatFileUploader.upload(upload, maxNetworkWait: Self.maxNetworkWait) { fractionCompleted in
-                        DispatchQueue.main.async { self.hud?.progress = Float(fractionCompleted) }
+                        progress(fractionCompleted)
                     }
 
-                    NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
-                    self.finishUploads(withErrors: [], succeededItems: [])
+                    completion(nil)
                 } catch {
                     NCLog.log("Failed to upload the copy of a file. Error: \(NCLog.errorCode(error))")
-                    self.finishUploads(withErrors: [self.message(for: error)], succeededItems: [])
+                    completion(error)
                 }
             }
         }
