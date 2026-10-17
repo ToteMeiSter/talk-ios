@@ -175,11 +175,26 @@ final class UnitMessageSelectionTest: TestBaseRealm {
         selection.begin(with: 1, isSelectable: true)
         selection.toggle(2, isSelectable: true)
 
-        selection.prune(keeping: [2, 3])
+        selection.prune(to: [2, 3], id: { $0 }, isSelectable: { _ in true })
         XCTAssertEqual(selection.selectedIds, [2])
         XCTAssertTrue(selection.isActive)
 
-        selection.prune(keeping: [3])
+        selection.prune(to: [3], id: { $0 }, isSelectable: { _ in true })
+        XCTAssertFalse(selection.isActive)
+        XCTAssertEqual(selection.count, 0)
+    }
+
+    func testMessageDeletedAfterItWasSelectedIsPrunedSoDeselectingTheLastLiveOneEndsTheMode() {
+        var selection = MessageSelection()
+        selection.begin(with: 1, isSelectable: true)
+        selection.toggle(2, isSelectable: true)
+
+        // Message 2 is still in the chat, but deleted now
+        let deleted: Set<Int> = [2]
+        selection.prune(to: [1, 2], id: { $0 }, isSelectable: { !deleted.contains($0) })
+        XCTAssertEqual(selection.selectedIds, [1])
+
+        selection.toggle(1, isSelectable: true)
         XCTAssertFalse(selection.isActive)
         XCTAssertEqual(selection.count, 0)
     }

@@ -354,6 +354,22 @@
 			<string>%4$ld others are typing…</string>
 		</dict>
 	</dict>
+	<key>Forwarded %1$ld of %2$ld messages</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Forwarded %1$ld of %2$#@messages@</string>
+		<key>messages</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%2$ld message</string>
+			<key>other</key>
+			<string>%2$ld messages</string>
+		</dict>
+	</dict>
 	<key>You added {user0} and %ld more participants</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>

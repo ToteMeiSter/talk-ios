@@ -245,7 +245,22 @@
 	<key>Forwarded %1$ld of %2$ld messages</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
-		<string>Переслано сообщений: %1$ld из %2$ld</string>
+		<string>Переслано %1$ld из %2$#@messages@</string>
+		<key>messages</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%2$ld сообщения</string>
+			<key>few</key>
+			<string>%2$ld сообщений</string>
+			<key>many</key>
+			<string>%2$ld сообщений</string>
+			<key>other</key>
+			<string>%2$ld сообщения</string>
+		</dict>
 	</dict>
 	<key>%ld files were not forwarded</key>
 	<dict>
