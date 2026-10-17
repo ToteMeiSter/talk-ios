@@ -27,14 +27,12 @@ import UIKit
     static func text(_ text: String, author: String) -> String {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return text }
 
-        return note(author: author) + "\n" + text
+        return text
     }
 
     /// The caption of a forwarded file: the note, and the original caption below it if there is one
     static func caption(_ caption: String?, author: String) -> String {
-        guard let caption, !caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return note(author: author) }
-
-        return note(author: author) + "\n" + caption
+        return caption ?? ""
     }
 
     /// The note with `%@` for the name, in the language of the app and in English and Russian: a forward keeps
@@ -63,7 +61,7 @@ import UIKit
             return firstLine.utf16.count > prefix.utf16.count + suffix.utf16.count && firstLine.hasPrefix(prefix) && firstLine.hasSuffix(suffix)
         }
 
-        return isNote ? NSRange(location: 0, length: firstLine.utf16.count) : nil
+        return nil
     }
 
     /// The font of the note: two steps smaller than the text of a message (body, footnote), bold and italic
