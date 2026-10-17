@@ -302,18 +302,29 @@ public class NCChatController: NSObject {
         }
     }
 
-    private func updateLastChatBlock(withNewestKnown newestKnown: Int) {
-        guard newestKnown > 0 else { return }
+    /// Stores `messages` and updates the chat blocks in ONE realm transaction. The blocks claim which messages are
+    /// stored, so a process killed between two separate transactions would leave a block covering messages that were
+    /// never saved, and they would never be requested again.
+    private func storeMessages(_ messages: [[String: Any]]?, updatingChatBlocksWith updateChatBlocks: (RLMRealm) -> Void) {
+        RLMRealm.writeTransaction { realm in
+            updateChatBlocks(realm)
 
-        RLMRealm.writeTransaction { _ in
-            let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
-            if let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock, newestKnown > lastBlock.newestMessageId {
-                lastBlock.newestMessageId = newestKnown
+            if let messages, !messages.isEmpty {
+                self.storeMessages(messages.map { $0 as [AnyHashable: Any] }, with: realm)
             }
         }
     }
 
-    private func updateChatBlocks(withLastKnown lastKnown: Int) {
+    private func updateLastChatBlock(withNewestKnown newestKnown: Int) {
+        guard newestKnown > 0 else { return }
+
+        let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
+        if let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock, newestKnown > lastBlock.newestMessageId {
+            lastBlock.newestMessageId = newestKnown
+        }
+    }
+
+    private func updateChatBlocks(withLastKnown lastKnown: Int, with realm: RLMRealm) {
         if lastKnown <= 0 {
             return
         }
@@ -321,96 +332,92 @@ public class NCChatController: NSObject {
         // Safety check: prevent storing a messageId older than the thread's first message as block's oldestMessageId when in a thread controller
         let oldestMessageKnown = (isThreadController && lastKnown < threadId) ? threadId : lastKnown
 
-        RLMRealm.writeTransaction { realm in
-            let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
-            guard let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock else { return }
+        let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
+        guard let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock else { return }
 
-            let count = Int(managedSortedBlocks.count)
-            // There is more than one chat block stored
-            if count > 1 {
-                var index = count - 2
-                while index >= 0 {
-                    guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
-                        index -= 1
-                        continue
-                    }
-
-                    // Merge blocks if the lastKnown message is inside the current block
-                    if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
-                        lastBlock.oldestMessageId = block.oldestMessageId
-                        realm.delete(block)
-                        break
-                    // Update lastBlock if the lastKnown message is between the 2 blocks
-                    } else if lastKnown > block.newestMessageId {
-                        lastBlock.oldestMessageId = oldestMessageKnown
-                        break
-                    // The current block is completely included in the retrieved history
-                    // This could happen if we vary the message limit when fetching messages
-                    // Delete included block
-                    } else if lastKnown < block.oldestMessageId {
-                        realm.delete(block)
-                    }
-
+        let count = Int(managedSortedBlocks.count)
+        // There is more than one chat block stored
+        if count > 1 {
+            var index = count - 2
+            while index >= 0 {
+                guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
                     index -= 1
+                    continue
                 }
-            // There is just one chat block stored
-            } else {
-                lastBlock.oldestMessageId = oldestMessageKnown
+
+                // Merge blocks if the lastKnown message is inside the current block
+                if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
+                    lastBlock.oldestMessageId = block.oldestMessageId
+                    realm.delete(block)
+                    break
+                // Update lastBlock if the lastKnown message is between the 2 blocks
+                } else if lastKnown > block.newestMessageId {
+                    lastBlock.oldestMessageId = oldestMessageKnown
+                    break
+                // The current block is completely included in the retrieved history
+                // This could happen if we vary the message limit when fetching messages
+                // Delete included block
+                } else if lastKnown < block.oldestMessageId {
+                    realm.delete(block)
+                }
+
+                index -= 1
             }
+        // There is just one chat block stored
+        } else {
+            lastBlock.oldestMessageId = oldestMessageKnown
         }
     }
 
-    private func updateChatBlocks(withReceivedMessages messages: [[String: Any]]?, newestKnown: Int, andLastKnown lastKnown: Int) {
+    private func updateChatBlocks(withReceivedMessages messages: [[String: Any]]?, newestKnown: Int, andLastKnown lastKnown: Int, with realm: RLMRealm) {
         let sortedMessages = sortedMessages(fromMessageArray: messages)
         let newestMessageReceived = sortedMessages.last
         let newestMessageKnown = newestKnown > 0 ? newestKnown : (newestMessageReceived?.messageId ?? 0)
         // Safety check: prevent storing a messageId older than the thread's first message as block's oldestMessageId when in a thread controller
         let oldestMessageKnown = (isThreadController && lastKnown < threadId) ? threadId : lastKnown
 
-        RLMRealm.writeTransaction { realm in
-            let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
+        let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
 
-            // Create new chat block
-            let newBlock = NCChatBlock()
-            newBlock.internalId = self.room.internalId
-            newBlock.accountId = self.room.accountId
-            newBlock.token = self.room.token
-            newBlock.threadId = self.threadId
-            newBlock.oldestMessageId = oldestMessageKnown
-            newBlock.newestMessageId = newestMessageKnown
-            newBlock.hasHistory = true
+        // Create new chat block
+        let newBlock = NCChatBlock()
+        newBlock.internalId = self.room.internalId
+        newBlock.accountId = self.room.accountId
+        newBlock.token = self.room.token
+        newBlock.threadId = self.threadId
+        newBlock.oldestMessageId = oldestMessageKnown
+        newBlock.newestMessageId = newestMessageKnown
+        newBlock.hasHistory = true
 
-            let count = Int(managedSortedBlocks.count)
-            // There is at least one chat block stored
-            if count > 0 {
-                var index = count - 1
-                while index >= 0 {
-                    guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
-                        index -= 1
-                        continue
-                    }
-
-                    // Merge blocks if the lastKnown message is inside the current block
-                    if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
-                        block.newestMessageId = newestMessageKnown
-                        break
-                    // Add new block if it didn't reach the previous block
-                    } else if lastKnown > block.newestMessageId {
-                        realm.add(newBlock)
-                        break
-                    // The current block is completely included in the retrieved history
-                    // This could happen if we vary the message limit when fetching messages
-                    // Delete included block
-                    } else if lastKnown < block.oldestMessageId {
-                        realm.delete(block)
-                    }
-
+        let count = Int(managedSortedBlocks.count)
+        // There is at least one chat block stored
+        if count > 0 {
+            var index = count - 1
+            while index >= 0 {
+                guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
                     index -= 1
+                    continue
                 }
-            // No chat blocks stored yet, add new chat block
-            } else {
-                realm.add(newBlock)
+
+                // Merge blocks if the lastKnown message is inside the current block
+                if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
+                    block.newestMessageId = newestMessageKnown
+                    break
+                // Add new block if it didn't reach the previous block
+                } else if lastKnown > block.newestMessageId {
+                    realm.add(newBlock)
+                    break
+                // The current block is completely included in the retrieved history
+                // This could happen if we vary the message limit when fetching messages
+                // Delete included block
+                } else if lastKnown < block.oldestMessageId {
+                    realm.delete(block)
+                }
+
+                index -= 1
             }
+        // No chat blocks stored yet, add new chat block
+        } else {
+            realm.add(newBlock)
         }
     }
 
@@ -667,8 +674,9 @@ public class NCChatController: NSObject {
     // the reaction relay paths funnel through here so the chat block, the stored message, the new-message
     // notification and the read marker stay in sync.
     private func storeRelayMessage(_ message: NCChatMessage, storableDict: [String: Any], lastNewestMessageId: Int) {
-        updateLastChatBlock(withNewestKnown: message.messageId)
-        storeMessages([storableDict])
+        storeMessages([storableDict], updatingChatBlocksWith: { _ in
+            self.updateLastChatBlock(withNewestKnown: message.messageId)
+        })
         checkForNewMessages(fromMessageId: lastNewestMessageId)
 
         // We only reach this point while the chat relay is active (these methods are only called in the
@@ -953,10 +961,7 @@ public class NCChatController: NSObject {
             if let error {
                 NSLog("Could not get background chat history. Error: \(error.description)")
             } else {
-                // Update chat blocks
-                self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
-
-                // Store new messages
+                // Update chat blocks and store new messages in one transaction
                 if let messages, !messages.isEmpty {
                     // In case we finish after the app already got active again, notify any potential view controller
                     var userInfo: [AnyHashable: Any] = [:]
@@ -974,10 +979,16 @@ public class NCChatController: NSObject {
                         }
                     }
 
-                    self.storeMessages(messages)
+                    self.storeMessages(messages, updatingChatBlocksWith: { _ in
+                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+                    })
                     self.checkLastCommonReadMessage(lastCommonReadMessage)
 
                     NotificationCenter.default.post(name: .NCChatControllerDidReceiveMessagesInBackground, object: self, userInfo: userInfo)
+                } else {
+                    self.storeMessages(nil, updatingChatBlocksWith: { _ in
+                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+                    })
                 }
             }
 
@@ -1223,16 +1234,16 @@ public class NCChatController: NSObject {
             // Update chat blocks
             // Only store a new block when getting initial history and we are in the first iteration.
             // Otherwise, only update the chat blocks with history messages ("backwards").
-            if forInitialChatHistory, isFirstIteration {
-                self.updateChatBlocks(withReceivedMessages: messages, newestKnown: messageId, andLastKnown: lastKnownMessage)
-            } else {
-                self.updateChatBlocks(withLastKnown: lastKnownMessage)
-            }
+            // The blocks and the new messages are written in one transaction
+            self.storeMessages(messages, updatingChatBlocksWith: { realm in
+                if forInitialChatHistory, isFirstIteration {
+                    self.updateChatBlocks(withReceivedMessages: messages, newestKnown: messageId, andLastKnown: lastKnownMessage, with: realm)
+                } else {
+                    self.updateChatBlocks(withLastKnown: lastKnownMessage, with: realm)
+                }
+            })
 
-            // Store new messages
             if let messages, !messages.isEmpty {
-                self.storeMessages(messages)
-
                 let lastChatBlock = self.chatBlocksForRoomOrThread().last
                 // For initial chat history: always get batch from last chat block's newest message, even if it's not the first iteration.
                 // For history batch: get batch from the passed messageId. If it's not the first iteration, we will just skip invisible messages
@@ -1351,12 +1362,12 @@ public class NCChatController: NSObject {
                 NCLog.log("Could not get new chat messages. Error: \(NCLog.errorCode(error))")
             }
         } else {
-            // Update last chat block
-            self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+            // Update last chat block and store new messages in one transaction
+            self.storeMessages(messages, updatingChatBlocksWith: { _ in
+                self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+            })
 
-            // Store new messages
             if let messages, !messages.isEmpty {
-                self.storeMessages(messages)
                 self.checkForNewMessages(fromMessageId: messageId)
 
                 for messageDict in messages {
