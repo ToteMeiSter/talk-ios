@@ -242,6 +242,11 @@
 			<string>ответов: %ld</string>
 		</dict>
 	</dict>
+	<key>Forwarded %1$ld of %2$ld messages</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>Переслано сообщений: %1$ld из %2$ld</string>
+	</dict>
 	<key>%ld files were not forwarded</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>

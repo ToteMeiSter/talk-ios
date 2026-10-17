@@ -188,7 +188,7 @@ extension BaseChatViewController {
 
         self.messageSelection.prune(keeping: Set(allMessages.map { $0.messageId }))
 
-        return self.messageSelection.selectedItems(of: allMessages, id: { $0.messageId })
+        return self.messageSelection.selectedItems(of: allMessages, id: { $0.messageId }, isSelectable: { self.canSelect($0) })
     }
 
     private func updateSelectionUI() {
@@ -316,8 +316,14 @@ extension BaseChatViewController {
 
         self.endSelectionMode()
 
-        if selectedMessages.count == 1, let message = selectedMessages.first, self.forwardKind(of: message) != .file {
-            self.didPressForward(for: message)
+        // One message goes the way of its menu (a file the way of the media viewer)
+        if selectedMessages.count == 1, let message = selectedMessages.first {
+            if self.forwardKind(of: message) == .file {
+                self.didPressForward(file: message)
+            } else {
+                self.didPressForward(for: message)
+            }
+
             return
         }
 

@@ -19,14 +19,6 @@ final class UnitMessageSelectionTest: TestBaseRealm {
         XCTAssertEqual(ChatRowZone.zone(at: CGPoint(x: 100, y: 10), interactiveFrames: [bubble, avatar]), .content, "The edge belongs to the bubble")
     }
 
-    // The reactions are part of the bubble, so a tap or long press on them keeps what it did
-    func testTouchOnTheReactionsInsideTheBubbleIsContent() {
-        let reactions = CGRect(x: 110, y: 50, width: 80, height: 20)
-
-        XCTAssertTrue(bubble.contains(reactions))
-        XCTAssertEqual(ChatRowZone.zone(at: CGPoint(x: reactions.midX, y: reactions.midY), interactiveFrames: [bubble, avatar]), .content)
-    }
-
     func testTouchOnTheAvatarIsContent() {
         XCTAssertEqual(ChatRowZone.zone(at: CGPoint(x: 20, y: 20), interactiveFrames: [bubble, avatar]), .content)
     }
@@ -40,11 +32,11 @@ final class UnitMessageSelectionTest: TestBaseRealm {
     }
 
     // The frames come from a real cell: own messages are on the right and have no avatar, the others have one
-    private func cell(isOwnMessage: Bool) throws -> BaseChatTableViewCell {
+    private func cell(isOwnMessage: Bool, reactions: [String: Int]? = nil) throws -> BaseChatTableViewCell {
         let account = NCDatabaseManager.sharedInstance().activeAccount()
         let room = NCRoom(value: self.addRoom(withToken: "token", withName: "Room"))
 
-        let dict: [String: Any] = [
+        var dict: [String: Any] = [
             "id": 1,
             "token": "token",
             "message": "Hello",
@@ -53,6 +45,10 @@ final class UnitMessageSelectionTest: TestBaseRealm {
             "actorId": isOwnMessage ? account.userId : "someone-else",
             "actorType": "users"
         ]
+
+        if let reactions {
+            dict["reactions"] = reactions
+        }
 
         let message = try XCTUnwrap(NCChatMessage(dictionary: dict, andAccountId: account.accountId))
         let cell = try XCTUnwrap(UINib(nibName: BaseChatTableViewCell.nibName, bundle: nil)
@@ -73,6 +69,17 @@ final class UnitMessageSelectionTest: TestBaseRealm {
         XCTAssertTrue(frames.contains(bubbleFrame))
         XCTAssertEqual(ChatRowZone.zone(at: CGPoint(x: bubbleFrame.midX, y: bubbleFrame.midY), interactiveFrames: frames), .content)
         XCTAssertEqual(ChatRowZone.zone(at: CGPoint(x: 5, y: bubbleFrame.midY), interactiveFrames: frames), .empty)
+    }
+
+    // The reactions are part of the bubble, so a tap or long press on them keeps what it did
+    func testReactionsOfARealCellLieInsideTheBubbleAndAreContent() throws {
+        let cell = try cell(isOwnMessage: true, reactions: ["👍": 2])
+        let bubbleFrame = cell.convert(cell.bubbleStackView.bounds, from: cell.bubbleStackView)
+        let reactionsFrame = cell.convert(cell.reactionPart.bounds, from: cell.reactionPart)
+
+        XCTAssertFalse(cell.reactionPart.isHidden)
+        XCTAssertTrue(bubbleFrame.contains(reactionsFrame), "The reactions are inside of the bubble")
+        XCTAssertEqual(ChatRowZone.zone(at: CGPoint(x: reactionsFrame.midX, y: reactionsFrame.midY), interactiveFrames: cell.interactiveFrames()), .content)
     }
 
     func testCellOfOtherMessageHasEmptyZoneRightOfTheBubbleAndAvatarIsContent() throws {
@@ -307,6 +314,66 @@ final class UnitMessageSelectionTest: TestBaseRealm {
         let selected = selection.selectedItems(of: chat, id: { $0.id })
 
         XCTAssertEqual(selected.map { $0.text }, ["first", "second", "third"])
+    }
+
+    // A message deleted while it was selected must not be forwarded or copied as "Message deleted"
+    func testMessageDeletedAfterItWasSelectedIsLeftOut() {
+        var selection = MessageSelection()
+        selection.begin(with: 10, isSelectable: true)
+        selection.toggle(20, isSelectable: true)
+
+        var chat = [(id: 10, text: "first", isDeleted: false), (id: 20, text: "second", isDeleted: false)]
+        let isSelectable: ((id: Int, text: String, isDeleted: Bool)) -> Bool = {
+            MessageSelection.isSelectable(messageId: $0.id, isSystemMessage: false, isDeletedMessage: $0.isDeleted)
+        }
+
+        XCTAssertEqual(selection.selectedItems(of: chat, id: { $0.id }, isSelectable: isSelectable).map { $0.id }, [10, 20])
+
+        chat[1].isDeleted = true
+
+        XCTAssertEqual(selection.selectedItems(of: chat, id: { $0.id }, isSelectable: isSelectable).map { $0.id }, [10])
+    }
+
+    // MARK: - Second answer of a send
+
+    func testSenderIgnoresASecondAnswerOfTheSameSend() {
+        var started: [Int] = []
+        var finishers: [(Error?) -> Void] = []
+        var results: [(sent: Int, error: Error?)] = []
+
+        SequentialSender.send([1, 2], one: { item, done in
+            started.append(item)
+            finishers.append(done)
+        }, completion: { sent, error in
+            results.append((sent, error))
+        })
+
+        finishers[0](nil)
+        finishers[0](nil)
+        finishers[0](NSError(domain: "test", code: 1))
+
+        XCTAssertEqual(started, [1, 2], "The second send starts once")
+        XCTAssertTrue(results.isEmpty)
+
+        finishers[1](nil)
+        finishers[1](NSError(domain: "test", code: 1))
+
+        XCTAssertEqual(results.count, 1, "The run ends once")
+        XCTAssertEqual(results.first?.sent, 2)
+        XCTAssertNil(results.first?.error)
+    }
+
+    func testSenderCountsTheSentMessagesWhenALaterOneFails() {
+        var result: (sent: Int, error: Error?)?
+
+        SequentialSender.send([1, 2, 3, 4, 5], one: { item, done in
+            done(item == 3 ? NSError(domain: "test", code: 1) : nil)
+        }, completion: { sent, error in
+            result = (sent, error)
+        })
+
+        XCTAssertEqual(result?.sent, 2, "Two messages are out already, the user is told")
+        XCTAssertNotNil(result?.error)
     }
 
     func testTextOfSeveralMessagesIsOneMessagePerLine() {
