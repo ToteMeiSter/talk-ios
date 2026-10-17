@@ -537,8 +537,8 @@ let kShareConfirmationMaxItems = 10
             // What is forwarded is what is shown: the name of the file and its caption, if there is one
             var text = fileMessage.file()?.name ?? ""
 
-            if let caption = self.forwardedCaption(of: fileMessage) {
-                text += "\n\n" + (fileMessage.sendingMessageWithDisplayNames ?? caption)
+            if let caption = self.forwardedCaption(of: fileMessage, withDisplayNames: true) {
+                text += "\n\n" + caption
             }
 
             self.shareTextView.text = text
@@ -563,15 +563,19 @@ let kShareConfirmationMaxItems = 10
         }
     }
 
-    /// The caption of a file message, only when the server can send one along with a shared file
-    private func forwardedCaption(of fileMessage: NCChatMessage) -> String? {
-        guard fileMessage.message != "{file}",
-              NCDatabaseManager.sharedInstance().serverHasTalkCapability(.mediaCaption, forAccountId: self.account.accountId)
+    /// The caption of a forwarded file message: the note of the author and the caption of the message, if there is
+    /// one. Only when the server can send a caption along with a shared file. `withDisplayNames` is for the screen.
+    private func forwardedCaption(of fileMessage: NCChatMessage, withDisplayNames: Bool = false) -> String? {
+        guard NCDatabaseManager.sharedInstance().serverHasTalkCapability(.mediaCaption, forAccountId: self.account.accountId)
         else { return nil }
 
-        let caption = fileMessage.sendingMessage
+        var caption: String?
 
-        return caption.isEmpty ? nil : caption
+        if fileMessage.message != "{file}" {
+            caption = withDisplayNames ? (fileMessage.sendingMessageWithDisplayNames ?? fileMessage.sendingMessage) : fileMessage.sendingMessage
+        }
+
+        return ForwardedNote.caption(caption, author: ForwardedNote.author(of: fileMessage))
     }
 
     // MARK: - View lifecycle

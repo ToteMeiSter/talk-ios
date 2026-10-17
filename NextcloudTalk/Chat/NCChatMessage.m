@@ -430,10 +430,10 @@ NSString * const kSharedItemTypePinned      = @"pinned";
     }
 
     if (!self.isMarkdownMessage) {
-        return parsedMessage;
+        return [NCForwardedNote styleNoteIn:parsedMessage];
     }
 
-    _parsedMarkdownForChat = [SwiftMarkdownObjCBridge parseMarkdownWithMarkdownString:parsedMessage];
+    _parsedMarkdownForChat = [NCForwardedNote styleNoteIn:[SwiftMarkdownObjCBridge parseMarkdownWithMarkdownString:parsedMessage]];
 
     return _parsedMarkdownForChat;
 }

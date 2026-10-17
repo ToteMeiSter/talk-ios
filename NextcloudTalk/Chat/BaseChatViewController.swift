@@ -1270,7 +1270,7 @@ import Toast
         if message.isObjectShare {
             self.present(shareViewController: ShareViewController(toForwardObjectShare: message, fromChatViewController: self))
         } else {
-            self.didPressForward(text: message.parsedMessage().string)
+            self.didPressForward(text: ForwardedNote.text(message.parsedMessage().string, author: ForwardedNote.author(of: message)))
         }
     }
 
