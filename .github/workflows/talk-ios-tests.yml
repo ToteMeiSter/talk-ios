@@ -110,7 +110,7 @@ jobs:
       matrix:
         # Fork develop PRs test the newest stable server; other PRs retain the full matrix.
         configs: >-
-          [{"serverbranch":"stable35","talkbranch":"stable35","notificationsbranch":"stable35","phpversion":"8.3"}]
+          ${{ fromJSON('[{"serverbranch":"stable35","talkbranch":"stable35","notificationsbranch":"stable35","phpversion":"8.3"}]') }}
 
     steps:
       # Workaround for eliminating iOS 17 simulators stalling issue
