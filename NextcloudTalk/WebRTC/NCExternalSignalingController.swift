@@ -271,11 +271,6 @@ public enum NCExternalSignalingSendMessageStatus {
     }
 
     func resetWebSocket() {
-        // The server expires the session 30s after the first connection loss, failed reconnect attempts don't extend that
-        if self.disconnectTime == nil {
-            self.disconnectTime = Date().timeIntervalSince1970
-        }
-
         self.webSocket?.cancel()
         self.webSocket = nil
         self.helloResponseReceived = false
@@ -410,7 +405,6 @@ public enum NCExternalSignalingSendMessageStatus {
         }
 
         self.resumeId = helloDict["resumeid"] as? String
-        self.disconnectTime = nil
 
         // We are connected again, the next connection loss starts a new resume window
         DispatchQueue.main.async {

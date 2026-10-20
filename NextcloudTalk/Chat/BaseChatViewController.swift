@@ -621,6 +621,7 @@ import Toast
                                          isVoiceMessage: Bool,
                                          isFileMessage: Bool = false,
                                          caption: String? = nil,
+                                         referenceId presetReferenceId: String? = nil,
                                          filePathForReferenceId: ((String) -> String)? = nil) -> NCChatMessage? {
         let temporaryMessage = NCChatMessage()
 
@@ -635,7 +636,8 @@ import Toast
 
         // The reference id is the key of a stored upload, so two messages must never get the same one
         let referenceId = "temp-\(Date().timeIntervalSince1970 * 1000)-\(UUID().uuidString)"
-        let hashedReferenceId = NCUtils.sha1(fromString: referenceId)
+        // Files shared together keep the reference id of their upload, the others are grouped by it
+        let hashedReferenceId = presetReferenceId ?? NCUtils.sha1(fromString: referenceId)
         temporaryMessage.referenceId = hashedReferenceId
         temporaryMessage.internalId = referenceId
         temporaryMessage.isTemporary = true
@@ -2460,6 +2462,7 @@ import Toast
                                                                      isVoiceMessage: false,
                                                                      isFileMessage: true,
                                                                      caption: upload.metadata.caption,
+                                                                     referenceId: upload.referenceId,
                                                                      filePathForReferenceId: { ChatBackgroundUploader.shared.store.plannedFileURL(forId: $0, sourceURL: sourceURL).path })
             else { continue }
 
