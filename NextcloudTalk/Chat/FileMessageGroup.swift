@@ -79,7 +79,18 @@ struct FileMessageGroup {
     /// picking it picks every file of its upload. Each group stands where its first selected message was, its
     /// files in the order of the upload, and the other messages keep their order.
     static func expandingSelection(_ selected: [NCChatMessage], in groups: [Int: FileMessageGroup], hiddenMessageIds: [Int: Int]) -> [NCChatMessage] {
-        return selected
+        var expanded: [NCChatMessage] = []
+        var addedIds = Set<Int>()
+
+        for message in selected {
+            let members = Self.group(of: message, in: groups, hiddenMessageIds: hiddenMessageIds)?.messagesInUploadOrder ?? [message]
+
+            for member in members where addedIds.insert(member.messageId).inserted {
+                expanded.append(member)
+            }
+        }
+
+        return expanded
     }
 
     /// Position within the upload is deliberately not compared: a file that failed to upload leaves
