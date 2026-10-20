@@ -95,6 +95,9 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // Replaces the lookup of the external signaling controller after a join, tests have no signaling server
     internal var externalSignalingRequest: ((TalkAccount, String, @escaping (NCExternalSignalingController?, SignalingSettings?, Error?) -> Void) -> Void)?
 
+    // How long a join waits for the answer of the external signaling server, replaceable in tests
+    internal var externalSignalingJoinTimeout: TimeInterval = 20
+
     private var joiningRoomToken: String?
     private var joiningIntent: JoinIntent?
     private var leavingRoomTokens = Set<String>()
