@@ -160,6 +160,20 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         XCTAssertEqual(events.last, "join roomA")
     }
 
+    func testJoinIsNotBlockedWhenNoExitRequestWasMade() {
+        activate("roomA")
+        manager.exitRoomRequest = { [unowned self] token, _, _ in
+            self.events.append("exit \(token)")
+            return nil
+        }
+
+        leave("roomA")
+        join("roomA")
+
+        // Nothing answers a request which was not made, so nothing may wait for it
+        XCTAssertEqual(events, ["exit roomA", "join roomA"])
+    }
+
     func testJoinAfterFinishedExitStartsImmediately() {
         activate("roomA")
 

@@ -1216,13 +1216,17 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         NCLog.log("Joining room \(token) for call \(call)")
 
         // Clean up joining room flag and attempts. A newer join replaces a join which waits for an exit
-        self.pendingJoin = nil
+        if let pendingJoin = self.pendingJoin {
+            NCLog.log("Dropping the join of room \(pendingJoin.token), which waited for an exit")
+            self.pendingJoin = nil
+        }
+
         self.joiningRoomToken = nil
         self.joiningSessionId = nil
         self.joiningAttempts = 0
         self.joinRoomTask?.cancel()
 
-        // The exit request can't be called back: if it was already sent, the server handles it after our join and would
+        // The exit request can't be revoked: if it was already sent, the server handles it after our join and would
         // end the new session. So wait until the exit has finished and join then
         if self.isLeavingRoom(withToken: token) {
             NCLog.log("Room \(token) is still being left, joining after the exit finished")
@@ -1333,6 +1337,12 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         let task = self.exitRoomRequest(token, account) { error in
             self.leavingRoomTokens.remove(token)
             completionBlock(error)
+
+            if self.leavingRoomTokens.isEmpty {
+                // A call can wait for every exit, not only for the ones of leaveRoom
+                self.checkForPendingToStartCalls()
+            }
+
             self.startPendingJoin(forToken: token)
         }
 
