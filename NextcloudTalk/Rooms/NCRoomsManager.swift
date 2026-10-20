@@ -36,17 +36,63 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private static let statusCodeShouldIgnoreAttemptButJoinedSuccessfully = 998
     private static let statusCodeIgnoreJoinAttempt = 999
 
+    // Who needs the joined room: the chat, the call, or both. The room is left only when nobody needs it any more
+    private struct JoinIntent {
+        let accountId: String
+        var call: Bool
+        var chat: Bool
+
+        mutating func merge(_ other: JoinIntent) {
+            call = call || other.call
+            chat = chat || other.chat
+        }
+
+        mutating func release(call releasedCall: Bool) {
+            if releasedCall {
+                call = false
+            } else {
+                chat = false
+            }
+        }
+
+        var isInUse: Bool {
+            return call || chat
+        }
+    }
+
+    // A join of a room whose exit is still running. It starts as soon as the exit has finished
+    private struct PendingJoin {
+        let token: String
+        var intent: JoinIntent
+    }
+
     public var chatViewController: ChatViewController?
     public var callViewController: CallViewController?
 
     internal var activeRooms = [RoomToken: NCRoomController]()
     internal var joiningAttempts: Int = 0
 
+    // The requests to the server, replaceable in tests
+    internal var exitRoomRequest: (String, TalkAccount, @escaping (OcsError?) -> Void) -> URLSessionTask? = { token, account, completionBlock in
+        NCAPIController.sharedInstance().exitRoom(token, forAccount: account, completionBlock: completionBlock)
+    }
+
+    internal var joinRoomRequest: (String, TalkAccount, @escaping (String?, NCRoom?, OcsError?, Int, String?) -> Void) -> URLSessionTask? = { token, account, completionBlock in
+        NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: completionBlock)
+    }
+
+    // Replaces the lookup of the external signaling controller after a join, tests have no signaling server
+    internal var externalSignalingRequest: ((TalkAccount, String, @escaping (NCExternalSignalingController?, SignalingSettings?, Error?) -> Void) -> Void)?
+
     private var joiningRoomToken: String?
-    private var leavingRoomToken: String?
+    private var joiningIntent: JoinIntent?
+    private var leavingRoomTokens = Set<String>()
     private var joiningSessionId: String?
     private var joinRoomTask: URLSessionTask?
-    private var leaveRoomTask: URLSessionTask?
+    // A re-join of a call has its own state: it runs next to the join of another room
+    private var rejoiningRoomToken: String?
+    private var rejoinTask: URLSessionTask?
+    private var pendingJoin: PendingJoin?
     private var upgradeCallToken: String?
     private var upgradeCallAccountId: String?
     private var pendingToStartCallToken: String?
@@ -539,7 +585,21 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
     public func leaveChat(inRoom token: String, forAccount account: TalkAccount) {
         self.activeRooms[token]?.inChat = false
-        self.leaveRoom(token, forAccount: account)
+        self.endUse(ofRoom: token, call: false)
+        self.leaveRoom(token, forAccount: account, keepingJoinForOtherUse: true)
+    }
+
+    /// The chat or the call stops using a room. A join which waits or runs also for the other use goes on without it
+    private func endUse(ofRoom token: String, call: Bool) {
+        if var pendingJoin = self.pendingJoin, pendingJoin.token == token {
+            pendingJoin.intent.release(call: call)
+            self.pendingJoin = pendingJoin
+        }
+
+        if self.isJoiningRoom(withToken: token), var joiningIntent = self.joiningIntent {
+            joiningIntent.release(call: call)
+            self.joiningIntent = joiningIntent
+        }
     }
 
     // MARK: - Call
@@ -674,7 +734,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         if self.activeRooms[token] != nil {
             self.activeRooms.removeValue(forKey: token)
-            NCAPIController.sharedInstance().exitRoom(token, forAccount: activeAccount) { error in
+            self.exitRoomTracked(token, forAccount: activeAccount) { error in
                 completionBlock(error)
             }
         } else {
@@ -718,7 +778,8 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         self.callViewController = nil
         self.activeRooms[roomToken]?.inCall = false
-        self.leaveRoom(roomToken, forAccount: account)
+        self.endUse(ofRoom: roomToken, call: true)
+        self.leaveRoom(roomToken, forAccount: account, keepingJoinForOtherUse: true)
 
         CallKitManager.sharedInstance().endCall(roomToken, withStatusCode: 0)
 
@@ -778,7 +839,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         let activeCalls = self.areThereActiveCalls
 
-        if !waitForcallEnd || (!activeCalls && leaveRoomTask == nil) {
+        if !waitForcallEnd || (!activeCalls && leavingRoomTokens.isEmpty) {
             // Calls that have been answered start with video disabled by default, in voice chat mode and silently (without notification).
             self.startCall(withToken: roomToken, withAccountId: accountId, withVideo: hasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true)
         } else {
@@ -940,24 +1001,51 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     public func joinRoom(_ token: String, forAccountId accountId: String, forCall call: Bool) {
         NCLog.log("Joining room \(token) for call \(call)")
 
-        // Clean up joining room flag and attempts
+        let intent = JoinIntent(accountId: accountId, call: call, chat: !call)
+
+        // A second join of the same room must not replace the first one, the room is needed for both. So the join
+        // which waits for an exit or runs already gets the flag of the second one and a single session serves both
+        if var pendingJoin = self.pendingJoin, pendingJoin.token == token, pendingJoin.intent.accountId == accountId {
+            NCLog.log("Room \(token) is already waiting to be joined, adding the new use to it")
+
+            pendingJoin.intent.merge(intent)
+            self.pendingJoin = pendingJoin
+            return
+        }
+
+        if self.isJoiningRoom(withToken: token), var joiningIntent = self.joiningIntent, joiningIntent.accountId == accountId {
+            NCLog.log("Room \(token) is already being joined, adding the new use to it")
+
+            joiningIntent.merge(intent)
+            self.joiningIntent = joiningIntent
+            return
+        }
+
+        // Clean up joining room flag and attempts. A newer join replaces a join which waits for an exit
+        if let pendingJoin = self.pendingJoin {
+            NCLog.log("Dropping the join of room \(pendingJoin.token), which waited for an exit")
+            self.pendingJoin = nil
+        }
+
         self.joiningRoomToken = nil
+        self.joiningIntent = nil
         self.joiningSessionId = nil
         self.joiningAttempts = 0
         self.joinRoomTask?.cancel()
 
-        // Check if we try to join a room, we're still trying to leave
+        // The exit request can't be revoked: if it was already sent, the server handles it after our join and would
+        // end the new session. So wait until the exit has finished and join then
         if self.isLeavingRoom(withToken: token) {
-            self.leaveRoomTask?.cancel()
+            NCLog.log("Room \(token) is still being left, joining after the exit finished")
 
-            self.leaveRoomTask = nil
-            self.leavingRoomToken = nil
+            self.pendingJoin = PendingJoin(token: token, intent: intent)
+            return
         }
 
-        self.joinRoomHelper(token, forAccountId: accountId, forCall: call)
+        self.joinRoomHelper(token, forAccountId: accountId, intent: intent)
     }
 
-    private func joinRoomHelper(_ token: String, forAccountId accountId: String, forCall call: Bool) {
+    private func joinRoomHelper(_ token: String, forAccountId accountId: String, intent: JoinIntent) {
         var userInfo: [AnyHashable: Any] = [:]
         userInfo["token"] = token
         userInfo["accountId"] = accountId
@@ -965,9 +1053,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         if let roomController = self.activeRooms[token] {
             NCLog.log("JoinRoomHelper: Found active room controller")
 
-            if call {
+            if intent.call {
                 roomController.inCall = true
-            } else {
+            }
+
+            if intent.chat {
                 roomController.inChat = true
             }
 
@@ -983,8 +1073,9 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
 
         self.joiningRoomToken = token
+        self.joiningIntent = intent
 
-        self.joinRoomHelper(token, withAccount: account, forCall: call) { sessionId, room, error, statusCode, statusReason in
+        self.joinRoomHelper(token, withAccount: account, forCall: intent.call) { sessionId, room, error, statusCode, statusReason in
             if statusCode == NCRoomsManager.statusCodeIgnoreJoinAttempt {
                 // Not joining the room any more. Ignore response
                 return
@@ -994,19 +1085,16 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 // Do a direct API call here, as the join method will check for an active NCRoomController, which we don't have
 
                 if !self.isLeavingRoom(withToken: token) {
-                    self.leavingRoomToken = token
-
-                    self.leaveRoomTask = NCAPIController.sharedInstance().exitRoom(token, forAccount: account, completionBlock: { _ in
-                        self.leaveRoomTask = nil
-                        self.leavingRoomToken = nil
-                    })
+                    self.exitRoomTracked(token, forAccount: account) { _ in }
                 }
 
                 return
             }
 
             if error == nil, let sessionId {
-                let controller = NCRoomController(userSessionId: sessionId, inCall: call, inChat: !call)
+                // Uses of the room which were added while the join was running are part of the intent
+                let usage = self.currentJoinIntent(forAccountId: accountId) ?? intent
+                let controller = NCRoomController(userSessionId: sessionId, inCall: usage.call, inChat: usage.chat)
                 userInfo["roomController"] = controller
 
                 if let room {
@@ -1021,7 +1109,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 if self.joiningAttempts < 3 && !nonRecoverableErrorCodes.contains(statusCode) {
                     NCLog.log("Error joining room, retrying. \(self.joiningAttempts)")
                     self.joiningAttempts += 1
-                    self.joinRoomHelper(token, forAccountId: accountId, forCall: call)
+                    self.joinRoomHelper(token, forAccountId: accountId, intent: self.currentJoinIntent(forAccountId: accountId) ?? intent)
                     return
                 }
 
@@ -1038,9 +1126,17 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
             }
 
             self.joiningRoomToken = nil
+            self.joiningIntent = nil
             self.joiningSessionId = nil
             NotificationCenter.default.post(name: .NCRoomsManagerDidJoinRoom, object: self, userInfo: userInfo)
         }
+    }
+
+    // The intent of the running join, if it belongs to the account (the same room token can exist on two accounts)
+    private func currentJoinIntent(forAccountId accountId: String) -> JoinIntent? {
+        guard let joiningIntent = self.joiningIntent, joiningIntent.accountId == accountId else { return nil }
+
+        return joiningIntent
     }
 
     private func isJoiningRoom(withToken token: String) -> Bool {
@@ -1050,9 +1146,37 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     private func isLeavingRoom(withToken token: String) -> Bool {
-        guard let leavingRoomToken = self.leavingRoomToken else { return false }
+        return self.leavingRoomTokens.contains(token)
+    }
 
-        return leavingRoomToken == token
+    /// Exits a room on the server and remembers it until the server answered, so a join of the room can wait for it.
+    /// The completion block runs first, a join which was waiting for this exit starts afterwards.
+    private func exitRoomTracked(_ token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
+        self.leavingRoomTokens.insert(token)
+
+        let task = self.exitRoomRequest(token, account) { error in
+            self.leavingRoomTokens.remove(token)
+            completionBlock(error)
+
+            if self.leavingRoomTokens.isEmpty {
+                // A call can wait for every exit, not only for the ones of leaveRoom
+                self.checkForPendingToStartCalls()
+            }
+
+            self.startPendingJoin(forToken: token)
+        }
+
+        if task == nil {
+            // No request was made, so there is no response to wait for
+            self.leavingRoomTokens.remove(token)
+        }
+    }
+
+    private func startPendingJoin(forToken token: String) {
+        guard let pendingJoin = self.pendingJoin, pendingJoin.token == token else { return }
+
+        self.pendingJoin = nil
+        self.joinRoomHelper(pendingJoin.token, forAccountId: pendingJoin.intent.accountId, intent: pendingJoin.intent)
     }
 
     private func isJoiningRoom(withSessionId sessionId: String) -> Bool {
@@ -1062,10 +1186,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     private func joinRoomHelper(_ token: String, withAccount account: TalkAccount, forCall call: Bool, completionBlock: @escaping (_ sessionId: String?, _ room: NCRoom?, _ error: Error?, _ statusCode: Int, _ statusReason: String?) -> Void) {
-        self.joinRoomTask = NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: { sessionId, room, error, statusCode, statusReason in
+        self.joinRoomTask = self.joinRoomRequest(token, account, { sessionId, room, error, statusCode, statusReason in
             if !self.isJoiningRoom(withToken: token) {
                 // Treat a cancelled request as success, as we can't determine if the request was processed on the server or not
-                if let error = error as? NSError, error.code != NSURLErrorCancelled {
+                if let error, error.underlyingError.code != NSURLErrorCancelled {
                     NCLog.log("Not joining the room any more. Ignore attempt as the join request failed anyway.")
                     completionBlock(nil, nil, nil, NCRoomsManager.statusCodeIgnoreJoinAttempt, nil)
                 } else {
@@ -1139,6 +1263,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     private func getExternalSignalingHelper(for account: TalkAccount, forRoom token: String, withCompletion completion: @escaping (NCExternalSignalingController?, SignalingSettings?, Error?) -> Void) {
+        if let externalSignalingRequest {
+            externalSignalingRequest(account, token, completion)
+            return
+        }
+
         let room = NCDatabaseManager.sharedInstance().room(withToken: token, forAccountId: account.accountId)
 
         guard room?.supportsFederatedCalling ?? false else {
@@ -1170,8 +1299,8 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         guard let roomController = self.activeRooms[token] else { return }
 
-        self.joiningRoomToken = token
-        self.joinRoomTask = NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: { sessionId, room, error, statusCode, statusReason in
+        self.rejoiningRoomToken = token
+        self.rejoinTask = self.joinRoomRequest(token, account, { sessionId, room, error, statusCode, statusReason in
             if error == nil, let sessionId {
                 roomController.userSessionId = sessionId
                 roomController.inCall = true
@@ -1206,19 +1335,40 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 completionBlock(nil, nil, error, statusCode, statusReason)
             }
 
-            self.joiningRoomToken = nil
-            self.joiningSessionId = nil
+            self.rejoiningRoomToken = nil
+            self.rejoinTask = nil
         })
     }
 
     public func leaveRoom(_ token: String, forAccount account: TalkAccount) {
+        self.leaveRoom(token, forAccount: account, keepingJoinForOtherUse: false)
+    }
+
+    private func leaveRoom(_ token: String, forAccount account: TalkAccount, keepingJoinForOtherUse: Bool) {
+        // Leaving a room we wait to join -> the join is not needed any more, unless the other use still needs it
+        if let pendingJoin = self.pendingJoin, pendingJoin.token == token, !(keepingJoinForOtherUse && pendingJoin.intent.isInUse) {
+            NCLog.log("Leaving room \(token), but the join still waits for an exit -> drop it")
+
+            self.pendingJoin = nil
+        }
+
         // Check if leaving the room we are joining
-        if self.isJoiningRoom(withToken: token) {
+        if self.isJoiningRoom(withToken: token), !(keepingJoinForOtherUse && self.joiningIntent?.isInUse == true) {
             NCLog.log("Leaving room \(token), but still joining -> cancel")
 
             self.joiningRoomToken = nil
+            self.joiningIntent = nil
             self.joiningSessionId = nil
             self.joinRoomTask?.cancel()
+        }
+
+        // A re-join belongs to a running call, it goes on as long as the call or the chat uses the room
+        let roomIsInUse = self.activeRooms[token].map { $0.inCall || $0.inChat } ?? false
+
+        if self.rejoiningRoomToken == token, !roomIsInUse {
+            NCLog.log("Leaving room \(token), but still re-joining -> cancel")
+
+            self.rejoinTask?.cancel()
         }
 
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
@@ -1228,13 +1378,9 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
             self.activeRooms.removeValue(forKey: token)
 
-            self.leavingRoomToken = token
-            self.leaveRoomTask = NCAPIController.sharedInstance().exitRoom(token, forAccount: activeAccount, completionBlock: { error in
+            self.exitRoomTracked(token, forAccount: activeAccount) { error in
                 var userInfo = [:]
                 userInfo["token"] = token
-
-                self.leaveRoomTask = nil
-                self.leavingRoomToken = nil
 
                 if let extSignalingController = NCSettingsController.sharedInstance().externalSignalingController(forAccountId: activeAccount.accountId) {
                     extSignalingController.leaveRoom(withRoomId: token)
@@ -1248,7 +1394,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 }
 
                 NotificationCenter.default.post(name: .NCRoomsManagerDidLeaveRoom, object: self, userInfo: userInfo)
-            })
+            }
         } else {
             self.checkForPendingToStartCalls()
         }
