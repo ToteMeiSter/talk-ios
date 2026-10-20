@@ -757,7 +757,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         }
     }
 
-    private func checkForAccountChange(_ accountId: String?) {
+    func checkForAccountChange(_ accountId: String?) {
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
 
         guard let accountId, accountId != activeAccount.accountId else { return }

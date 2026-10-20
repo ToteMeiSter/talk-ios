@@ -141,6 +141,8 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             }
         }
 
+        CallAccountMemory.remember(token: token, accountId: accountId)
+
         let update = self.defaultCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: token)
         update.localizedCallerName = displayName
@@ -455,6 +457,8 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     public func startCall(_ token: String, withVideoEnabled videoEnabled: Bool, andDisplayName displayName: String, asInitiator initiator: Bool, silently: Bool, recordingConsent: Bool, withAccountId accountId: String) {
+        CallAccountMemory.remember(token: token, accountId: accountId)
+
         if !CallKitManager.isCallKitAvailable() {
             let userInfo: [String: Any] = [
                 "roomToken": token,
