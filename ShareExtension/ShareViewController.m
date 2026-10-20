@@ -349,7 +349,6 @@
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
                                           [self logShareLoadResultForType:(NSString *)kUTTypeMovie item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
-                                              NSLog(@"Shared Video = %@", item);
                                               NSURL *videoURL = (NSURL *)item;
                                             
                                               [shareConfirmationVC.shareItemController addItemWithURL:videoURL];
@@ -365,7 +364,6 @@
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
                                           [self logShareLoadResultForType:@"public.file-url" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
-                                              NSLog(@"Shared File URL = %@", item);
                                               NSURL *fileURL = (NSURL *)item;
                                               
                                               [shareConfirmationVC.shareItemController addItemWithURL:fileURL];
@@ -380,17 +378,14 @@
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
                                           [self logShareLoadResultForType:(NSString *)kUTTypeImage item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
-                                              NSLog(@"Shared Image = %@", item);
                                               NSURL *imageURL = (NSURL *)item;
                                               [shareConfirmationVC.shareItemController addItemWithURL:imageURL];
                                           } else if ([(NSObject *)item isKindOfClass:[UIImage class]]) {
                                               // Occurs when sharing a screenshot
-                                              NSLog(@"Shared UIImage = %@", item);
                                               UIImage *image = (UIImage *)item;
                                               [shareConfirmationVC.shareItemController addItemWithImage:image];
                                           } else if ([(NSObject *)item isKindOfClass:[NSData class]]) {
                                               // Screenshots starting iOS 26
-                                              NSLog(@"Shared UIImage = %@", item);
                                               UIImage *image = [UIImage imageWithData:(NSData *)item];
                                               [shareConfirmationVC.shareItemController addItemWithImage:image];
                                           }
@@ -404,7 +399,6 @@
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
                                           [self logShareLoadResultForType:@"com.apple.pkpass" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSData class]]) {
-                                              NSLog(@"Shared Pass = %@", item);
                                               NSData *passData = (NSData *)item;
                                               NSString *passFileName = [NSString stringWithFormat:@"Pass_%.f.pkpass", [[NSDate date] timeIntervalSince1970] * 1000];
                                               NSURL *tempURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:passFileName]];
@@ -422,7 +416,6 @@
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
                                           [self logShareLoadResultForType:@"public.url" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSURL class]]) {
-                                              NSLog(@"Shared URL = %@", item);
                                               NSURL *sharedURL = (NSURL *)item;
                                               if (sharedURL.absoluteString.length > 0) {
                                                   [shareConfirmationVC shareText:sharedURL.absoluteString];
@@ -438,7 +431,6 @@
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
                                           [self logShareLoadResultForType:@"public.plain-text" item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSString class]]) {
-                                              NSLog(@"Shared Text = %@", item);
                                               NSString *sharedText = (NSString *)item;
                                               if (sharedText.length > 0) {
                                                   [shareConfirmationVC shareText:sharedText];
@@ -454,7 +446,6 @@
                                       completionHandler:^(id<NSSecureCoding>  _Nullable item, NSError * _Null_unspecified error) {
                                           [self logShareLoadResultForType:(NSString *)kUTTypeVCard item:item error:error];
                                           if ([(NSObject *)item isKindOfClass:[NSData class]]) {
-                                              NSLog(@"Shared Contact = %@", item);
                                               NSData *contactData = (NSData *)item;
                                               [shareConfirmationVC.shareItemController addItemWithContactData:contactData];
                                           }

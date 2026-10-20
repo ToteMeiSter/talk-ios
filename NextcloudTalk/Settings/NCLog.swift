@@ -151,6 +151,11 @@ public protocol NCLogDescribable {
         return "file with extension \(fileExtension)"
     }
 
+    // One line about a share item for the log: what happened and the traits of the file, never its name or path
+    public static func shareItemLine(_ event: String, fileName: String?) -> String {
+        return "\(event): \(fileTraits(fileName: fileName ?? ""))"
+    }
+
     public static func getLogfiles() -> [URL] {
         return logfiles(in: allLogDirectories)
     }

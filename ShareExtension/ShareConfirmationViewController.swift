@@ -759,7 +759,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
     func sendSharedText() {
         NCAPIController.sharedInstance().sendChatMessage(self.shareTextView.text, toRoom: self.room.token, threadTitle: nil, replyTo: -1, referenceId: nil, silently: false, forAccount: self.account) { error in
             if let error {
-                NCLog.log(String(format: "Failed to share text. Error: %@", error.localizedDescription))
+                NCLog.log("Failed to share text. Error: \(NCLog.errorCode(error))")
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
@@ -775,7 +775,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
         NCAPIController.sharedInstance().shareRichObject(richObjectFromObjectShare, inRoom: self.room.token, forAccount: self.account) { error in
             if let error {
-                NCLog.log(String(format: "Failed to share rich object. Error: %@", error.localizedDescription))
+                NCLog.log("Failed to share rich object. Error: \(NCLog.errorCode(error))")
                 self.delegate?.shareConfirmationViewControllerDidFail(self)
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)

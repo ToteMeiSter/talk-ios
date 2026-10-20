@@ -99,7 +99,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
     }];
 
     if (transferError) {
-        NSLog(@"Failed to transfer file for sharing: %@", transferError);
+        [NCLog log:[NSString stringWithFormat:@"Failed to transfer file for sharing, error %@", [NCLog errorCode:transferError]]];
     }
 
     BOOL success = (error == nil && transferError == nil);
@@ -123,7 +123,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
         }
     }
 
-    NSLog(@"Adding shareItem: %@ %@", fileName, fileLocalURL);
+    [NCLog log:[NCLog shareItemLine:@"Adding shareItem" fileName:fileName]];
     
     // Try to determine if the item is an image file
     // This can happen when sharing an image from the native ios files app
@@ -152,7 +152,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
     NSURL *fileLocalURL = [self getFileLocalURL:imageName];
     [data writeToFile:fileLocalURL.path atomically:YES];
 
-    NSLog(@"Adding shareItem with image: %@ %@", imageName, fileLocalURL);
+    [NCLog log:[NCLog shareItemLine:@"Adding shareItem with image" fileName:imageName]];
 
     ShareItem* item = [[ShareItem alloc] initWithURL:fileLocalURL name:imageName placeholderImage:[self getPlaceholderImageForFileURL:fileLocalURL] isImage:YES];
 
@@ -182,7 +182,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
     
     [vcString writeToFile:fileLocalURL.path atomically:YES encoding:NSUTF8StringEncoding error:nil];
         
-    NSLog(@"Adding shareItem with contact: %@ %@", vCardFileName, fileLocalURL);
+    [NCLog log:[NCLog shareItemLine:@"Adding shareItem with contact" fileName:vCardFileName]];
     
     ShareItem* item = [[ShareItem alloc] initWithURL:fileLocalURL name:vCardFileName placeholderImage:[self getPlaceholderImageForFileURL:fileLocalURL] isImage:YES];
 
@@ -210,7 +210,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
         [NCLog log:[NSString stringWithFormat:@"Failed to coordinate reading edited file: %@, error %@", [NCLog fileTraitsWithFileName:item.fileName], [NCLog errorCode:error]]];
     }
     
-    NSLog(@"Updating shareItem: %@ %@", item.fileName, item.fileURL);
+    [NCLog log:[NCLog shareItemLine:@"Updating shareItem" fileName:item.fileName]];
     
     [self.delegate shareItemControllerItemsChanged:self];
 }
@@ -220,7 +220,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
     NSData *jpegData = UIImageJPEGRepresentation(image, kShareItemControllerImageQuality);
     [jpegData writeToFile:item.filePath atomically:YES];
     
-    NSLog(@"Updating shareItem with Image: %@ %@", item.fileName, item.fileURL);
+    [NCLog log:[NCLog shareItemLine:@"Updating shareItem with image" fileName:item.fileName]];
     
     [self.delegate shareItemControllerItemsChanged:self];
 }
@@ -235,7 +235,7 @@ CGFloat const kShareItemControllerImageQuality = 1.0f;
     for (ShareItem *item in items) {
         [self cleanupItem:item];
 
-        NSLog(@"Removing shareItem: %@ %@", item.fileName, item.fileURL);
+        [NCLog log:[NCLog shareItemLine:@"Removing shareItem" fileName:item.fileName]];
         [self.internalShareItems removeObject:item];
     }
 
