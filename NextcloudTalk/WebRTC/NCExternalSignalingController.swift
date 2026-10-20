@@ -59,6 +59,10 @@ public enum NCExternalSignalingSendMessageStatus {
     public private(set) var sessionId: String?
     public private(set) var participantsMap = [String: SignalingParticipant]()
 
+    // Key exchange for end-to-end encrypted calls, set while we are in a room that needs it
+    private(set) var callEncryption: CallEncryption?
+    private var callEncryptionRoomToken: String?
+
     private let initialReconnectInterval = 1
     private let maxReconnectInterval = 16
     private let webSocketTimeoutInterval = 15.0
@@ -245,7 +249,33 @@ public enum NCExternalSignalingSendMessageStatus {
         }
     }
 
+    // Debug only, the socket dies without a "bye", like on a network loss, so the server keeps the session for resuming
+    func simulateConnectionLoss() {
+        DispatchQueue.main.async {
+            NCLog.log("Debug: Simulating a connection loss of: \(self.serverUrl)")
+            self.webSocket?.cancel()
+        }
+    }
+
+    var debugInfoLines: [String] {
+        [
+            "Server: \(serverUrl)",
+            "Connected: \(!disconnected), hello received: \(helloResponseReceived)",
+            "Session id: \(sessionId ?? "none")",
+            "Resume id: \(resumeId != nil ? "yes" : "no")",
+            "Current room: \(currentRoom ?? "none"), joined room: \(joinedRoomToken ?? "none")",
+            "Features: mcu \(hasMCU), update-sdp \(hasUpdateSdp), simulcast \(hasSimulcast), chat-relay \(hasChatRelay)",
+            "Pending messages: \(pendingMessages.count)",
+            "Participants: \(participantsMap.count)"
+        ]
+    }
+
     func resetWebSocket() {
+        // The server expires the session 30s after the first connection loss, failed reconnect attempts don't extend that
+        if self.disconnectTime == nil {
+            self.disconnectTime = Date().timeIntervalSince1970
+        }
+
         self.webSocket?.cancel()
         self.webSocket = nil
         self.helloResponseReceived = false
@@ -331,9 +361,7 @@ public enum NCExternalSignalingSendMessageStatus {
                         "ticket": ticket
                     ]
                 ],
-                "features": [
-                    "chat-relay"
-                ]
+                "features": self.helloFeatures
             ]
         ]
 
@@ -343,9 +371,7 @@ public enum NCExternalSignalingSendMessageStatus {
                 "hello": [
                     "version": "1.0",
                     "resumeid": resumeId,
-                    "features": [
-                        "chat-relay"
-                    ]
+                    "features": self.helloFeatures
                 ]
             ]
         }
@@ -358,6 +384,14 @@ public enum NCExternalSignalingSendMessageStatus {
                 self.reconnect()
             }
         }
+    }
+
+    private var isCallEncryptionEnabled: Bool {
+        NCSettingsController.sharedInstance().isEndToEndEncryptedCallingEnabled(forAccount: account.accountId)
+    }
+
+    private var helloFeatures: [String] {
+        isCallEncryptionEnabled ? ["chat-relay", "encryption"] : ["chat-relay"]
     }
 
     func helloResponseReceived(messageDict: [AnyHashable: Any]) {
@@ -376,6 +410,7 @@ public enum NCExternalSignalingSendMessageStatus {
         }
 
         self.resumeId = helloDict["resumeid"] as? String
+        self.disconnectTime = nil
 
         // We are connected again, the next connection loss starts a new resume window
         DispatchQueue.main.async {
@@ -396,6 +431,7 @@ public enum NCExternalSignalingSendMessageStatus {
             // The sessions of the old signaling session are gone and their leave events are not replayed. The re-join
             // reports the sessions of the room again, but `roomMessageReceived` keeps the map for an unchanged room
             self.participantsMap = [:]
+            self.updateCallEncryption(forRoom: nil)
         } else {
             // The session was resumed, so the server kept us in the room and replays what we missed
             self.joinedRoomToken = self.currentRoom
@@ -518,12 +554,13 @@ public enum NCExternalSignalingSendMessageStatus {
     }
 
     func errorResponseReceived(messageDict: [AnyHashable: Any]) {
+        // Logged before the guard, errors to messages sent without an id have none either
+        NCLog.log("Received error response \(messageDict["error"] ?? "")")
+
         guard let errorDict = messageDict["error"] as? [AnyHashable: Any],
               let errorCode = errorDict["code"] as? String,
               let messageId = messageDict["id"] as? String
         else { return }
-
-        NCLog.log("Received error response \(errorCode)")
 
         let errorReason = [errorCode, errorDict["message"] as? String].compactMap { $0 }.joined(separator: ": ")
 
@@ -719,6 +756,7 @@ public enum NCExternalSignalingSendMessageStatus {
         // Outside the check above on purpose: re-joining after a reconnect leaves `currentRoom`
         // unchanged, but it is the moment we are part of the room on the signaling server again.
         self.joinedRoomToken = newRoomId.isEmpty ? nil : newRoomId
+        self.updateCallEncryption(forRoom: self.joinedRoomToken)
 
         if let messageId = messageDict["id"] as? String {
             self.executeCompletionBlock(forMessageId: messageId, withStatus: .success)
@@ -746,6 +784,9 @@ public enum NCExternalSignalingSendMessageStatus {
         if eventType == "join" {
             guard let joinDict = eventDict["join"] as? [[AnyHashable: Any]]
             else { return }
+
+            // Including our own sessions, keys are exchanged with every session in the room like in the web client
+            self.callEncryption?.usersJoined(joinDict.compactMap { $0["sessionid"] as? String })
 
             for participantDict in joinDict {
                 let participant = SignalingParticipant(withJoinDictionary: participantDict)
@@ -780,6 +821,8 @@ public enum NCExternalSignalingSendMessageStatus {
             if !otherSessions.isEmpty {
                 self.delegate?.externalSignalingController(self, didReceiveLeaveOfSessions: otherSessions)
             }
+
+            self.callEncryption?.usersLeft(leftSessions)
 
             for sessionId in leftSessions {
                 guard let participant = self.getParticipant(fromSessionId: sessionId)
@@ -889,6 +932,21 @@ public enum NCExternalSignalingSendMessageStatus {
               let messageType = dataDict["type"] as? String
         else { return }
 
+        if messageType == "message",
+           let payload = dataDict["payload"] as? [String: Any],
+           CallEncryption.isEncryptionMessage(payload) {
+            if let sender = messageDict["sender"] as? [AnyHashable: Any],
+               let fromSession = sender["sessionid"] as? String {
+                if let callEncryption = self.callEncryption {
+                    callEncryption.handleMessage(from: fromSession, payload: payload)
+                } else {
+                    NCLog.log("CallEncryption: Dropped \(payload["type"] ?? "") from \(fromSession), no key exchange")
+                }
+            }
+
+            return
+        }
+
         if messageType == "startedTyping" || messageType == "stoppedTyping" {
             var userInfo = [String: Any]()
 
@@ -919,6 +977,47 @@ public enum NCExternalSignalingSendMessageStatus {
         } else {
             self.delegate?.externalSignalingController(self, didReceivedSignalingMessage: messageDict)
         }
+    }
+
+    // MARK: - Call encryption
+
+    private func updateCallEncryption(forRoom roomToken: String?) {
+        guard let roomToken, self.isCallEncryptionEnabled, let sessionId = self.sessionId else {
+            self.callEncryption?.close()
+            self.callEncryption = nil
+            return
+        }
+
+        // Kept while we stay in the same room with the same session
+        if self.callEncryption != nil, self.callEncryptionRoomToken == roomToken {
+            return
+        }
+
+        NCLog.log("CallEncryption: Key exchange for room \(roomToken) with session \(sessionId)")
+        self.callEncryption?.close()
+        self.callEncryptionRoomToken = roomToken
+        self.callEncryption = CallEncryption(ownSessionId: sessionId) { [weak self] recipientSessionId, payload in
+            self?.sendEncryptionMessage(payload, toSessionId: recipientSessionId)
+        }
+    }
+
+    private func sendEncryptionMessage(_ payload: [String: Any], toSessionId sessionId: String) {
+        let messageDict: [AnyHashable: Any] = [
+            "type": "message",
+            "message": [
+                "recipient": [
+                    "type": "session",
+                    "sessionid": sessionId
+                ],
+                "data": [
+                    "type": "message",
+                    "to": sessionId,
+                    "payload": payload
+                ]
+            ]
+        ]
+
+        self.send(message: messageDict, withCompletionBlock: nil)
     }
 
     // MARK: - Completion blocks
