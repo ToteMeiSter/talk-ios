@@ -555,7 +555,8 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         rejoin("roomA") { result = ($0, $1, $2) }
         answerJoin(of: "roomA")
 
-        // The room is left while the signaling server is asked
+        // The call ended and the room is left while the signaling server is asked
+        manager.activeRooms["roomA"]?.inCall = false
         leave("roomA")
         waitUntil { result != nil }
 
