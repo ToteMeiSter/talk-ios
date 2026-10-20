@@ -86,6 +86,17 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     // Pause and counter for joining the call again after the ICE connection failed (WebRTC queue only). The pause
     // itself is `rejoinRetryWorkItem`, a second one is not scheduled while it is running.
     private var iceFailedBackoff = CallRejoinBackoff.forFailedIce()
+
+    // Whether the pause is the one before a new signaling session (forceReconnect), which replaces the websocket anyway
+    private var rejoinRetryStartsNewSession = false
+
+    // Limits the reactions on a changing network, see `CallNetworkReactionLimiter`. WebRTC queue only.
+    private var networkReactionLimiter = CallNetworkReactionLimiter()
+    private var networkReactionWorkItem: DispatchWorkItem?
+
+    // Changes of the network of the device while the call runs. Both are used on the WebRTC queue only.
+    private var networkMonitor: CallNetworkMonitor?
+    private var networkProbeWorkItem: DispatchWorkItem?
     private var speaking = false
     private var userInCall = 0 // TODO: Do we have a type for that?
     private var sendCurrentStateTimer: Timer?
@@ -231,6 +242,10 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
     public func startCall() {
         NCLog.log("Start call in NCCallController for token \(self.room.token)")
+
+        WebRTCCommon.shared.dispatch {
+            self.startNetworkMonitoring()
+        }
 
         // Make sure the signaling controller has retrieved the settings before joining a call
         self.signalingController.updateSignalingSettings { _ in
@@ -414,7 +429,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         NCLog.log("Rejoining the call in \(self.room.token) failed (StatusCode \(statusCode)), retry \(self.rejoinBackoff.attempts) in \(delay) s")
 
-        self.scheduleRejoinRetry(after: delay) { [weak self] in
+        self.scheduleRejoinRetry(after: delay, startsNewSession: retry == .newSession) { [weak self] in
             guard let self else { return }
 
             switch retry {
@@ -432,7 +447,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     /// Runs `action` after a pause on the WebRTC queue. There is one pause at a time for all kinds of rejoins
     /// (steps of a rejoin that failed, a rejoin after a failed ICE connection), so they can not pile up.
     /// The action does not run if the call was left in the meantime or if the pause was cancelled.
-    private func scheduleRejoinRetry(after delay: TimeInterval, action: @escaping () -> Void) {
+    private func scheduleRejoinRetry(after delay: TimeInterval, startsNewSession: Bool, action: @escaping () -> Void) {
         WebRTCCommon.shared.assertQueue()
 
         let workItem = DispatchWorkItem { [weak self] in
@@ -447,6 +462,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         }
 
         self.rejoinRetryWorkItem = workItem
+        self.rejoinRetryStartsNewSession = startsNewSession
         WebRTCCommon.shared.dispatch(after: delay, workItem)
     }
 
@@ -478,6 +494,19 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         self.rejoinRetryWorkItem?.cancel()
         self.rejoinRetryWorkItem = nil
+    }
+
+    /// Ends the pause before a rejoin now and runs the rejoin. Returns false if no pause was running.
+    private func runRejoinRetryNow() -> Bool {
+        WebRTCCommon.shared.assertQueue()
+
+        guard let workItem = self.rejoinRetryWorkItem else { return false }
+
+        // The work item takes itself out of `rejoinRetryWorkItem`. Cancelled after the run, so the queue skips its turn.
+        workItem.perform()
+        workItem.cancel()
+
+        return true
     }
 
     public func willRejoinCall() {
@@ -523,6 +552,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         WebRTCCommon.shared.dispatch {
             self.cancelRejoinRetry()
+            self.cancelNetworkProbe()
             self.joinCallTask?.cancel()
             self.joinCallTask = nil
             self.callSessionGeneration += 1
@@ -562,6 +592,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         self.stopSimulatorVideoCapturer()
 
         WebRTCCommon.shared.dispatch {
+            self.stopNetworkMonitoring()
             self.cancelRejoinRetry()
             self.stopScreenshare()
             self.cleanCurrentPeerConnections()
@@ -578,6 +609,179 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         self.joinCallTask?.cancel()
         self.joinCallTask = nil
+    }
+
+    // MARK: - Network changes
+
+    private func startNetworkMonitoring() {
+        WebRTCCommon.shared.assertQueue()
+
+        guard !self.isLeavingCall, self.networkMonitor == nil else { return }
+
+        let monitor = CallNetworkMonitor { [weak self] change in
+            // Called on the queue of the monitor
+            WebRTCCommon.shared.dispatch {
+                self?.networkChanged(change)
+            }
+        }
+
+        monitor.start()
+        self.networkMonitor = monitor
+    }
+
+    private func stopNetworkMonitoring() {
+        WebRTCCommon.shared.assertQueue()
+
+        self.networkMonitor?.stop()
+        self.networkMonitor = nil
+        self.cancelNetworkProbe()
+        self.networkReactionWorkItem?.cancel()
+        self.networkReactionWorkItem = nil
+    }
+
+    private func cancelNetworkProbe() {
+        WebRTCCommon.shared.assertQueue()
+
+        self.networkProbeWorkItem?.cancel()
+        self.networkProbeWorkItem = nil
+    }
+
+    /// The call is joined and no rejoin is running, so there are connections which the network change can break
+    private var isCallEstablished: Bool {
+        return self.joinedCallOnce && self.userInCall > 0 && !self.preparedForRejoin
+    }
+
+    private var publisherLink: CallPublisherLink {
+        guard let publisher = self.publisherPeerConnection?.getPeerConnection() else {
+            // No local media, no publisher: nothing of ours can be dead. With local media the publisher is just not there yet
+            return (self.localAudioTrack == nil && self.localVideoTrack == nil) ? .absent : .unknown
+        }
+
+        switch publisher.iceConnectionState {
+        case .connected, .completed:
+            return .connected
+        case .failed, .closed:
+            return .lost
+        default:
+            return .unknown
+        }
+    }
+
+    /// The device switched to another network (Wi-Fi to cellular and back, or the network was gone and is back).
+    /// The connections of the call are bound to the address of the old network, ICE would notice that only after
+    /// 30 s or more. Same recovery as the web client has for a failed connection and as the Android client does.
+    private func networkChanged(_ change: CallNetworkChange) {
+        WebRTCCommon.shared.assertQueue()
+
+        // Before the first join a failing request is handled by the join itself
+        guard !self.isLeavingCall, self.joinedCallOnce else { return }
+
+        // A network which flips back and forth is not given a reaction on every flip (the reaction resets the pauses
+        // and replaces the socket). The last change is handled when the pause between two reactions is over.
+        self.networkReactionWorkItem?.cancel()
+        self.networkReactionWorkItem = nil
+
+        let wait = self.networkReactionLimiter.reserve(now: ProcessInfo.processInfo.systemUptime)
+
+        guard wait <= 0 else {
+            NCLog.log("Network changed (\(change)) shortly after the last change, reacting in \(Int(wait.rounded(.up))) s")
+
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+
+                self.networkReactionWorkItem = nil
+                self.networkChanged(change)
+            }
+
+            self.networkReactionWorkItem = workItem
+            WebRTCCommon.shared.dispatch(after: wait, workItem)
+            return
+        }
+
+        let hasMCU = self.externalSignalingController?.hasMCU ?? false
+        NCLog.log("Network changed (\(change)), call in \(self.room.token) established: \(self.isCallEstablished), MCU: \(hasMCU)")
+
+        // The failures before the change tell nothing about the new network: the next ones start with the shortest pause
+        self.iceFailedBackoff.reset()
+        self.rejoinBackoff.reset()
+        self.cancelNetworkProbe()
+
+        // A pause between rejoins is meant for a network that keeps failing, a new network deserves the next attempt now.
+        // A rejoin with a new session replaces the websocket anyway.
+        let replacesWebSocket = self.rejoinRetryStartsNewSession
+        if self.runRejoinRetryNow() {
+            NCLog.log("Network changed during the pause of a rejoin, rejoining now")
+
+            if !replacesWebSocket {
+                self.externalSignalingController?.reconnectAfterNetworkChange()
+            }
+
+            return
+        }
+
+        self.externalSignalingController?.reconnectAfterNetworkChange()
+
+        guard self.isCallEstablished else { return }
+
+        if hasMCU {
+            self.handleNetworkRecovery(CallNetworkRecoveryPolicy.onNetworkChanged(publisher: self.publisherLink), recheck: 0)
+        } else {
+            // Without a MCU every connection is a direct one to another participant, restart ICE of all of them
+            for (_, peerConnection) in self.connectionsDict {
+                peerConnection.restartIceAfterNetworkChange(hasMCU: false)
+            }
+        }
+    }
+
+    private func handleNetworkRecovery(_ action: CallNetworkRecoveryAction, recheck: Int) {
+        WebRTCCommon.shared.assertQueue()
+
+        switch action {
+        case .keep:
+            NCLog.log("Publisher connection is fine after the network change, keeping the call")
+        case .refreshSubscribers:
+            self.requestNewOffersAfterNetworkChange()
+        case .rejoin:
+            NCLog.log("Publisher connection did not survive the network change (look \(recheck)), rejoining the call")
+            self.forceReconnect()
+        case .recheck:
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+
+                self.networkProbeWorkItem = nil
+
+                guard !self.isLeavingCall, self.isCallEstablished else { return }
+
+                let look = recheck + 1
+                self.handleNetworkRecovery(CallNetworkRecoveryPolicy.onRecheck(publisher: self.publisherLink, recheck: look), recheck: look)
+            }
+
+            self.networkProbeWorkItem = workItem
+            WebRTCCommon.shared.dispatch(after: CallNetworkRecoveryPolicy.recheckDelay, workItem)
+        }
+    }
+
+    /// Without a publisher of our own only the connections we receive on can be dead. With a MCU the way to heal one
+    /// is a new offer of the MCU, the same as after a failed ICE connection. The call is not joined again.
+    private func requestNewOffersAfterNetworkChange() {
+        WebRTCCommon.shared.assertQueue()
+
+        let deadPeers = self.connectionsDict.values.filter { peer in
+            guard !peer.isMCUPublisherPeer, !peer.isDummyPeer, !peer.isOwnScreensharePeer, peer.roomType != nil,
+                  let state = peer.getPeerConnection()?.iceConnectionState
+            else { return false }
+
+            return state != .connected && state != .completed
+        }
+
+        NCLog.log("No publisher of our own, requesting a new offer for \(deadPeers.count) connection(s) after the network change")
+
+        for peer in deadPeers {
+            guard let roomType = peer.roomType else { continue }
+
+            self.cleanPeerConnection(forSessionId: peer.peerId, ofType: roomType, forOwnScreenshare: false)
+            self.requestOfferWithRepetition(forSessionId: peer.peerId, withRoomType: roomType)
+        }
     }
 
     public func leaveCallInServer(forAll allParticipants: Bool, withCompletionBlock completionBlock: @escaping (_ error: OcsError?) -> Void) {
@@ -2025,7 +2229,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         NCLog.log("ICE failed again, rejoining the call in \(self.room.token) in \(delay) s (failure \(self.iceFailedBackoff.attempts))")
 
-        self.scheduleRejoinRetry(after: delay) { [weak self] in
+        self.scheduleRejoinRetry(after: delay, startsNewSession: true) { [weak self] in
             self?.forceReconnect()
         }
     }

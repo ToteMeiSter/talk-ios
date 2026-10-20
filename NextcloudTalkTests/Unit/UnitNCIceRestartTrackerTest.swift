@@ -79,4 +79,25 @@ final class UnitNCIceRestartTrackerTest: XCTestCase {
     func testRecoveryTimeoutIsLongerThanARestartAndTheDisconnectDelay() {
         XCTAssertGreaterThan(NCIceRestartTracker.recoveryTimeout, NCIceRestartTracker.disconnectedDelay)
     }
+
+    func testNetworkChangeStartsOverAfterExhaustedAttempts() {
+        var tracker = NCIceRestartTracker()
+
+        for _ in 0 ..< NCIceRestartTracker.maxAttempts {
+            XCTAssertTrue(tracker.startRestart(hasMCU: false, isOfferer: true, isSignalingStable: true))
+        }
+
+        XCTAssertTrue(tracker.isExhausted)
+        XCTAssertTrue(tracker.startRestartAfterNetworkChange(hasMCU: false, isOfferer: true, isSignalingStable: true))
+        XCTAssertEqual(tracker.attempts, 1)
+    }
+
+    func testNetworkChangeRespectsRoleAndMCU() {
+        var tracker = NCIceRestartTracker()
+
+        XCTAssertFalse(tracker.startRestartAfterNetworkChange(hasMCU: true, isOfferer: true, isSignalingStable: true))
+        XCTAssertFalse(tracker.startRestartAfterNetworkChange(hasMCU: false, isOfferer: false, isSignalingStable: true))
+        XCTAssertFalse(tracker.startRestartAfterNetworkChange(hasMCU: false, isOfferer: true, isSignalingStable: false))
+        XCTAssertEqual(tracker.attempts, 0)
+    }
 }
