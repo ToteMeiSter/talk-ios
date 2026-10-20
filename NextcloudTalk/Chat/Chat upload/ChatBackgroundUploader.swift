@@ -843,15 +843,12 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
-    /// An upload is over (posted, given up or dropped): the files chosen after it in the same group can be posted now.
+    /// An upload is over (posted, given up or dropped): the file chosen next in the same group can be posted now.
+    /// It wakes the one after it when it is over itself.
     private func announceFilesFollowing(_ state: ChatUploadState) {
-        let following = self.store.loadAll()
-            .filter { $0.step == .uploaded && $0.follows(state) }
-            .sorted { $0.id < $1.id }
+        guard let next = state.nextFollowing(among: self.store.loadAll()) else { return }
 
-        for next in following {
-            self.announce(id: next.id)
-        }
+        self.announce(id: next.id)
     }
 
     private func announceFinished(id: String, failure: ChatFileUploadFailure?) {

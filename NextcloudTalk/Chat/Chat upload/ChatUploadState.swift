@@ -193,9 +193,10 @@ struct ChatUploadState: Codable, Equatable {
     ///
     /// Only an upload that is under way holds the others back: one that is posted, or gave up (the user can send it
     /// again, and then it lands after the others), or is gone, does not. Neither does one that is older than a temporary
-    /// message lives, so the wait for a file is as long as its own attempts are allowed to take, and never longer.
+    /// message lives, and a file that is older than that itself does not wait at all, so the wait for a file is never
+    /// longer than its own limit. An earlier file that ends after that is posted later than the ones that did not wait.
     func isWaitingForEarlierFiles(among states: [ChatUploadState], now: TimeInterval) -> Bool {
-        guard let own = FileUploadReference(referenceId: self.id) else { return false }
+        guard !self.isExpired(now: now), let own = FileUploadReference(referenceId: self.id) else { return false }
 
         return states.contains { other in
             guard other.id != self.id,
@@ -208,6 +209,14 @@ struct ChatUploadState: Codable, Equatable {
 
             return reference.uploadHash == own.uploadHash && reference.position < own.position
         }
+    }
+
+    /// The file to try to post next once this upload is over: the nearest one chosen after it that waits to be posted.
+    /// The others are woken by that one in turn, so a group of many files is not read from the disk once per file.
+    func nextFollowing(among states: [ChatUploadState]) -> ChatUploadState? {
+        return states
+            .filter { $0.step == .uploaded && $0.follows(self) }
+            .min { $0.id < $1.id }
     }
 
     /// Whether the upload was chosen after the given one, within the same group of files.
