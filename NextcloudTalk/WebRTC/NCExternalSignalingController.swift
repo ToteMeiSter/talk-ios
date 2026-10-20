@@ -674,7 +674,7 @@ public enum NCExternalSignalingSendMessageStatus {
 
             for sessionId in leftSessions {
                 guard let participant = self.getParticipant(fromSessionId: sessionId)
-                else { return }
+                else { continue }
 
                 self.participantsMap.removeValue(forKey: sessionId)
 

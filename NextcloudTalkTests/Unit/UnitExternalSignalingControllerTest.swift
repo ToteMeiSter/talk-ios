@@ -158,4 +158,17 @@ final class UnitExternalSignalingControllerTest: TestBaseRealm {
         XCTAssertEqual(payload["substream"] as? Int, 0)
         XCTAssertEqual(payload["temporal"] as? Int, 2)
     }
+
+    // MARK: - Leave events
+
+    func testLeaveRemovesSessionsListedAfterAnUnknownSession() throws {
+        signalingController.processRoomEvent(eventDict: ["type": "join", "join": [
+            ["sessionid": "session-a", "userid": "user-a"],
+            ["sessionid": "session-b", "userid": "user-b"]
+        ]])
+        XCTAssertEqual(signalingController.participantsMap.count, 2)
+
+        signalingController.processRoomEvent(eventDict: ["type": "leave", "leave": ["session-unknown", "session-a", "session-b"]])
+        XCTAssertTrue(signalingController.participantsMap.isEmpty)
+    }
 }
