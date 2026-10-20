@@ -63,7 +63,7 @@ final class UnitForwardedNoteTest: TestBaseRealm {
 
     func testFirstLineOfTheNoteInEnglishAndRussianIsRecognized() {
         XCTAssertEqual(range(of: "Forwarded from Alice\nHello"), NSRange(location: 0, length: 20))
-        XCTAssertEqual(range(of: "Переслано от Алиса\nПривет"), NSRange(location: 0, length: 18))
+        XCTAssertEqual(ForwardedNote.noteRange(in: "Переслано от Алиса\nПривет", templates: ["Переслано от %@"]), NSRange(location: 0, length: 18))
         XCTAssertEqual(range(of: "Forwarded from Alice"), NSRange(location: 0, length: 20), "A note alone")
     }
 
