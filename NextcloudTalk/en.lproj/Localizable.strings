@@ -940,6 +940,9 @@
 /* No comment provided by engineer. */
 "Delete tag?" = "Delete tag?";
 
+/* Title of the confirmation shown before a group of files shared together is deleted from the media viewer */
+"Delete all files shared together?" = "Delete all files shared together?";
+
 /* Title of the confirmation shown before a picture or video message is deleted from the media viewer */
 "Delete this message?" = "Delete this message?";
 

@@ -199,4 +199,42 @@ final class UnitFileMessageGroupTest: TestBaseRealm {
         XCTAssertFalse(try self.message(text: "{filet}").sharesFileWithoutCaption)
         XCTAssertFalse(try self.message(text: "{file-}").sharesFileWithoutCaption)
     }
+
+    // MARK: - Finding the group of a message
+
+    private func groupsByAnchor(_ messages: [NCChatMessage]) -> [Int: FileMessageGroup] {
+        return Dictionary(uniqueKeysWithValues: FileMessageGroup.groups(in: messages).map { ($0.anchor.messageId, $0) })
+    }
+
+    func testTheAnchorFindsItsGroup() throws {
+        let messages = [try self.message(upload: self.uploadA, position: 1),
+                        try self.message(upload: self.uploadA, position: 2)]
+        let groups = self.groupsByAnchor(messages)
+
+        let found = FileMessageGroup.containing(messageId: messages[1].messageId, in: groups)
+
+        XCTAssertEqual(found?.messages.count, 2)
+    }
+
+    // The media viewer shows every file of a group, so it asks for the group by any of its files
+    func testAFileOtherThanTheAnchorFindsItsGroup() throws {
+        let messages = [try self.message(upload: self.uploadA, position: 1),
+                        try self.message(upload: self.uploadA, position: 2),
+                        try self.message(upload: self.uploadA, position: 3)]
+        let groups = self.groupsByAnchor(messages)
+
+        for message in messages {
+            let found = FileMessageGroup.containing(messageId: message.messageId, in: groups)
+
+            XCTAssertEqual(found?.messages.map(\.messageId), messages.map(\.messageId))
+        }
+    }
+
+    func testAMessageOutsideEveryGroupFindsNone() throws {
+        let messages = [try self.message(upload: self.uploadA, position: 1),
+                        try self.message(upload: self.uploadA, position: 2)]
+        let single = try self.message(upload: self.uploadB)
+
+        XCTAssertNil(FileMessageGroup.containing(messageId: single.messageId, in: self.groupsByAnchor(messages)))
+    }
 }

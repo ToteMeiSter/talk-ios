@@ -12,7 +12,8 @@ import UIKit
 ///
 @objc protocol NCMediaViewerViewControllerDelegate: AnyObject {
     func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool
-    func mediaViewerViewControllerCanDelete(_ viewController: NCMediaViewerViewController) -> Bool
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, canDelete message: NCChatMessage) -> Bool
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, deletesFileGroupWith message: NCChatMessage) -> Bool
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestReplyTo message: NCChatMessage)
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage)
 }
@@ -514,7 +515,7 @@ import UIKit
 
         var elements = actions
 
-        if let delegate = self.delegate, delegate.mediaViewerViewControllerCanDelete(self), message.canDelete(for: self.account, in: self.room) {
+        if let delegate = self.delegate, delegate.mediaViewerViewController(self, canDelete: message) {
             let deleteAction = UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { [weak self] _ in
                 self?.confirmDeletionOfCurrentMessage()
             }
@@ -627,7 +628,11 @@ import UIKit
 
         let messageCopy = NCChatMessage(value: message)
 
-        let alert = UIAlertController(title: NSLocalizedString("Delete this message?", comment: "Title of the confirmation shown before a picture or video message is deleted from the media viewer"),
+        let title = delegate.mediaViewerViewController(self, deletesFileGroupWith: messageCopy)
+            ? NSLocalizedString("Delete all files shared together?", comment: "Title of the confirmation shown before a group of files shared together is deleted from the media viewer")
+            : NSLocalizedString("Delete this message?", comment: "Title of the confirmation shown before a picture or video message is deleted from the media viewer")
+
+        let alert = UIAlertController(title: title,
                                       message: nil,
                                       preferredStyle: .alert)
 

@@ -2413,8 +2413,8 @@ import SwiftUI
         return !self.textInputbar.isEditing
     }
 
-    override func mediaViewerViewControllerCanDelete(_ viewController: NCMediaViewerViewController) -> Bool {
-        return true
+    override func mediaViewerViewController(_ viewController: NCMediaViewerViewController, canDelete message: NCChatMessage) -> Bool {
+        return self.canDelete(message)
     }
 
     // MARK: - ContextMenu (Long press on message)
@@ -2792,15 +2792,9 @@ import SwiftUI
         }
 
         // Delete option. A group is deleted as a whole, so no file of it is left behind unseen.
-        if let fileGroup = self.fileMessageGroups[message.messageId] {
-            if self.room.canChat, fileGroup.messages.allSatisfy({ $0.isDeletable(for: self.account, in: self.room) }) {
-                destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
-                    self.didPressDeleteAll(in: fileGroup)
-                })
-            }
-        } else if message.canDelete(for: self.account, in: self.room) {
+        if self.canDelete(message) {
             destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
-                self.didPressDelete(for: message)
+                self.deleteMessageOrFileGroup(message)
             })
         }
 
