@@ -77,7 +77,8 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
             answerJoin(of: token, error: OcsError.genericError(), statusCode: 403)
         }
 
-        for token in Array(pendingExits.keys) {
+        // An answer can start another exit (the repeated exit of a left room)
+        while let token = pendingExits.keys.first {
             answerExit(of: token)
         }
 
@@ -402,7 +403,7 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         XCTAssertEqual(exitCount(of: "roomA"), 2)
 
         answerExit(of: "roomA")
-        XCTAssertEqual(events.last, "exit roomA")
+        XCTAssertEqual(exitCount(of: "roomA"), 2)
     }
 
     func testRejoinAnsweredAfterTheExitOfLeftRoomIsLeftOnServer() {
@@ -448,8 +449,9 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         answerExit(of: "roomA")
         join("roomA")
         answerJoin(of: "roomA")
+        answerJoin(of: "roomA")
 
-        // The new join is the answer to the rejoin as well: the server replaces the session of the cookie
+        // The first answer is the one of the re-join, the second one of the new join. The new join is the answer to the rejoin as well: the server replaces the session of the cookie
         XCTAssertEqual(exitCount(of: "roomA"), 1)
         XCTAssertNotNil(manager.activeRooms["roomA"])
     }
@@ -543,5 +545,20 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         XCTAssertNotNil(result)
         XCTAssertNil(result?.0)
         XCTAssertNotNil(result?.1)
+    }
+
+    func testRejoinAnsweredBySignalingServerAfterLeaveIsReportedAsNotActive() {
+        useSilentSignalingServer()
+        activate("roomA")
+
+        var result: (String?, Error?, Int)?
+        rejoin("roomA") { result = ($0, $1, $2) }
+        answerJoin(of: "roomA")
+
+        // The room is left while the signaling server is asked
+        leave("roomA")
+        waitUntil { result != nil }
+
+        XCTAssertEqual(result?.2, NCRoomsManager.statusCodeRoomNotActive)
     }
 }
