@@ -1323,7 +1323,7 @@ import Toast
         if message.isObjectShare {
             self.present(shareViewController: ShareViewController(toForwardObjectShare: message, fromChatViewController: self))
         } else {
-            self.didPressForward(text: message.parsedMessage().string)
+            self.didPressForward(text: ForwardedNote.text(message.parsedMessage().string, author: ForwardedNote.author(of: message)))
         }
     }
 
@@ -3727,7 +3727,7 @@ import Toast
 
         // Chat messages
         let isOwnMessage = message.isMessage(from: self.account.userId)
-        let messageString = message.parsedMarkdownForChat() ?? NSMutableAttributedString()
+        let messageString = message.parsedMarkdownForChatWithForwardedNote() ?? NSMutableAttributedString()
         var width = originalWidth
 
         if message.isSystemMessage {

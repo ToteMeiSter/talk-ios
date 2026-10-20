@@ -323,8 +323,12 @@ extension BaseChatViewController {
         }
 
         let messagesById = Dictionary(selectedMessages.map { ($0.messageId, $0) }, uniquingKeysWith: { first, _ in first })
-        let items = plan.entries.compactMap { messagesById[$0.id] }.map {
-            ForwardItem(text: $0.parsedMessage().string, richObject: $0.isObjectShare ? $0.richObjectFromObjectShare : nil)
+        let items = plan.entries.compactMap { messagesById[$0.id] }.map { message -> ForwardItem in
+            if message.isObjectShare {
+                return ForwardItem(text: message.parsedMessage().string, richObject: message.richObjectFromObjectShare)
+            }
+
+            return ForwardItem(text: ForwardedNote.text(message.parsedMessage().string, author: ForwardedNote.author(of: message)))
         }
 
         self.didPressForward(items: items, skippedFiles: plan.skippedFiles)
