@@ -66,6 +66,17 @@ extension BaseChatTableViewCell {
         }
     }
 
+    /// The message of the file under the point, which is in the coordinates of the given view
+    func fileGroupMessage(at point: CGPoint, in view: UIView) -> NCChatMessage? {
+        guard let groupedFilePreviewView = self.groupedFilePreviewView,
+              let messages = self.fileGroup?.messagesInUploadOrder,
+              let index = groupedFilePreviewView.fileIndex(at: groupedFilePreviewView.convert(point, from: view)),
+              index < messages.count
+        else { return nil }
+
+        return messages[index]
+    }
+
     func prepareForReuseFileGroupCell() {
         self.groupedFilePreviewView?.prepareForReuse()
     }

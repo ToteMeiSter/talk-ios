@@ -24,6 +24,15 @@ extension NCChatMessage {
         return upload.uploadHash == otherUpload.uploadHash && self.parentId == other.parentId
     }
 
+    /// Whether this is a file of the same upload that is deleted, or being deleted. A group is not split by it.
+    func isRemovedFile(ofTheSameUploadAs other: NCChatMessage) -> Bool {
+        guard self.isDeletedMessage || self.isDeleting,
+              let upload = self.fileUploadReference, let otherUpload = other.fileUploadReference
+        else { return false }
+
+        return upload.uploadHash == otherUpload.uploadHash && self.parentId == other.parentId
+    }
+
     /// The single file this message shares, if it shares one and nothing else.
     var plainFileShare: NCMessageFileParameter? {
         // A comment excludes deleted messages, voice messages and call recordings by type alone

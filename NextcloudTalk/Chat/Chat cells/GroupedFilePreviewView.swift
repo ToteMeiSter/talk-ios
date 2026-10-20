@@ -44,6 +44,9 @@ class GroupedFilePreviewView: UIView {
     weak var delegate: GroupedFilePreviewViewDelegate?
 
     private var tileViews: [GroupedFilePreviewTileView] = []
+
+    /// The last tile when it stands for more than itself, so it points at no single file
+    private var badgeTileView: GroupedFilePreviewTileView?
     private var fileRowViews: [GroupedFileRowView] = []
 
     private lazy var tileRow: UIStackView = {
@@ -205,6 +208,11 @@ class GroupedFilePreviewView: UIView {
             self.addTapRecognizer(to: tileView, forFileAt: self.index(of: file, in: files))
 
             self.tileViews.append(tileView)
+
+            if isBadge {
+                self.badgeTileView = tileView
+            }
+
             self.tileRow.addArrangedSubview(tileView)
         }
 
@@ -220,6 +228,18 @@ class GroupedFilePreviewView: UIView {
 
         self.tileRowContainer.isHidden = layout.tiles.isEmpty
         self.fileRows.isHidden = layout.files.isEmpty
+    }
+
+    /// The position, in the order the files were shared in, of the file shown under the point.
+    ///
+    /// The point is in the coordinates of this view. Nil for the gaps, and for the "+N" tile, which
+    /// stands for several files.
+    func fileIndex(at point: CGPoint) -> Int? {
+        let fileViews: [UIView] = self.tileViews.filter { $0 !== self.badgeTileView } + self.fileRowViews
+
+        return fileViews.first { view in
+            view.bounds.contains(view.convert(point, from: self))
+        }?.tag
     }
 
     /// Passes a download notification on to the row it belongs to, if any.
@@ -258,6 +278,7 @@ class GroupedFilePreviewView: UIView {
         }
 
         self.tileViews = []
+        self.badgeTileView = nil
         self.fileRowViews = []
     }
 }
