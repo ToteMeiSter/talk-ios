@@ -3214,6 +3214,18 @@ class NCAPIController: NSObject, NKCommonDelegate {
         }
     }
 
+    /// Deletes a file or folder using its absolute WebDAV URL. A file that is gone already is no error.
+    ///
+    /// - Returns: The status code, `0` when the file was deleted or is not there.
+    func deleteFile(atServerURL serverURL: String, forAccount account: TalkAccount, completionBlock: @escaping (_ statusCode: Int) -> Void) {
+        self.setupNCCommunication(forAccount: account)
+
+        let options = NKRequestOptions(timeout: TimeInterval(60), queue: .main)
+        NextcloudKit.shared.deleteFileOrFolder(serverUrlFileName: serverURL, options: options) { _, error in
+            completionBlock(error.errorCode == 404 ? 0 : error.errorCode)
+        }
+    }
+
     func checkOrCreateAttachmentFolder(forAccount account: TalkAccount, completionBlock: @escaping (_ created: Bool, _ statusCode: Int) -> Void) {
         self.setupNCCommunication(forAccount: account)
 
