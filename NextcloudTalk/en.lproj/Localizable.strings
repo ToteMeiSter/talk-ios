@@ -1177,6 +1177,9 @@
 /* No comment provided by engineer. */
 "Error occurred while editing a message" = "Error occurred while editing a message";
 
+/* Subtitle of the diagnostics switch for uploading files from a chat in the background */
+"Experimental: files sent from a chat keep uploading when the app is closed" = "Experimental: files sent from a chat keep uploading when the app is closed";
+
 /* External signaling used */
 "External" = "External";
 
@@ -2625,6 +2628,9 @@
 
 /* No comment provided by engineer. */
 "Upload failed" = "Upload failed";
+
+/* Title of the diagnostics switch for uploading files from a chat in the background */
+"Upload files in the background" = "Upload files in the background";
 
 /* No comment provided by engineer. */
 "Uploading %ld elements" = "Uploading %ld elements";

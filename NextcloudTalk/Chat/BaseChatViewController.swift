@@ -2379,8 +2379,9 @@ import Toast
     }
 
     func upload(_ upload: ChatFileUpload) {
-        // Uploads with a temporary message are carried on by the system when the app is suspended, and the
-        // temporary message shows how they are doing
+        // With the switch of the diagnostics on, an upload with a temporary message goes to the background uploader.
+        // The system carries it on when the app is suspended, and the temporary message shows how it is doing.
+        // With the switch off, the upload runs in the app as before.
         if Self.sendsInBackground(referenceId: upload.referenceId, backgroundUploadEnabled: NCUserDefaults.backgroundUploadEnabled()) {
             Task {
                 await ChatBackgroundUploader.shared.enqueue(upload)
