@@ -31,6 +31,11 @@ struct FileMessageGroup {
         }
     }
 
+    /// The group a message belongs to, found by the message itself.
+    static func containing(messageId: Int, in groups: [Int: FileMessageGroup]) -> FileMessageGroup? {
+        return groups[messageId]
+    }
+
     /// Splits the messages of a conversation, in the order they are shown, into the groups of files
     /// that were shared as one upload. Anything that is not a file of the same upload ends a group.
     static func groups(in messages: [NCChatMessage]) -> [FileMessageGroup] {
