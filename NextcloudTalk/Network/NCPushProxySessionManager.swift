@@ -21,4 +21,12 @@ import Foundation
         self.requestSerializer.timeoutInterval = 25
     }
 
+    /// Describes a failed push proxy request with its HTTP status code and the domain and code of the error, e.g. to find out why a registration was rejected with a 400.
+    /// The answer of the server and the description of the error (it can hold the URL) are not part of it, the log is exported by the user.
+    public static func failureDescription(forTask task: URLSessionDataTask?, error: Error) -> String {
+        let statusCode = (task?.response as? HTTPURLResponse)?.statusCode
+
+        return "HTTP status: \(statusCode.map { String($0) } ?? "none"), error: \(NCLog.errorCode(error))"
+    }
+
 }
