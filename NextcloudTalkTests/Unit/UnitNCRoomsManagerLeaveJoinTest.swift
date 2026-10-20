@@ -316,4 +316,46 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
 
         XCTAssertEqual(events.filter { $0 == "exit roomA" }.count, 1)
     }
+
+    func testChatLeavesWhileMergedJoinWaitsForExitCallKeepsTheJoin() {
+        activate("roomA")
+
+        leave("roomA")
+        join("roomA")
+        join("roomA", forCall: true)
+
+        // The chat is closed again, the call still needs the room
+        leave("roomA")
+        answerExit(of: "roomA")
+        answerJoin(of: "roomA")
+
+        XCTAssertEqual(events.filter { $0 == "join roomA" }.count, 1)
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inCall, true)
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inChat, false)
+    }
+
+    func testChatLeavesWhileMergedJoinIsRunningCallKeepsTheJoin() {
+        join("roomA", forCall: true)
+        join("roomA")
+
+        leave("roomA")
+        answerJoin(of: "roomA")
+
+        XCTAssertFalse(events.contains("exit roomA"))
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inCall, true)
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inChat, false)
+    }
+
+    func testLastUseLeavingWhileJoinIsRunningStopsTheJoin() {
+        join("roomA", forCall: true)
+        join("roomA")
+
+        leave("roomA")
+        manager.leaveRoom("roomA", forAccount: NCDatabaseManager.sharedInstance().activeAccount())
+        answerJoin(of: "roomA")
+
+        // Nobody needs the room any more: its answer is ignored and the session is ended
+        XCTAssertNil(manager.activeRooms["roomA"])
+        XCTAssertEqual(events.filter { $0 == "exit roomA" }.count, 1)
+    }
 }
