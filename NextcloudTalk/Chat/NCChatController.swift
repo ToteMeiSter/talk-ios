@@ -1099,46 +1099,51 @@ public class NCChatController: NSObject {
                 return
             }
 
-            // Update chat blocks
-            // Only store a new block when getting initial history and we are in the first iteration.
-            // Otherwise, only update the chat blocks with history messages ("backwards").
-            // The blocks and the new messages are written in one transaction
-            self.storeMessages(messages, updatingChatBlocksWith: { realm in
-                if forInitialChatHistory, isFirstIteration {
-                    self.updateChatBlocks(withReceivedMessages: messages, newestKnown: messageId, andLastKnown: lastKnownMessage, with: realm)
-                } else {
-                    self.updateChatBlocks(withLastKnown: lastKnownMessage, with: realm)
-                }
-            })
+            self.handleHistoryResponse(messages: messages, lastKnownMessage: lastKnownMessage, lastCommonReadMessage: lastCommonReadMessage, statusCode: statusCode, fromMessageId: messageId, forInitialChatHistory: forInitialChatHistory, isFirstIteration: isFirstIteration, completion: completion)
+        }
+    }
 
-            if let messages, !messages.isEmpty {
-                let lastChatBlock = self.chatBlocksForRoomOrThread().last
-                // For initial chat history: always get batch from last chat block's newest message, even if it's not the first iteration.
-                // For history batch: get batch from the passed messageId. If it's not the first iteration, we will just skip invisible messages
-                // from previous iterations and not pass them to the chat view.
-                let history = self.getBatchOfMessages(inBlock: lastChatBlock,
-                                                      fromMessageId: forInitialChatHistory ? (lastChatBlock?.newestMessageId ?? 0) : messageId,
-                                                      included: forInitialChatHistory,
-                                                      ensureIncludesMessageId: forInitialChatHistory ? messageId : 0)
+    /// The handling of a successful answer of the history request, in an own method so it can be tested
+    func handleHistoryResponse(messages: [[String: Any]]?, lastKnownMessage: Int, lastCommonReadMessage: Int, statusCode: Int, fromMessageId messageId: Int, forInitialChatHistory: Bool, isFirstIteration: Bool, completion: @escaping (_ messages: [NCChatMessage]?, _ lastCommonReadMessage: Int, _ error: OcsError?, _ statusCode: Int) -> Void) {
+        // Update chat blocks
+        // Only store a new block when getting initial history and we are in the first iteration.
+        // Otherwise, only update the chat blocks with history messages ("backwards").
+        // The blocks and the new messages are written in one transaction
+        self.storeMessages(messages, updatingChatBlocksWith: { realm in
+            if forInitialChatHistory, isFirstIteration {
+                self.updateChatBlocks(withReceivedMessages: messages, newestKnown: messageId, andLastKnown: lastKnownMessage, with: realm)
+            } else {
+                self.updateChatBlocks(withLastKnown: lastKnownMessage, with: realm)
+            }
+        })
 
-                for message in history where self.willBeVisibleMessage(message) {
-                    completion(history, lastCommonReadMessage, nil, 0)
-                    return
-                }
+        if let messages, !messages.isEmpty {
+            let lastChatBlock = self.chatBlocksForRoomOrThread().last
+            // For initial chat history: always get batch from last chat block's newest message, even if it's not the first iteration.
+            // For history batch: get batch from the passed messageId. If it's not the first iteration, we will just skip invisible messages
+            // from previous iterations and not pass them to the chat view.
+            let history = self.getBatchOfMessages(inBlock: lastChatBlock,
+                                                  fromMessageId: forInitialChatHistory ? (lastChatBlock?.newestMessageId ?? 0) : messageId,
+                                                  included: forInitialChatHistory,
+                                                  ensureIncludesMessageId: forInitialChatHistory ? messageId : 0)
 
-                // Prevent infinite loop in case there are no new messages
-                if statusCode != 304 {
-                    // Recursively fetch messages until finding visible ones
-                    self.fetchHistoryUntilVisible(fromMessageId: lastKnownMessage,
-                                                  forInitialChatHistory: forInitialChatHistory,
-                                                  isFirstIteration: false,
-                                                  completion: completion)
-                    return
-                }
+            for message in history where self.willBeVisibleMessage(message) {
+                completion(history, lastCommonReadMessage, nil, 0)
+                return
             }
 
-            completion([], 0, nil, 0)
+            // Prevent infinite loop in case there are no new messages
+            if statusCode != 304 {
+                // Recursively fetch messages until finding visible ones
+                self.fetchHistoryUntilVisible(fromMessageId: lastKnownMessage,
+                                              forInitialChatHistory: forInitialChatHistory,
+                                              isFirstIteration: false,
+                                              completion: completion)
+                return
+            }
         }
+
+        completion([], 0, nil, 0)
     }
 
     public func getHistoryBatchOffline(fromMessagesId messageId: Int) {

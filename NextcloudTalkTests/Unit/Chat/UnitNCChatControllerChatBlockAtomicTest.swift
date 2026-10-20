@@ -142,4 +142,44 @@ final class UnitNCChatControllerChatBlockAtomicTest: TestBaseRealm {
         XCTAssertEqual(finalState.newestBlockMessageId, serverMessageId)
         XCTAssertTrue(finalState.serverMessageStored)
     }
+
+    func testHistoryResponseCommitsChatBlockAndMessagesTogether() throws {
+        let room = addRoom(withToken: "atomicHistoryRoom")
+        let chatController = NCChatController(for: room)!
+        chatController.stopReceivingNewChatMessages()
+
+        seedChatBlock(inRoom: room, newestMessageId: 50)
+
+        let referenceId = "ref-\(UUID().uuidString)"
+        seedTemporaryMessage(referenceId: referenceId, inRoom: room)
+        let temporaryMessage = try XCTUnwrap(NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage)
+
+        var stateWhileStoring: (newestBlockMessageId: Int, serverMessageStored: Bool)?
+        let observer = DeletionObserver()
+        observer.onDeletion = {
+            stateWhileStoring = self.committedState(ofRoom: room)
+        }
+
+        temporaryMessage.addObserver(observer, forKeyPath: "invalidated", options: [.new], context: nil)
+        defer { if !temporaryMessage.isInvalidated { temporaryMessage.removeObserver(observer, forKeyPath: "invalidated") } }
+
+        // The initial history of the first iteration adds a new block (60...100), as lastKnownMessage is newer than the stored block
+        var completionCount = 0
+        chatController.handleHistoryResponse(messages: [serverCopy(referenceId: referenceId, inRoom: room)], lastKnownMessage: 60, lastCommonReadMessage: 0, statusCode: 304, fromMessageId: serverMessageId, forInitialChatHistory: true, isFirstIteration: true) { _, _, _, _ in
+            completionCount += 1
+        }
+
+        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(observer.deletionCount, 1, "The temporary message must be deleted while storing the server copy")
+        let state = try XCTUnwrap(stateWhileStoring)
+
+        // Before the messages are committed, nobody may see a block which already covers them
+        XCTAssertFalse(state.serverMessageStored)
+        XCTAssertEqual(state.newestBlockMessageId, 50, "The chat block was committed before the messages")
+
+        // Afterwards both are there
+        let finalState = committedState(ofRoom: room)
+        XCTAssertEqual(finalState.newestBlockMessageId, serverMessageId)
+        XCTAssertTrue(finalState.serverMessageStored)
+    }
 }
