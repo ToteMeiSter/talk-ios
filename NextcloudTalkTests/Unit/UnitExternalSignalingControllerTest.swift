@@ -171,4 +171,33 @@ final class UnitExternalSignalingControllerTest: TestBaseRealm {
         signalingController.processRoomEvent(eventDict: ["type": "leave", "leave": ["session-unknown", "session-a", "session-b"]])
         XCTAssertTrue(signalingController.participantsMap.isEmpty)
     }
+
+    // MARK: - Queued messages
+
+    func testNewSessionDropsMessagesQueuedForTheOldSession() throws {
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-1"))
+        signalingController.resetWebSocket()
+
+        var status: NCExternalSignalingSendMessageStatus?
+        signalingController.send(message: ["type": "message", "message": [:]]) { _, sendStatus in status = sendStatus }
+        drainMainQueue()
+        XCTAssertNil(status)
+
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-2"))
+        drainMainQueue()
+        XCTAssertEqual(status, .applicationError)
+    }
+
+    func testResumedSessionKeepsMessagesQueuedForIt() throws {
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-1"))
+        signalingController.resetWebSocket()
+
+        var status: NCExternalSignalingSendMessageStatus?
+        signalingController.send(message: ["type": "message", "message": [:]]) { _, sendStatus in status = sendStatus }
+        drainMainQueue()
+
+        signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-1"))
+        drainMainQueue()
+        XCTAssertNotEqual(status, .applicationError)
+    }
 }
