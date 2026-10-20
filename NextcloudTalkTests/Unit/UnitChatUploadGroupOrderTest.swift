@@ -78,7 +78,7 @@ final class UnitChatUploadGroupOrderTest: XCTestCase {
 
     func testFileDoesNotWaitForEarlierFileOlderThanTheLimit() throws {
         let first = try makeState(index: 0, step: .uploading, createdAt: now - ChatUploadState.maxAge - 1)
-        let second = try makeState(index: 1, step: .uploaded, createdAt: now - ChatUploadState.maxAge - 1)
+        let second = try makeState(index: 1, step: .uploaded, createdAt: now - 10)
 
         XCTAssertFalse(isWaiting(second, among: [first, second]))
     }
@@ -116,5 +116,48 @@ final class UnitChatUploadGroupOrderTest: XCTestCase {
         XCTAssertFalse(first.follows(second))
         XCTAssertFalse(first.follows(first))
         XCTAssertFalse(otherGroup.follows(first))
+    }
+
+    func testFileThatIsExpiredItselfDoesNotWait() throws {
+        let first = try makeState(index: 0, step: .uploading)
+        let second = try makeState(index: 1, step: .uploaded, createdAt: now - ChatUploadState.maxAge - 1)
+
+        XCTAssertFalse(isWaiting(second, among: [first, second]))
+    }
+
+    func testFreshFileDoesNotWaitForEarlierFileOlderThanTheLimit() throws {
+        let first = try makeState(index: 0, step: .uploading, createdAt: now - ChatUploadState.maxAge - 1)
+        let second = try makeState(index: 1, step: .uploaded)
+
+        XCTAssertFalse(isWaiting(second, among: [first, second]))
+    }
+
+    func testFileDoesNotWaitForEarlierFileOfAnotherAccount() throws {
+        var first = try makeState(index: 0, step: .uploading)
+        first.accountId = "account-2"
+        let second = try makeState(index: 1, step: .uploaded)
+
+        XCTAssertFalse(isWaiting(second, among: [first, second]))
+        XCTAssertFalse(second.follows(first))
+    }
+
+    func testNextFollowingIsTheNearestFileThatWaitsToBePosted() throws {
+        let first = try makeState(index: 0, step: .failed)
+        let second = try makeState(index: 1, step: .uploading)
+        let third = try makeState(index: 2, step: .uploaded)
+        let fourth = try makeState(index: 3, step: .uploaded)
+        let otherGroup = try makeState(group: "other", index: 1, step: .uploaded)
+
+        XCTAssertEqual(first.nextFollowing(among: [fourth, otherGroup, third, second, first])?.id, third.id)
+        XCTAssertEqual(third.nextFollowing(among: [first, second, third, fourth])?.id, fourth.id)
+        XCTAssertNil(fourth.nextFollowing(among: [first, second, third, fourth]))
+    }
+
+    func testFileOfNoGroupHasNoFollowing() throws {
+        let single = ChatUploadState(id: "temp-1758012345.678", accountId: "account-1", roomToken: "token1", fileName: "a.jpg", localFileName: "a.jpg", createdAt: now)
+        let second = try makeState(index: 1, step: .uploaded)
+
+        XCTAssertFalse(second.follows(single))
+        XCTAssertNil(single.nextFollowing(among: [single, second]))
     }
 }
