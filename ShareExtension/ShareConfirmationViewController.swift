@@ -65,6 +65,10 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
     private var hud: MBProgressHUD?
     private var objectShareMessage: NCChatMessage?
 
+    /// Files that could not be prepared and are not reported to the user yet, shown together in one alert
+    private var failedFileNames: [String] = []
+    private var failedFilesAlert: UIAlertController?
+
     private enum ShareConfirmationType {
         case text
         case item
@@ -598,6 +602,8 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+
+        self.presentFailedFilesAlert()
 
         if self.shareType == .text {
             // When we are sharing a text, we want to start editing right away
@@ -1214,6 +1220,52 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
     }
 
     // MARK: - ShareItemController Delegate
+
+    public func shareItemController(_ shareItemController: ShareItemController, didFailToPrepareFileNamed fileName: String) {
+        DispatchQueue.main.async {
+            self.failedFileNames.append(fileName)
+            self.presentFailedFilesAlert()
+        }
+    }
+
+    /// Shows one alert for all files that failed so far. A failure that comes in while the alert is visible is added to it.
+    private func presentFailedFilesAlert() {
+        guard !self.failedFileNames.isEmpty else { return }
+
+        let message = self.failedFileNames.joined(separator: "\n")
+
+        // The alert is only reused while it is really on screen, otherwise the next failure would edit an invisible alert
+        if let alert = self.failedFilesAlert, alert.presentingViewController != nil {
+            alert.message = message
+            return
+        }
+
+        // Without a window we can't present, viewDidAppear tries again
+        guard self.viewIfLoaded?.window != nil else { return }
+
+        let alert = UIAlertController(title: NSLocalizedString("Unable to load file", comment: ""),
+                                      message: message,
+                                      preferredStyle: .alert)
+
+        alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default) { [weak self] _ in
+            self?.failedFileNames.removeAll()
+            self?.failedFilesAlert = nil
+        })
+
+        var presenter: UIViewController = self
+        // An alert already on its way (animation running) is not a presenter, its completion shows all names collected so far
+        while let presented = presenter.presentedViewController, !(presented is UIAlertController) {
+            presenter = presented
+        }
+
+        // The property is set when the presentation really happened. If present is refused, the next failure shows a new alert
+        presenter.present(alert, animated: true) { [weak self] in
+            guard let self else { return }
+
+            self.failedFilesAlert = alert
+            alert.message = self.failedFileNames.joined(separator: "\n")
+        }
+    }
 
     public func shareItemControllerItemsChanged(_ shareItemController: ShareItemController) {
         DispatchQueue.main.async {
