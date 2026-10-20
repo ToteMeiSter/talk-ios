@@ -17,6 +17,15 @@ import UIKit
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage)
 }
 
+/// Decides which media the viewer swipes to, instead of the chat messages stored for the room
+@objc protocol MediaViewerMessageSource: AnyObject {
+    /// The closest older message to show before `message`, or nil to stop there
+    func mediaViewerMessage(before message: NCChatMessage) -> NCChatMessage?
+
+    /// The closest newer message to show after `message`, or nil to stop there
+    func mediaViewerMessage(after message: NCChatMessage) -> NCChatMessage?
+}
+
 @objcMembers class NCMediaViewerViewController: UIViewController,
                                                 UIPageViewControllerDelegate,
                                                 UIPageViewControllerDataSource,
@@ -35,6 +44,7 @@ import UIKit
     private let thread: NCThread?
     private let pageController = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
     private var initialMessage: NCChatMessage
+    private weak var messageSource: MediaViewerMessageSource?
 
     private var fileMessagesToken: RLMNotificationToken?
     private var chatBlocksToken: RLMNotificationToken?
@@ -108,11 +118,12 @@ import UIKit
         return drawButton
     }()
 
-    init(initialMessage: NCChatMessage, room: NCRoom, account: TalkAccount, thread: NCThread? = nil) {
+    init(initialMessage: NCChatMessage, room: NCRoom, account: TalkAccount, thread: NCThread? = nil, messageSource: MediaViewerMessageSource? = nil) {
         self.room = room
         self.initialMessage = initialMessage
         self.account = account
         self.thread = thread
+        self.messageSource = messageSource
 
         super.init(nibName: nil, bundle: nil)
     }
@@ -192,6 +203,12 @@ import UIKit
         return self.pageController.viewControllers?.first as? NCMediaViewerPageViewController
     }
 
+    /// For a message source that got more messages after it reported the end
+    func reloadAdjacentPages() {
+        self.needsDataSourceReset = true
+        self.resetDataSourceIfNeeded()
+    }
+
     // MARK: - PageViewController delegate
 
     func getAllFileMessages() -> RLMResults<AnyObject>? {
@@ -209,8 +226,8 @@ import UIKit
         return messages
     }
 
-    // Only pictures and videos the viewer can play itself, everything else is left to the file preview
-    static func canDisplay(_ message: NCChatMessage) -> Bool {
+    /// Whether the viewer can show the file of `message`, formats only VLC can play excluded
+    static func canShowMedia(of message: NCChatMessage) -> Bool {
         guard let file = message.file(), let filePath = file.path else { return false }
 
         let fileType = file.mimetype ?? ""
@@ -221,13 +238,17 @@ import UIKit
     }
 
     func getPreviousFileMessage(from message: NCChatMessage) -> NCChatMessage? {
+        if let messageSource {
+            return messageSource.mediaViewerMessage(before: message)
+        }
+
         let prevQuery = NSPredicate(format: "messageId < %ld", message.messageId)
 
         guard let queriedObjects = self.getAllFileMessages()?.objects(with: prevQuery) else { return nil }
         let messageObject = queriedObjects.lastObject()
 
         if let message = messageObject as? NCChatMessage {
-            if NCMediaViewerViewController.canDisplay(message) {
+            if Self.canShowMedia(of: message) {
                 return message
             }
 
@@ -238,12 +259,16 @@ import UIKit
     }
 
     func getNextFileMessage(from message: NCChatMessage) -> NCChatMessage? {
+        if let messageSource {
+            return messageSource.mediaViewerMessage(after: message)
+        }
+
         let prevQuery = NSPredicate(format: "messageId > %ld", message.messageId)
 
         guard let messageObject = self.getAllFileMessages()?.objects(with: prevQuery).firstObject() else { return nil }
 
         if let message = messageObject as? NCChatMessage {
-            if NCMediaViewerViewController.canDisplay(message) {
+            if Self.canShowMedia(of: message) {
                 return message
             }
 
@@ -254,7 +279,7 @@ import UIKit
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
-        guard !self.isOpenedFromSharedItems,
+        guard !self.isOpenedFromSharedItems || self.messageSource != nil,
               let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
               !prevMediaPageVC.message.isInvalidated,
               let prevMessage = self.getPreviousFileMessage(from: prevMediaPageVC.message)
@@ -266,7 +291,7 @@ import UIKit
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
-        guard !self.isOpenedFromSharedItems,
+        guard !self.isOpenedFromSharedItems || self.messageSource != nil,
               let prevMediaPageVC = viewController as? NCMediaViewerPageViewController,
               !prevMediaPageVC.message.isInvalidated,
               let nextMessage = self.getNextFileMessage(from: prevMediaPageVC.message)
@@ -284,7 +309,6 @@ import UIKit
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
         self.isTransitioning = false
         self.resetDataSourceIfNeeded()
-
         guard let mediaPageViewController = self.getCurrentPageViewController() else { return }
 
         // On a cancelled swipe the previous view controller is the current one again
@@ -330,7 +354,7 @@ import UIKit
 
         if let fileMessages = self.getAllFileMessages() {
             // The results are sorted from the oldest to the newest message
-            for case let message as NCChatMessage in fileMessages where NCMediaViewerViewController.canDisplay(message) {
+            for case let message as NCChatMessage in fileMessages where Self.canShowMedia(of: message) {
                 messageIds.append(message.messageId)
             }
         }
@@ -567,7 +591,7 @@ import UIKit
 
     private func showAllMedia() {
         // Opens on the media tab, as long as the conversation has any media
-        let sharedItemsViewController = RoomSharedItemsTableViewController(room: self.room)
+        let sharedItemsViewController = RoomSharedItemsViewController(room: self.room)
         sharedItemsViewController.navigationItem.rightBarButtonItem = UIBarButtonItem(title: NSLocalizedString("Close", comment: ""), primaryAction: UIAction { [weak sharedItemsViewController] _ in
             sharedItemsViewController?.dismiss(animated: true)
         })
