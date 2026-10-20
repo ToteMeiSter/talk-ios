@@ -2397,6 +2397,17 @@ import SwiftUI
 
     // MARK: - ContextMenu (Long press on message)
 
+    private func canDeleteFileMessage(_ message: NCChatMessage) -> Bool {
+        return message.isDeletable(for: self.account, in: self.room) && self.room.canChat
+    }
+
+    private func getDeleteAction(for message: NCChatMessage, title: String = NSLocalizedString("Delete", comment: "")) -> UIAction {
+        return UIAction(title: title, image: .init(systemName: "trash"), attributes: .destructive) { _ in
+            self.didPressDelete(for: message)
+        }
+    }
+
+
     func isMessageReplyable(message: NCChatMessage) -> Bool {
         return message.isReplyable && !message.isDeleting
     }
@@ -2796,17 +2807,26 @@ import SwiftUI
             })
         }
 
-        // Delete option. A group is deleted as a whole, so no file of it is left behind unseen.
+        // Delete option. A file of a group is deleted on its own: the one under the finger, or one picked
+        // from a list when the finger is not on a file.
         if let fileGroup = self.fileMessageGroups[message.messageId] {
-            if self.room.canChat, fileGroup.messages.allSatisfy({ $0.isDeletable(for: self.account, in: self.room) }) {
-                destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
-                    self.didPressDeleteAll(in: fileGroup)
-                })
+            let fileMessage = (cell as? BaseChatTableViewCell)?.fileGroupMessage(at: point, in: tableView)
+
+            if let fileMessage {
+                if self.canDeleteFileMessage(fileMessage) {
+                    destructiveMenuActions.append(self.getDeleteAction(for: fileMessage))
+                }
+            } else {
+                let deleteActions = fileGroup.messagesInUploadOrder.filter { self.canDeleteFileMessage($0) }.map { fileMessage in
+                    self.getDeleteAction(for: fileMessage, title: fileMessage.file()?.name ?? NSLocalizedString("Delete", comment: ""))
+                }
+
+                if !deleteActions.isEmpty {
+                    destructiveMenuActions.append(UIMenu(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), options: .destructive, children: deleteActions))
+                }
             }
         } else if message.sendingFailed || message.isOfflineMessage || (message.isDeletable(for: self.account, in: self.room) && self.room.canChat) {
-            destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
-                self.didPressDelete(for: message)
-            })
+            destructiveMenuActions.append(self.getDeleteAction(for: message))
         }
 
         if !destructiveMenuActions.isEmpty {

@@ -100,6 +100,65 @@ final class UnitFileMessageGroupTest: TestBaseRealm {
         XCTAssertEqual(FileMessageGroup.groups(in: messages).count, 1)
     }
 
+    // MARK: - Deleting one file of a group
+
+    private func deleted(_ message: NCChatMessage) throws -> NCChatMessage {
+        return try self.message(upload: self.uploadA,
+                                position: message.fileUploadReference?.position ?? 1,
+                                text: "Message deleted",
+                                overrides: ["id": message.messageId, "messageType": "comment_deleted", "messageParameters": [:]])
+    }
+
+    /// The server keeps the deleted message, in the place the file had, with its reference id
+    func testTheOtherFilesStayTogetherWhenOneInTheMiddleIsDeleted() throws {
+        let first = try self.message(upload: self.uploadA, position: 1)
+        let second = try self.message(upload: self.uploadA, position: 2)
+        let third = try self.message(upload: self.uploadA, position: 3)
+
+        let groups = FileMessageGroup.groups(in: [first, try self.deleted(second), third])
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.messages.map(\.messageId), [first.messageId, third.messageId])
+    }
+
+    func testTheOtherFilesStayTogetherWhenTheLastOneIsDeleted() throws {
+        let first = try self.message(upload: self.uploadA, position: 1)
+        let second = try self.message(upload: self.uploadA, position: 2)
+        let third = try self.message(upload: self.uploadA, position: 3)
+
+        let groups = FileMessageGroup.groups(in: [first, second, try self.deleted(third)])
+
+        XCTAssertEqual(groups.first?.messages.map(\.messageId), [first.messageId, second.messageId])
+    }
+
+    func testAFileBeingDeletedDoesNotSplitTheGroup() throws {
+        let first = try self.message(upload: self.uploadA, position: 1)
+        let second = try self.message(upload: self.uploadA, position: 2)
+        let third = try self.message(upload: self.uploadA, position: 3)
+
+        let deleting = try XCTUnwrap(second.copy() as? NCChatMessage)
+        deleting.isDeleting = true
+
+        let groups = FileMessageGroup.groups(in: [first, deleting, third])
+
+        XCTAssertEqual(groups.first?.messages.map(\.messageId), [first.messageId, third.messageId])
+    }
+
+    func testOneFileLeftAfterDeletionIsAnOrdinaryMessage() throws {
+        let first = try self.message(upload: self.uploadA, position: 1)
+        let second = try self.message(upload: self.uploadA, position: 2)
+
+        XCTAssertTrue(FileMessageGroup.groups(in: [first, try self.deleted(second)]).isEmpty)
+    }
+
+    func testADeletedFileOfAnotherUploadEndsTheGroup() throws {
+        let first = try self.message(upload: self.uploadA, position: 1)
+        let otherDeleted = try self.message(upload: self.uploadB, position: 1, text: "Message deleted", overrides: ["messageType": "comment_deleted", "messageParameters": [:]])
+        let second = try self.message(upload: self.uploadA, position: 2)
+
+        XCTAssertTrue(FileMessageGroup.groups(in: [first, otherDeleted, second]).isEmpty)
+    }
+
     // MARK: - What ends a group
 
     func testTwoUploadsAreNotMergedIntoOne() throws {

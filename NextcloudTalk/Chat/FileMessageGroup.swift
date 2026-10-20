@@ -48,6 +48,11 @@ struct FileMessageGroup {
 
         for message in messages {
             guard message.isGroupableFileMessage else {
+                // A file deleted from the upload leaves the files around it together
+                if let previous = currentGroup.last, message.isRemovedFile(ofTheSameUploadAs: previous) {
+                    continue
+                }
+
                 finishCurrentGroup()
                 continue
             }
