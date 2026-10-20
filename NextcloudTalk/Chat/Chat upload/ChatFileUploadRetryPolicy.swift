@@ -142,7 +142,7 @@ enum ChatFileUploadRetryPolicy {
              NSURLErrorResourceUnavailable:               // -1008
             return .server
         default:
-            // Includes -999 (cancelled), -1201 to -1206 (certificate and certificate problems) and
+            // Includes -999 (cancelled), -1201 to -1206 (certificate problems) and
             // local problems like a missing file
             return .permanent
         }
