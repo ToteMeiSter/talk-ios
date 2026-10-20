@@ -19,7 +19,9 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
     // The requests in the order they were sent, answers of the exit requests wait until the test sends them
     private var events = [String]()
     private var pendingExits = [String: (OcsError?) -> Void]()
+    private var pendingJoins = [String: (String?, NCRoom?, OcsError?, Int, String?) -> Void]()
     private var observer: NSObjectProtocol?
+    private var joinObserver: NSObjectProtocol?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -33,9 +35,20 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
             return self.makeTask()
         }
 
-        manager.joinRoomRequest = { [unowned self] token, _, _ in
+        manager.joinRoomRequest = { [unowned self] token, _, completionBlock in
             self.events.append("join \(token)")
+            self.pendingJoins[token] = completionBlock
             return self.makeTask()
+        }
+
+        // No signaling server in the tests: a successful join ends right after the answer of the join request
+        manager.externalSignalingRequest = { _, _, completion in
+            completion(nil, nil, nil)
+        }
+
+        joinObserver = NotificationCenter.default.addObserver(forName: .NCRoomsManagerDidJoinRoom, object: manager, queue: nil) { [unowned self] notification in
+            let failed = notification.userInfo?["error"] != nil
+            self.events.append("joined \(notification.userInfo?["token"] as? String ?? "")\(failed ? " failed" : "")")
         }
 
         observer = NotificationCenter.default.addObserver(forName: .NCRoomsManagerDidLeaveRoom, object: manager, queue: nil) { [unowned self] notification in
@@ -48,7 +61,15 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
             NotificationCenter.default.removeObserver(observer)
         }
 
-        // Answer open exits and drop open joins, the manager is shared between the tests
+        if let joinObserver {
+            NotificationCenter.default.removeObserver(joinObserver)
+        }
+
+        // Answer open joins and exits, the manager is shared between the tests
+        for token in Array(pendingJoins.keys) {
+            answerJoin(of: token, error: OcsError.genericError(), statusCode: 403)
+        }
+
         for token in Array(pendingExits.keys) {
             answerExit(of: token)
         }
@@ -60,6 +81,7 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
 
         manager.exitRoomRequest = originalExitRoomRequest
         manager.joinRoomRequest = originalJoinRoomRequest
+        manager.externalSignalingRequest = nil
 
         try super.tearDownWithError()
     }
@@ -79,6 +101,10 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
 
     private func join(_ token: String, forCall call: Bool = false) {
         manager.joinRoom(token, forAccountId: accountId, forCall: call)
+    }
+
+    private func answerJoin(of token: String, sessionId: String? = "session-new", error: OcsError? = nil, statusCode: Int = 0) {
+        pendingJoins.removeValue(forKey: token)?(error == nil ? sessionId : nil, nil, error, statusCode, nil)
     }
 
     private func answerExit(of token: String, error: OcsError? = nil) {
@@ -182,5 +208,112 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         join("roomA")
 
         XCTAssertEqual(events, ["exit roomA", "left roomA", "join roomA"])
+    }
+
+    // MARK: - Two joins of the same room (the flags say who needs the room: the chat, the call, or both)
+
+    func testChatThenCallWhileWaitingForExitKeepsBothFlags() {
+        activate("roomA")
+
+        leave("roomA")
+        join("roomA")
+        join("roomA", forCall: true)
+        answerExit(of: "roomA")
+        answerJoin(of: "roomA")
+
+        // One session for both. Without the chat flag the end of the call would leave the room under the open chat
+        XCTAssertEqual(events.filter { $0 == "join roomA" }.count, 1)
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inChat, true)
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inCall, true)
+    }
+
+    func testCallThenChatWhileWaitingForExitKeepsBothFlags() {
+        activate("roomA")
+
+        leave("roomA")
+        join("roomA", forCall: true)
+        join("roomA")
+        answerExit(of: "roomA")
+        answerJoin(of: "roomA")
+
+        // Without the call flag the end of the chat would leave the room under the running call
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inChat, true)
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inCall, true)
+    }
+
+    func testSecondJoinWhileFirstIsRunningDoesNotSendASecondRequest() {
+        join("roomA")
+        join("roomA", forCall: true)
+
+        // Two requests would create two sessions, the call would start with the one which the server already closed
+        XCTAssertEqual(events.filter { $0 == "join roomA" }.count, 1)
+
+        answerJoin(of: "roomA")
+
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inChat, true)
+        XCTAssertEqual(manager.activeRooms["roomA"]?.inCall, true)
+    }
+
+    // MARK: - A re-join of a call room must not touch the join of another room
+
+    func testRejoinOfOtherRoomDoesNotCancelWaitingJoin() {
+        activate("roomA")
+        activate("roomB")
+
+        leave("roomA")
+        join("roomA")
+        manager.rejoinRoomForCall("roomB", forAccount: NCDatabaseManager.sharedInstance().activeAccount()) { _, _, _, _, _ in }
+        answerExit(of: "roomA")
+
+        // The re-join ends first and must not clear the state of the join of roomA
+        answerJoin(of: "roomB", error: OcsError.genericError(), statusCode: 500)
+        answerJoin(of: "roomA", error: OcsError.genericError(), statusCode: 403)
+
+        XCTAssertTrue(events.contains("joined roomA failed"))
+        XCTAssertEqual(events.filter { $0 == "exit roomA" }.count, 1)
+    }
+
+    func testRejoinOfOtherRoomDoesNotTakeOverRunningJoin() {
+        activate("roomB")
+
+        join("roomA")
+        manager.rejoinRoomForCall("roomB", forAccount: NCDatabaseManager.sharedInstance().activeAccount()) { _, _, _, _, _ in }
+        answerJoin(of: "roomA", error: OcsError.genericError(), statusCode: 403)
+
+        XCTAssertTrue(events.contains("joined roomA failed"))
+    }
+
+    // MARK: - The answer of a join which is not wanted any more
+
+    private func cancelledError() -> OcsError {
+        return OcsError(withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled), withTask: nil)
+    }
+
+    func testCancelledJoinOfLeftRoomIsLeftOnServer() {
+        join("roomA")
+        manager.leaveRoom("roomA", forAccount: NCDatabaseManager.sharedInstance().activeAccount())
+
+        // The server may have handled the request before it was cancelled, so there can be a session to end
+        answerJoin(of: "roomA", error: cancelledError(), statusCode: 0)
+
+        XCTAssertEqual(events.filter { $0 == "exit roomA" }.count, 1)
+    }
+
+    func testFailedJoinOfLeftRoomIsNotLeftOnServer() {
+        join("roomA")
+        manager.leaveRoom("roomA", forAccount: NCDatabaseManager.sharedInstance().activeAccount())
+
+        answerJoin(of: "roomA", error: OcsError(withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut), withTask: nil), statusCode: 0)
+
+        XCTAssertFalse(events.contains("exit roomA"))
+    }
+
+    func testSuccessfulJoinOfLeftRoomIsLeftOnServer() {
+        join("roomA")
+        manager.leaveRoom("roomA", forAccount: NCDatabaseManager.sharedInstance().activeAccount())
+
+        answerJoin(of: "roomA")
+
+        XCTAssertEqual(events.filter { $0 == "exit roomA" }.count, 1)
     }
 }

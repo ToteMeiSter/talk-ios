@@ -69,6 +69,9 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: completionBlock)
     }
 
+    // Replaces the lookup of the external signaling controller after a join, tests have no signaling server
+    internal var externalSignalingRequest: ((TalkAccount, String, @escaping (NCExternalSignalingController?, SignalingSettings?, Error?) -> Void) -> Void)?
+
     private var joiningRoomToken: String?
     private var leavingRoomTokens = Set<String>()
     private var joiningSessionId: String?
@@ -1443,6 +1446,11 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     private func getExternalSignalingHelper(for account: TalkAccount, forRoom token: String, withCompletion completion: @escaping (NCExternalSignalingController?, SignalingSettings?, Error?) -> Void) {
+        if let externalSignalingRequest {
+            externalSignalingRequest(account, token, completion)
+            return
+        }
+
         let room = NCDatabaseManager.sharedInstance().room(withToken: token, forAccountId: account.accountId)
 
         guard room?.supportsFederatedCalling ?? false else {
@@ -1490,7 +1498,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         self.rejoinAttemptId = attemptId
 
         self.joiningRoomToken = token
-        self.joinRoomTask = NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: { sessionId, room, error, statusCode, statusReason in
+        self.joinRoomTask = self.joinRoomRequest(token, account, { sessionId, room, error, statusCode, statusReason in
             // The result of a cancelled earlier attempt must not clear what the later attempt has set
             defer {
                 if self.rejoinAttemptId == attemptId {
