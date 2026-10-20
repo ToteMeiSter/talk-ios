@@ -32,6 +32,7 @@ class DiagnosticsTableViewController: UITableViewController {
         case kAppSectionAllowLocationAccess
         case kAppSectionAllowPhotoLibraryAccess
         case kAppSectionCallKitEnabled
+        case kAppSectionBackgroundUpload
         case kAppSectionOpenSettings
         case kAppSectionCount
     }
@@ -105,6 +106,7 @@ class DiagnosticsTableViewController: UITableViewController {
     let cellIdentifierAction = "cellIdentifierAction"
     let cellIdentifierSubtitle = "cellIdentifierSubtitle"
     let cellIdentifierSubtitleAccessory = "cellIdentifierSubtitleAccessory"
+    let cellIdentifierSwitch = "cellIdentifierSwitch"
 
     init(withAccount account: TalkAccount) {
         self.account = account
@@ -140,6 +142,7 @@ class DiagnosticsTableViewController: UITableViewController {
 
         self.tableView.register(UITableViewCell.self, forCellReuseIdentifier: cellIdentifierAction)
         self.tableView.register(SubtitleTableViewCell.self, forCellReuseIdentifier: cellIdentifierSubtitle)
+        self.tableView.register(SubtitleTableViewCell.self, forCellReuseIdentifier: cellIdentifierSwitch)
         self.tableView.register(SubtitleTableViewCell.self, forCellReuseIdentifier: cellIdentifierSubtitleAccessory)
 
         runChecks()
@@ -355,6 +358,9 @@ class DiagnosticsTableViewController: UITableViewController {
         case AppSections.kAppSectionAllowPhotoLibraryAccess.rawValue:
             return appPhotoLibraryAccessCell(for: indexPath)
 
+        case AppSections.kAppSectionBackgroundUpload.rawValue:
+            return appBackgroundUploadCell(for: indexPath)
+
         case AppSections.kAppSectionOpenSettings.rawValue:
             let cell = tableView.dequeueReusableCell(withIdentifier: cellIdentifierAction, for: indexPath)
 
@@ -389,6 +395,27 @@ class DiagnosticsTableViewController: UITableViewController {
         }
 
         return cell
+    }
+
+    /// Files sent from a chat are uploaded by the background uploader. Off by default and only here, not in the settings.
+    func appBackgroundUploadCell(for indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: cellIdentifierSwitch, for: indexPath)
+
+        cell.textLabel?.text = NSLocalizedString("Upload files in the background", comment: "")
+        cell.detailTextLabel?.text = NSLocalizedString("Experimental: files sent from a chat keep uploading when the app is closed", comment: "")
+        cell.detailTextLabel?.numberOfLines = 0
+        cell.selectionStyle = .none
+
+        let toggle = UISwitch()
+        toggle.isOn = NCUserDefaults.backgroundUploadEnabled()
+        toggle.addTarget(self, action: #selector(backgroundUploadSwitchChanged(_:)), for: .valueChanged)
+        cell.accessoryView = toggle
+
+        return cell
+    }
+
+    @objc func backgroundUploadSwitchChanged(_ sender: UISwitch) {
+        NCUserDefaults.setBackgroundUploadEnabled(sender.isOn)
     }
 
     func appAVAccessCell(for mediaType: AVMediaType, for indexPath: IndexPath) -> UITableViewCell {

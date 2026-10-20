@@ -9,6 +9,7 @@ public class NCUserDefaults: NSObject {
 
     private static let preferredCameraFlashModeKey = "ncPreferredCameraFlashMode"
     private static let backgroundBlurEnabledKey = "ncBackgroundBlurEnabled"
+    private static let backgroundUploadEnabledKey = "ncBackgroundUploadEnabled"
     private static let includeCallsInRecentsKey = "ncIncludeCallsInRecents"
     private static let preferredCallViewModeKey = "ncPreferredCallViewMode"
     private static let speakerViewStripeHiddenKey = "ncSpeakerViewStripeHidden"
@@ -27,6 +28,15 @@ public class NCUserDefaults: NSObject {
 
     public static func backgroundBlurEnabled() -> Bool {
         return UserDefaults.standard.bool(forKey: backgroundBlurEnabledKey)
+    }
+
+    public static func setBackgroundUploadEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: backgroundUploadEnabledKey)
+    }
+
+    /// Whether files sent from a chat are uploaded by the background uploader. Off unless switched on in the diagnostics.
+    public static func backgroundUploadEnabled() -> Bool {
+        return UserDefaults.standard.bool(forKey: backgroundUploadEnabledKey)
     }
 
     public static func setIncludeCallsInRecentsEnabled(_ enabled: Bool) {
