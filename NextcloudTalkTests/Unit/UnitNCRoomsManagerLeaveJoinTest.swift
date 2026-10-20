@@ -14,12 +14,15 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
     private var accountId: String { TestBaseRealm.fakeAccountId }
 
     private var originalExitRoomRequest: ((String, TalkAccount, @escaping (OcsError?) -> Void) -> URLSessionTask?)!
+    private var originalSignalingJoinTimeout: TimeInterval = 0
     private var originalJoinRoomRequest: ((String, TalkAccount, @escaping (String?, NCRoom?, OcsError?, Int, String?) -> Void) -> URLSessionTask?)!
 
     // The requests in the order they were sent, answers of the exit requests wait until the test sends them
     private var events = [String]()
     private var pendingExits = [String: (OcsError?) -> Void]()
-    private var pendingJoins = [String: (String?, NCRoom?, OcsError?, Int, String?) -> Void]()
+    private var pendingJoins = [String: [(String?, NCRoom?, OcsError?, Int, String?) -> Void]]()
+    // Every join request in the order it was sent, to see which of them was cancelled
+    private var joinTasks = [String: [URLSessionTask]]()
     private var observer: NSObjectProtocol?
     private var joinObserver: NSObjectProtocol?
 
@@ -28,6 +31,7 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
 
         originalExitRoomRequest = manager.exitRoomRequest
         originalJoinRoomRequest = manager.joinRoomRequest
+        originalSignalingJoinTimeout = manager.externalSignalingJoinTimeout
 
         manager.exitRoomRequest = { [unowned self] token, _, completionBlock in
             self.events.append("exit \(token)")
@@ -37,8 +41,11 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
 
         manager.joinRoomRequest = { [unowned self] token, _, completionBlock in
             self.events.append("join \(token)")
-            self.pendingJoins[token] = completionBlock
-            return self.makeTask()
+            self.pendingJoins[token, default: []].append(completionBlock)
+
+            let task = self.makeTask()
+            self.joinTasks[token, default: []].append(task)
+            return task
         }
 
         // No signaling server in the tests: a successful join ends right after the answer of the join request
@@ -66,11 +73,12 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         }
 
         // Answer open joins and exits, the manager is shared between the tests
-        for token in Array(pendingJoins.keys) {
+        while let token = pendingJoins.keys.first {
             answerJoin(of: token, error: OcsError.genericError(), statusCode: 403)
         }
 
-        for token in Array(pendingExits.keys) {
+        // An answer can start another exit (the repeated exit of a left room)
+        while let token = pendingExits.keys.first {
             answerExit(of: token)
         }
 
@@ -82,6 +90,7 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         manager.exitRoomRequest = originalExitRoomRequest
         manager.joinRoomRequest = originalJoinRoomRequest
         manager.externalSignalingRequest = nil
+        manager.externalSignalingJoinTimeout = originalSignalingJoinTimeout
 
         try super.tearDownWithError()
     }
@@ -103,8 +112,14 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         manager.joinRoom(token, forAccountId: accountId, forCall: call)
     }
 
+    /// Answers the oldest open join request of the room, requests of one room are answered in the order they were sent
     private func answerJoin(of token: String, sessionId: String? = "session-new", error: OcsError? = nil, statusCode: Int = 0) {
-        pendingJoins.removeValue(forKey: token)?(error == nil ? sessionId : nil, nil, error, statusCode, nil)
+        guard var requests = pendingJoins[token], !requests.isEmpty else { return }
+
+        let answer = requests.removeFirst()
+        pendingJoins[token] = requests.isEmpty ? nil : requests
+
+        answer(error == nil ? sessionId : nil, nil, error, statusCode, nil)
     }
 
     private func answerExit(of token: String, error: OcsError? = nil) {
@@ -357,5 +372,194 @@ final class UnitNCRoomsManagerLeaveJoinTest: TestBaseRealm {
         // Nobody needs the room any more: its answer is ignored and the session is ended
         XCTAssertNil(manager.activeRooms["roomA"])
         XCTAssertEqual(events.filter { $0 == "exit roomA" }.count, 1)
+    }
+
+    // MARK: - A re-join which is cancelled or answered after the room was left must not leave a session behind
+
+    private var account: TalkAccount { NCDatabaseManager.sharedInstance().activeAccount() }
+
+    private func rejoin(_ token: String, completion: @escaping (String?, Error?, Int) -> Void = { _, _, _ in }) {
+        manager.rejoinRoomForCall(token, forAccount: account) { sessionId, _, error, statusCode, _ in
+            completion(sessionId, error, statusCode)
+        }
+    }
+
+    private func exitCount(of token: String) -> Int {
+        return events.filter { $0 == "exit \(token)" }.count
+    }
+
+    func testCancelledRejoinOfLeftRoomIsLeftOnServerAfterTheExit() {
+        activate("roomA")
+
+        rejoin("roomA")
+        leave("roomA")
+
+        // The cancel does not revoke the request: the server can handle it after the DELETE of the leave and
+        // the session which it creates then belongs to nobody
+        answerJoin(of: "roomA", error: cancelledError(), statusCode: 0)
+        XCTAssertEqual(exitCount(of: "roomA"), 1)
+
+        answerExit(of: "roomA")
+        XCTAssertEqual(exitCount(of: "roomA"), 2)
+
+        answerExit(of: "roomA")
+        XCTAssertEqual(exitCount(of: "roomA"), 2)
+    }
+
+    func testRejoinAnsweredAfterTheExitOfLeftRoomIsLeftOnServer() {
+        activate("roomA")
+
+        rejoin("roomA")
+        leave("roomA")
+        answerExit(of: "roomA")
+        answerJoin(of: "roomA")
+
+        XCTAssertEqual(exitCount(of: "roomA"), 2)
+    }
+
+    func testRejoinOfLeftRoomIsReportedAsNotActive() {
+        activate("roomA")
+
+        var result: (String?, Error?, Int)?
+        rejoin("roomA") { result = ($0, $1, $2) }
+        leave("roomA")
+        answerJoin(of: "roomA")
+
+        // The call must not go on with a session of a room it has left
+        XCTAssertNil(result?.0)
+        XCTAssertEqual(result?.2, NCRoomsManager.statusCodeRoomNotActive)
+    }
+
+    func testFailedRejoinOfLeftRoomIsNotLeftOnServer() {
+        activate("roomA")
+
+        rejoin("roomA")
+        leave("roomA")
+        answerExit(of: "roomA")
+        answerJoin(of: "roomA", error: OcsError(withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut), withTask: nil), statusCode: 0)
+
+        XCTAssertEqual(exitCount(of: "roomA"), 1)
+    }
+
+    func testRejoinOfLeftRoomDoesNotEndTheSessionOfANewJoin() {
+        activate("roomA")
+
+        rejoin("roomA")
+        leave("roomA")
+        answerExit(of: "roomA")
+        join("roomA")
+        answerJoin(of: "roomA")
+        answerJoin(of: "roomA")
+
+        // The first answer is the one of the re-join, the second one of the new join. The new join is the answer to the rejoin as well: the server replaces the session of the cookie
+        XCTAssertEqual(exitCount(of: "roomA"), 1)
+        XCTAssertNotNil(manager.activeRooms["roomA"])
+    }
+
+    func testReplacedRejoinOfActiveRoomIsNotLeftOnServer() {
+        activate("roomA")
+
+        rejoin("roomA")
+        rejoin("roomA")
+
+        // The earlier request is cancelled, the later one serves the room. An exit would end the later session
+        XCTAssertNotEqual(joinTasks["roomA"]?.first?.state, .suspended)
+        XCTAssertEqual(exitCount(of: "roomA"), 0)
+    }
+
+    // MARK: - Re-joins of two rooms are tracked each on its own
+
+    func testLeavingRoomCancelsItsRejoinAlthoughAnotherRoomRejoinedLater() {
+        activate("roomA")
+        activate("roomB")
+
+        rejoin("roomA")
+        rejoin("roomB")
+        leave("roomA")
+
+        XCTAssertNotEqual(joinTasks["roomA"]?.first?.state, .suspended)
+        XCTAssertEqual(joinTasks["roomB"]?.first?.state, .suspended)
+    }
+
+    func testSecondRejoinOfRoomCancelsTheFirstAlthoughAnotherRoomRejoinedBetween() {
+        activate("roomA")
+        activate("roomB")
+
+        rejoin("roomA")
+        rejoin("roomB")
+        rejoin("roomA")
+
+        XCTAssertEqual(joinTasks["roomA"]?.count, 2)
+        XCTAssertNotEqual(joinTasks["roomA"]?.first?.state, .suspended)
+        XCTAssertEqual(joinTasks["roomA"]?.last?.state, .suspended)
+    }
+
+    // MARK: - A signaling server which does not answer must not keep the room for ever
+
+    private func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) {
+        let end = Date().addingTimeInterval(timeout)
+
+        while !condition() && Date() < end {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+    }
+
+    /// A controller which is not connected keeps the room message in its queue and never answers it
+    private func useSilentSignalingServer() {
+        let silentController = NCExternalSignalingController(account: account, serverUrl: "https://localhost.invalid", ticket: "fakeTicket")
+        manager.externalSignalingJoinTimeout = 0.3
+        manager.externalSignalingRequest = { _, _, completion in
+            completion(silentController, nil, nil)
+        }
+    }
+
+    func testJoinIsRetriedAndEndsWhenSignalingServerDoesNotAnswer() {
+        useSilentSignalingServer()
+
+        join("roomA", forCall: true)
+        answerJoin(of: "roomA")
+
+        // The wait for the signaling server is bounded: the join is tried again like after any other failure
+        waitUntil { events.filter { $0 == "join roomA" }.count >= 2 }
+        XCTAssertEqual(events.filter { $0 == "join roomA" }.count, 2)
+
+        answerJoin(of: "roomA", error: OcsError.genericError(), statusCode: 403)
+        XCTAssertTrue(events.contains("joined roomA failed"))
+
+        // The room is free again: a new join sends a request, it is not merged into a join which never ends
+        join("roomA")
+        XCTAssertEqual(events.filter { $0 == "join roomA" }.count, 3)
+    }
+
+    func testRejoinFailsWhenSignalingServerDoesNotAnswer() {
+        useSilentSignalingServer()
+        activate("roomA")
+
+        var result: (String?, Error?, Int)?
+        rejoin("roomA") { result = ($0, $1, $2) }
+        answerJoin(of: "roomA")
+
+        waitUntil { result != nil }
+
+        // The caller is told, so it can repeat the re-join
+        XCTAssertNotNil(result)
+        XCTAssertNil(result?.0)
+        XCTAssertNotNil(result?.1)
+    }
+
+    func testRejoinAnsweredBySignalingServerAfterLeaveIsReportedAsNotActive() {
+        useSilentSignalingServer()
+        activate("roomA")
+
+        var result: (String?, Error?, Int)?
+        rejoin("roomA") { result = ($0, $1, $2) }
+        answerJoin(of: "roomA")
+
+        // The call ended and the room is left while the signaling server is asked
+        manager.activeRooms["roomA"]?.inCall = false
+        leave("roomA")
+        waitUntil { result != nil }
+
+        XCTAssertEqual(result?.2, NCRoomsManager.statusCodeRoomNotActive)
     }
 }
