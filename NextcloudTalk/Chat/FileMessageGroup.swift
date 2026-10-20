@@ -69,6 +69,19 @@ struct FileMessageGroup {
         return groups
     }
 
+    /// The group a message belongs to, whether it is the message shown for the group or one hidden in it.
+    /// `groups` is by the id of the anchor, `hiddenMessageIds` maps a hidden message to its anchor.
+    static func group(of message: NCChatMessage, in groups: [Int: FileMessageGroup], hiddenMessageIds: [Int: Int]) -> FileMessageGroup? {
+        return groups[hiddenMessageIds[message.messageId] ?? message.messageId]
+    }
+
+    /// The selected messages with all files of every group they belong to. A group is one row of the chat, so
+    /// picking it picks every file of its upload. Each group stands where its first selected message was, its
+    /// files in the order of the upload, and the other messages keep their order.
+    static func expandingSelection(_ selected: [NCChatMessage], in groups: [Int: FileMessageGroup], hiddenMessageIds: [Int: Int]) -> [NCChatMessage] {
+        return selected
+    }
+
     /// Position within the upload is deliberately not compared: a file that failed to upload leaves
     /// a gap, and the files around it still belong together.
     private static func belongToTheSameUpload(_ message: NCChatMessage, _ other: NCChatMessage) -> Bool {
