@@ -373,7 +373,11 @@ public enum NCExternalSignalingSendMessageStatus {
         }
 
         self.resumeId = helloDict["resumeid"] as? String
-        self.disconnectTime = nil
+
+        // The hello is processed on the URLSession delegate queue, `disconnectTime` is only accessed on the main thread
+        DispatchQueue.main.async {
+            self.disconnectTime = nil
+        }
 
         let sessionChanged = self.sessionId != newSessionId
         self.sessionId = newSessionId
