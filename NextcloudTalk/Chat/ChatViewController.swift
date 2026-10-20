@@ -1444,6 +1444,18 @@ import SwiftUI
             return
         }
 
+        // A join can finish after the app resigned active (the join was already running). appWillResignActive
+        // already stopped the chat, so starting to receive now would poll in the background with
+        // markNotificationsAsRead enabled and remove the notifications of this conversation.
+        // The next join in appDidBecomeActive continues here.
+        if UIApplication.shared.applicationState != .active {
+            if self.hasReceiveInitialHistory {
+                self.startReceivingMessagesAfterJoin = true
+            }
+
+            return
+        }
+
         if self.startReceivingMessagesAfterJoin, self.hasReceiveInitialHistory {
             self.startReceivingMessagesAfterJoin = false
             self.chatController.startReceivingNewChatMessages()
