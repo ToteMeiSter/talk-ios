@@ -6,7 +6,7 @@
 import Foundation
 
 /// What went wrong with one request of an upload, reduced to the facts the retry policy needs.
-struct ChatFileUploadFailure: Equatable {
+struct ChatFileUploadFailure: Codable, Equatable {
 
     /// HTTP status code of the answer of the server, if there was one.
     var httpStatusCode: Int?
@@ -17,10 +17,14 @@ struct ChatFileUploadFailure: Equatable {
     /// Seconds the server asked us to wait, if it did.
     var retryAfter: TimeInterval?
 
-    init(httpStatusCode: Int? = nil, urlErrorCode: Int? = nil, retryAfter: TimeInterval? = nil) {
+    /// Why the system cancelled a background transfer (`NSURLErrorBackgroundTaskCancelledReasonKey`), if it did.
+    var backgroundCancelReason: Int?
+
+    init(httpStatusCode: Int? = nil, urlErrorCode: Int? = nil, retryAfter: TimeInterval? = nil, backgroundCancelReason: Int? = nil) {
         self.httpStatusCode = httpStatusCode
         self.urlErrorCode = urlErrorCode
         self.retryAfter = retryAfter
+        self.backgroundCancelReason = backgroundCancelReason
     }
 
     /// Looks through the error (and the errors it wraps) for an HTTP status code or an URL error code.
@@ -34,7 +38,9 @@ struct ChatFileUploadFailure: Equatable {
             urlErrorCode = nil
         }
 
-        self.init(httpStatusCode: httpStatusCode, urlErrorCode: urlErrorCode)
+        self.init(httpStatusCode: httpStatusCode,
+                  urlErrorCode: urlErrorCode,
+                  backgroundCancelReason: ChatFileUploadRetryPolicy.backgroundCancelReason(of: error))
     }
 }
 
@@ -184,6 +190,40 @@ enum ChatFileUploadRetryPolicy {
         case .permanent:
             return .fail
         }
+    }
+
+    // MARK: - Cancelled background transfers
+
+    /// What a cancelled background transfer means.
+    enum Cancellation: Equatable {
+        /// The user terminated the app: iOS cancels all its background transfers, and they do not come back.
+        case userForceQuit
+        /// The system stopped the transfer, e.g. because background updates are off (Low Power Mode) or it ran
+        /// short of resources. Sending again once the app is in front works.
+        case system
+        /// No reason given.
+        case unknown
+    }
+
+    /// - Parameter reason: Value of `NSURLErrorBackgroundTaskCancelledReasonKey`:
+    ///   0 `NSURLErrorCancelledReasonUserForceQuitApplication`, 1 `…BackgroundUpdatesDisabled`,
+    ///   2 `…InsufficientSystemResources`.
+    static func cancellation(forReason reason: Int?) -> Cancellation {
+        switch reason {
+        case 0: return .userForceQuit
+        case 1, 2: return .system
+        default: return .unknown
+        }
+    }
+
+    static func backgroundCancelReason(of error: Error) -> Int? {
+        for link in self.chain(of: error) {
+            guard let value = link.nsError?.userInfo[NSURLErrorBackgroundTaskCancelledReasonKey] else { continue }
+
+            if let number = value as? NSNumber { return number.intValue }
+        }
+
+        return nil
     }
 
     // MARK: - Duplicates
