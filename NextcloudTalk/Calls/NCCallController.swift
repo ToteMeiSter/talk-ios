@@ -278,7 +278,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                     }
 
                     self.delegate?.callControllerDidFailedJoiningCall(self, statusCode: statusCode, errorReason: self.getJoinCallErrorReason(statusCode))
-                    NCLog.log("Could not join call in \(self.room.token), StatusCode: \(statusCode), Error: \(error)")
+                    NCLog.log("Could not join call in \(self.room.token), StatusCode: \(statusCode), Error: \(NCLog.errorCode(error))")
                 } else {
                     NCLog.log("Did join call in NCCallController for \(self.room.token)")
 
@@ -613,7 +613,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     private func updateCallFlagsInServer() {
         NCAPIController.shared.updateCallFlags(inRoom: self.room.token, withCallFlags: self.joinCallFlags, forAccount: self.account) { error in
             if let error {
-                NCLog.log("Could not update call flags. Error: \(error)")
+                NCLog.log("Could not update call flags. Error: \(NCLog.errorCode(error))")
             }
         }
     }

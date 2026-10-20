@@ -135,7 +135,7 @@ public enum NCExternalSignalingSendMessageStatus {
         self.messagesWithCompletionBlock = []
         self.helloResponseReceived = false
 
-        NCLog.log("Connecting to: \(self.serverUrl)")
+        NCLog.log("Connecting to the signaling server")
 
         let wsSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         var wsRequest = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: webSocketTimeoutInterval)
@@ -164,7 +164,7 @@ public enum NCExternalSignalingSendMessageStatus {
 
         guard self.reconnectTimer == nil else { return }
 
-        NCLog.log("Reconnecting to: \(self.serverUrl)")
+        NCLog.log("Reconnecting to the signaling server")
 
         self.resetWebSocket()
 
@@ -204,7 +204,7 @@ public enum NCExternalSignalingSendMessageStatus {
     }
 
     func disconnect() {
-        NCLog.log("Disconnecting from: \(self.serverUrl)")
+        NCLog.log("Disconnecting from the signaling server")
 
         DispatchQueue.main.async {
             self.invalidateReconnectionTimer()
@@ -918,7 +918,7 @@ public enum NCExternalSignalingSendMessageStatus {
             guard task == self.webSocket else { return }
 
             if let error = error as? URLError, error.code == .serverCertificateUntrusted {
-                NCLog.log("WebSocket session didCompleteWithError: \(error)")
+                NCLog.log("WebSocket session didCompleteWithError: \(NCLog.errorCode(error))")
 
                 DispatchQueue.main.async {
                     CCCertificate.sharedManager()
@@ -932,7 +932,7 @@ public enum NCExternalSignalingSendMessageStatus {
             }
 
             if let error {
-                NCLog.log("WebSocket session didCompleteWithError: \(error)")
+                NCLog.log("WebSocket session didCompleteWithError: \(NCLog.errorCode(error))")
                 self.reconnect()
             }
         }
@@ -977,7 +977,7 @@ public enum NCExternalSignalingSendMessageStatus {
                         return
                     }
 
-                    NCLog.log("WebSocket receiveMessageWithCompletionHandler error \(error)")
+                    NCLog.log("WebSocket receiveMessageWithCompletionHandler error \(NCLog.errorCode(error))")
                     self.reconnect()
                 }
             }

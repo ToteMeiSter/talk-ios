@@ -2319,7 +2319,7 @@ import Toast
         Task {
             do {
                 try await ChatFileUploader.upload(upload)
-                NCLog.log("Successfully uploaded and shared \(upload.fileName)")
+                NCLog.log("Successfully uploaded and shared a \(NCLog.fileTraits(fileName: upload.fileName))")
             } catch {
                 if let referenceId = upload.referenceId {
                     self.markTemporaryMessageAsFailed(referenceId: referenceId)
@@ -2354,13 +2354,13 @@ import Toast
         switch error {
         case ChatFileUploadError.destinationUnavailable(let underlyingError):
             // Nothing has been uploaded yet, so keep this silent as before
-            NCLog.log("Could not determine where to upload \(upload.fileName) to. Error: \(underlyingError?.localizedDescription ?? "unknown")")
+            NCLog.log("Could not determine where to upload a \(NCLog.fileTraits(fileName: upload.fileName)) to. Error: \(underlyingError.map { NCLog.errorCode($0) } ?? "unknown")")
             return
         case ChatFileUploadError.attachmentFolderUnavailable:
             NCLog.log("Failed to check or create attachment folder")
             message = NSLocalizedString("Failed to check or create attachment folder", comment: "")
         case ChatFileUploadError.shareFailed:
-            NCLog.log("Failed to share \(upload.fileName)")
+            NCLog.log("Failed to share a \(NCLog.fileTraits(fileName: upload.fileName))")
             message = NSLocalizedString("Failed to share recording", comment: "")
         case ChatFileUploadError.quotaExceeded:
             NCLog.log("User storage quota exceeded")
@@ -2368,11 +2368,11 @@ import Toast
         case ChatFileUploadError.tooManyRequests:
             NCLog.log("Too many requests while uploading")
             message = NSLocalizedString("Too many requests, please try again later", comment: "")
-        case ChatFileUploadError.uploadFailed(_, let errorDescription) where !errorDescription.isEmpty:
-            NCLog.log("Failed to upload \(upload.fileName). Error: \(errorDescription)")
+        case ChatFileUploadError.uploadFailed(let errorCode, let errorDescription) where !errorDescription.isEmpty:
+            NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: upload.fileName)). Error code: \(errorCode)")
             message = errorDescription
         default:
-            NCLog.log("Failed to upload \(upload.fileName). Error: \(error.localizedDescription)")
+            NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: upload.fileName)). Error: \(NCLog.errorCode(error))")
             message = NSLocalizedString("Unknown error occurred", comment: "")
         }
 

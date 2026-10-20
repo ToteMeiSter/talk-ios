@@ -54,7 +54,7 @@ static NSInteger const kMaxConsecutiveSessionGoneFailures = 5;
             }
 
             // TODO: Error handling
-            [NCLog log:[NSString stringWithFormat:@"Could not get signaling settings. Error: %@", error.description]];
+            [NCLog log:[NSString stringWithFormat:@"Could not get signaling settings. Error: %@", [NCLog errorCode:error]]];
         }
 
         if (settings) {

@@ -845,7 +845,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
                 }
             } catch {
                 // Without a draft folder nothing was uploaded at all
-                NCLog.log("Could not prepare the upload folder. Error: \(error.localizedDescription)")
+                NCLog.log("Could not prepare the upload folder. Error: \(NCLog.errorCode(error))")
                 self.finishUploads(withErrors: [NSLocalizedString("Could not prepare upload folder", comment: "")], succeededItems: [])
                 return
             }
@@ -858,7 +858,7 @@ private let kShareConfirmationOptionsViewHeight: CGFloat = 44
                 case .success:
                     succeededItems.append(shareItem)
                 case .failure(let error):
-                    NCLog.log("Failed to upload \(shareItem.fileName ?? "file"). Error: \(error.localizedDescription)")
+                    NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: shareItem.fileName ?? "")). Error: \(NCLog.errorCode(error))")
                     errors.append(self.message(for: error))
                 }
             }

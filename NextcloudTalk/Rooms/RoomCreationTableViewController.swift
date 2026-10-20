@@ -251,7 +251,7 @@ enum RoomVisibilityOption: Int {
             self.roomCreationGroup.enter()
             NCAPIController.sharedInstance().setAvatar(forRoom: token, withImage: selectedAvatarImage, forAccount: self.account) { error in
                 if let error {
-                    NCLog.log(String(format: "Failed to set room avatar. Error: %@", error.localizedDescription))
+                    NCLog.log("Failed to set room avatar. Error: \(NCLog.errorCode(error))")
                     self.roomCreationErrors.append(error.localizedDescription)
                 }
 

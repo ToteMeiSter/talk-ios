@@ -681,7 +681,7 @@ public class NCSettingsController: NSObject {
         do {
             registration = try await NCAPIController.sharedInstance().registerDevice(forAccount: account, withPublicKey: keyPair.publicKey)
         } catch {
-            NCLog.log("Error while subscribing to NC server. Error: \(error)")
+            NCLog.log("Error while subscribing to NC server. Error: \(NCLog.errorCode(error))")
             throw error
         }
 

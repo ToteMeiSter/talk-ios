@@ -116,7 +116,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             protectedDataAvailable = "unavailable"
         }
 
-        NCLog.log("Report incoming call for token \(token) for account \(accountId). Protected data is \(protectedDataAvailable)")
+        NCLog.log("Report incoming call for token \(token). Protected data is \(protectedDataAvailable)")
 
         let ongoingCalls = !self.calls.isEmpty
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
@@ -159,7 +159,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             guard let self else { return }
 
             if let error {
-                NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                NCLog.log("Report incoming call for token \(token) with UUID \(callUUID) failed with \(error.localizedDescription)")
                 return
             }
 
@@ -184,7 +184,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     private func reportAndCancelIncomingCall(_ token: String, forAccountId accountId: String, withLocalNotificationType notificationType: NCLocalNotificationType) {
-        NCLog.log("Report and cancel incoming call for token \(token) for account \(accountId).")
+        NCLog.log("Report and cancel incoming call for token \(token).")
 
         let update = self.defaultCallUpdate()
         let callUUID = UUID()
@@ -198,7 +198,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             guard let self else { return }
 
             if let error {
-                NCLog.log("Report incoming call for token \(token) for account \(accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                NCLog.log("Report incoming call for token \(token) with UUID \(callUUID) failed with \(error.localizedDescription)")
                 return
             }
 
@@ -216,7 +216,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     public func reportIncomingCallForNonCallKitDevices(withPushNotification pushNotification: NCPushNotification) {
-        NCLog.log("Report incoming call for non callkit device for token \(pushNotification.roomToken ?? "Unknown") for account \(pushNotification.accountId).")
+        NCLog.log("Report incoming call for non callkit device for token \(pushNotification.roomToken ?? "Unknown").")
 
         let update = self.defaultCallUpdate()
         let callUUID = UUID()
@@ -230,7 +230,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             guard let self else { return }
 
             if let error {
-                NCLog.log("Report incoming call for non-callkit devices for token \(pushNotification.roomToken ?? "Unknown") for account \(pushNotification.accountId) with UUID \(callUUID) failed with \(error.localizedDescription)")
+                NCLog.log("Report incoming call for non-callkit devices for token \(pushNotification.roomToken ?? "Unknown") with UUID \(callUUID) failed with \(error.localizedDescription)")
                 return
             }
 
