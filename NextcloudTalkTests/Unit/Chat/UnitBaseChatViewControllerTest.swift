@@ -332,9 +332,81 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         baseController.selectVoiceMessage()
 
         let fileStatusOfA = try makeVoiceMessageFileStatus(fileId: "1")
-        baseController.setupVoiceMessagePlayer(with: fileStatusOfA, selection: selectionOfA)
+        let finished = expectation(description: "Download of A handled")
 
+        baseController.setupVoiceMessagePlayer(with: fileStatusOfA, selection: selectionOfA) { didStart in
+            XCTAssertFalse(didStart)
+            finished.fulfill()
+        }
+
+        wait(for: [finished], timeout: 5)
         XCTAssertTrue(baseController.voiceMessagesPlayer === playerOfB)
+    }
+
+    func testVoiceMessagePlayerOfCurrentSelectionIsStarted() throws {
+        let previousPlayer = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = previousPlayer
+        addTeardownBlock { [baseController] in baseController?.stopVoiceMessagePlayer() }
+
+        let selection = baseController.selectVoiceMessage()
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+        let finished = expectation(description: "Player handled")
+
+        baseController.setupVoiceMessagePlayer(with: fileStatus, selection: selection) { didStart in
+            XCTAssertTrue(didStart)
+            finished.fulfill()
+        }
+
+        wait(for: [finished], timeout: 5)
+        XCTAssertNotNil(baseController.voiceMessagesPlayer)
+        XCTAssertFalse(baseController.voiceMessagesPlayer === previousPlayer)
+    }
+
+    func testTapOnVoiceMessageWithLocalFilePlaysItWithoutDownload() throws {
+        addTeardownBlock { [baseController] in baseController?.stopVoiceMessagePlayer() }
+
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+        let fileLocalPath = try XCTUnwrap(fileStatus.fileLocalPath)
+        let fileParameters = """
+        {
+            "file": {
+                "type": "file",
+                "id": "1",
+                "name": "\(fileStatus.fileName)",
+                "path": "\(fileStatus.filePath)",
+                "mimetype": "audio/wav",
+                "fileId": "1",
+                "fileName": "\(fileStatus.fileName)",
+                "filePath": "\(fileStatus.filePath)",
+                "fileLocalPath": "\(fileLocalPath)"
+            }
+        }
+        """
+        testMessage.messageParametersJSONString = fileParameters
+        testMessage.message = "{file}"
+        testMessage.messageType = "voice-message"
+        XCTAssertNotNil(testMessage.file()?.fileStatus)
+
+        let previousPlayer = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = previousPlayer
+
+        baseController.cellWants(toPlayAudioFile: testMessage)
+
+        // The local file is played directly, no download is requested
+        XCTAssertNil(baseController.pendingVoiceMessageDownload)
+
+        // The player is built off the main thread and set on the main thread. Waiting for an expectation fulfilled
+        // on the main queue lets the main queue run, so wait like that until the player replaces the previous one
+        let deadline = Date().addingTimeInterval(5)
+        while baseController.voiceMessagesPlayer === previousPlayer, Date() < deadline {
+            let mainQueueRan = expectation(description: "Main queue ran")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { mainQueueRan.fulfill() }
+            wait(for: [mainQueueRan], timeout: 1)
+        }
+
+        XCTAssertFalse(baseController.voiceMessagesPlayer === previousPlayer, "The tap did not replace the player")
+        XCTAssertNotNil(baseController.voiceMessagesPlayer)
+        XCTAssertNil(baseController.pendingVoiceMessageDownload)
     }
 
     func testTapOnVoiceMessageWaitingForItsDownloadIsPending() {
@@ -380,6 +452,55 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         baseController.finishVoiceMessageDownload(selection: first)
 
         XCTAssertTrue(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: NCChatFileStatus(fileId: "1", fileName: "", filePath: "")))
+    }
+
+    func testVoiceMessagePlayerCanBeBuiltOffMainThread() throws {
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+        let fileLocalPath = try XCTUnwrap(fileStatus.fileLocalPath)
+        let built = expectation(description: "Player built")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let player = BaseChatViewController.makeVoiceMessagePlayer(atPath: fileLocalPath)
+
+            XCTAssertFalse(Thread.isMainThread)
+            XCTAssertNotNil(player)
+            built.fulfill()
+        }
+
+        wait(for: [built], timeout: 5)
+    }
+
+    func testVoiceMessagePlayerBuiltForOutdatedSelectionIsDiscarded() throws {
+        // The player of A is built off the main thread, while B is tapped
+        let playerOfB = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = playerOfB
+
+        let selectionOfA = baseController.selectVoiceMessage()
+        let fileStatusOfA = try makeVoiceMessageFileStatus(fileId: "1")
+        let finished = expectation(description: "Player of A handled")
+
+        // The selection of A is still current here, so this passes the first check and continues asynchronously
+        baseController.setupVoiceMessagePlayer(with: fileStatusOfA, selection: selectionOfA) { didStart in
+            XCTAssertFalse(didStart)
+            finished.fulfill()
+        }
+        baseController.selectVoiceMessage()
+
+        wait(for: [finished], timeout: 5)
+        XCTAssertTrue(baseController.voiceMessagesPlayer === playerOfB)
+    }
+
+    func testVoiceMessagePlayerOfLatestSelectionReplacesPlayer() throws {
+        let previousPlayer = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = previousPlayer
+        addTeardownBlock { [baseController] in baseController?.stopVoiceMessagePlayer() }
+
+        let selection = baseController.selectVoiceMessage()
+        let newPlayer = try AVAudioPlayer(data: silentWavData())
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+
+        XCTAssertTrue(baseController.startVoiceMessagePlayer(newPlayer, with: fileStatus, selection: selection))
+        XCTAssertTrue(baseController.voiceMessagesPlayer === newPlayer)
     }
 
 }
