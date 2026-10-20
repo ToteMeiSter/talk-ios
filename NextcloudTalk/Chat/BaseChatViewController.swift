@@ -1524,6 +1524,45 @@ import Toast
         }
     }
 
+    /// The group of a file, also when the media viewer shows a file older than the loaded part of the chat
+    func fileGroup(of message: NCChatMessage) -> FileMessageGroup? {
+        if let fileGroup = FileMessageGroup.containing(messageId: message.messageId, in: self.fileMessageGroups) {
+            return fileGroup
+        }
+
+        guard let upload = message.fileUploadReference else { return nil }
+
+        let query = NSPredicate(format: "accountId = %@ AND token = %@ AND referenceId BEGINSWITH %@", self.account.accountId, self.room.token, upload.uploadHash)
+        let stored = NCChatMessage.objects(with: query).sortedResults(usingKeyPath: "messageId", ascending: true)
+        var messages: [NCChatMessage] = []
+
+        for case let storedMessage as NCChatMessage in stored {
+            messages.append(storedMessage)
+        }
+
+        return FileMessageGroup.groups(in: messages).first { group in
+            group.messages.contains { $0.messageId == message.messageId }
+        }
+    }
+
+    /// Whether the message can be deleted, which for a file of a group means the whole group
+    func canDelete(_ message: NCChatMessage) -> Bool {
+        if let fileGroup = self.fileGroup(of: message) {
+            return fileGroup.canDelete(for: self.account, in: self.room)
+        }
+
+        return message.canDelete(for: self.account, in: self.room)
+    }
+
+    /// The menu of the chat and the media viewer delete the same way: a file of a group takes its group along
+    func deleteMessageOrFileGroup(_ message: NCChatMessage) {
+        if let fileGroup = self.fileGroup(of: message) {
+            self.didPressDeleteAll(in: fileGroup)
+        } else {
+            self.didPressDelete(for: message)
+        }
+    }
+
     func didPressDeleteAll(in fileGroup: FileMessageGroup) {
         // One success notification for the whole group, errors are still shown per file
         for message in fileGroup.messages {
@@ -1846,8 +1885,12 @@ import Toast
         return false
     }
 
-    func mediaViewerViewControllerCanDelete(_ viewController: NCMediaViewerViewController) -> Bool {
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, canDelete message: NCChatMessage) -> Bool {
         return false
+    }
+
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, deletesFileGroupWith message: NCChatMessage) -> Bool {
+        return self.fileGroup(of: message) != nil
     }
 
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestReplyTo message: NCChatMessage) {
@@ -1855,7 +1898,7 @@ import Toast
     }
 
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage) {
-        self.didPressDelete(for: message)
+        self.deleteMessageOrFileGroup(message)
     }
 
     // MARK: - ShareViewController Delegate
