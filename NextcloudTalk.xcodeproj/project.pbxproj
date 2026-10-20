@@ -562,6 +562,7 @@
 				"Chat upload/ChatFileUploader.swift",
 				"Chat upload/ChatFileUploadError.swift",
 				"Chat upload/ChatFileUploadMetadata.swift",
+				"Chat upload/ChatFileUploadRetryPolicy.swift",
 				"Chat upload/ChatImageCompressor.swift",
 				"Chat upload/FileUploadReference.swift",
 				"Chat views/NCChatTitleView.swift",
