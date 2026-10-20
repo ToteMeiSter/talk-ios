@@ -3561,7 +3561,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func getUserAvatar(forUser userId: String, withStyle style: UIUserInterfaceStyle, ignoreCache: Bool, forAccount account: TalkAccount, completionBlock: @escaping (_ image: UIImage?, _ error: Error?) -> Void) -> SDWebImageCombinedOperation? {
         guard let encodedUserId = userId.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let requestModifier = self.getRequestModifier(forAccount: account)
-        else { return nil }
+        else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         // Since https://github.com/nextcloud/server/pull/31010 we can only request avatars in 64px or 512px
         // As we never request lower than 96px, we always get 512px anyway
@@ -3574,7 +3577,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
             urlString = "\(urlString)/dark"
         }
 
-        guard let url = URL(string: urlString) else { return nil }
+        guard let url = URL(string: urlString) else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         var options: SDWebImageOptions
 
@@ -3597,6 +3603,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 }
             } else if let image {
                 completionBlock(image, nil)
+            } else {
+                completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
             }
         }
     }
@@ -3653,7 +3661,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let encodedToken = room.token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: room.accountId),
               let requestModifier = self.getRequestModifier(forAccount: account)
-        else { return nil }
+        else {
+            // Callers like the NotificationServiceExtension wait for the completion block, so always report the failure
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         var endpoint = "room/\(encodedToken)/avatar"
 
@@ -3670,7 +3682,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
         let url = URL(string: urlString)
 
-        guard let url else { return nil }
+        guard let url else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         /*
          SDWebImageRetryFailed:         By default SDWebImage blacklists URLs that failed to load and does not try to
@@ -3713,6 +3728,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 }
             } else if let image {
                 completionBlock(image, nil)
+            } else {
+                completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
             }
         }
     }
@@ -3792,7 +3809,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         let url = URL(string: urlString)
         guard let url,
               let requestModifier = self.getRequestModifier(forAccount: account)
-        else { return nil }
+        else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         let options: SDWebImageOptions = [.retryFailed, .refreshCached]
 
@@ -3808,6 +3828,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 }
             } else if let image {
                 completionBlock(image, nil)
+            } else {
+                completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
             }
         }
     }
