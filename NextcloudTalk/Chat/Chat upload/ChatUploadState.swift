@@ -188,6 +188,14 @@ struct ChatUploadState: Codable, Equatable {
         return now - self.createdAt > Self.maxAge
     }
 
+    func isWaitingForEarlierFiles(among states: [ChatUploadState], now: TimeInterval) -> Bool {
+        return false
+    }
+
+    func follows(_ other: ChatUploadState) -> Bool {
+        return false
+    }
+
     /// The state of a posted file is not needed anymore.
     func isAnnouncedRetentionOver(now: TimeInterval) -> Bool {
         return now - (self.announcedAt ?? 0) > Self.announcedRetention
