@@ -363,6 +363,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         self.persist(state)
         self.markMessageAsFailed(referenceId: state.id)
         NCLog.log("Upload of a \(NCLog.fileTraits(fileName: state.fileName)) was interrupted: \(reason) (upload \(state.id))")
+        self.announceFilesFollowing(state)
     }
 
     /// Posts the files that are on the server but not in the conversation.
@@ -488,6 +489,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
 
         self.transferringIds.remove(referenceId)
+        self.announceFilesFollowing(state)
     }
 
     /// Removes the file of a dropped upload from the draft folder, nobody posts it anymore. The file stays on
@@ -684,6 +686,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             self.transferSuspended(state)
         case .failed:
             self.markMessageAsFailed(referenceId: id)
+            self.announceFilesFollowing(state)
         case .finished, .none:
             break
         }
@@ -785,6 +788,10 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
               let destination = state.destination
         else { return }
 
+        // The files of a group are posted in the order they were chosen in, whichever transfer ended first. The one
+        // that is waited for calls `announceFilesFollowing` when it is over, one way or the other.
+        guard !state.isWaitingForEarlierFiles(among: self.store.loadAll(), now: Date().timeIntervalSince1970) else { return }
+
         // The chain of a process that is gone is not there anymore. Do not ask before the pause of the server is over.
         let pause = state.remainingPause(now: Date().timeIntervalSince1970)
 
@@ -836,6 +843,14 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
+    /// An upload is over (posted, given up or dropped): the file chosen next in the same group can be posted now.
+    /// It wakes the one after it when it is over itself.
+    private func announceFilesFollowing(_ state: ChatUploadState) {
+        guard let next = state.nextFollowing(among: self.store.loadAll()) else { return }
+
+        self.announce(id: next.id)
+    }
+
     private func announceFinished(id: String, failure: ChatFileUploadFailure?) {
         guard var state = self.store.load(id: id) else { return }
 
@@ -847,10 +862,12 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             NCLog.log("Uploaded and shared a \(NCLog.fileTraits(fileName: state.fileName)) (upload \(state.id))")
             // The state stays for a while, see `isAnnounced`
             self.store.removeFile(for: state)
+            self.announceFilesFollowing(state)
         case .announce(let delay):
             self.announce(id: id, after: delay)
         case .failed:
             self.markMessageAsFailed(referenceId: id)
+            self.announceFilesFollowing(state)
         case .startTransfer, .recreateAttachmentFolder, .suspended, .none:
             break
         }
