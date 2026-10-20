@@ -141,6 +141,14 @@ class CallViewController: UIViewController,
     private var detailedViewTimer: Timer?
     private var proximityTimer: Timer?
     private var isAudioOnly = false
+
+    /// An answered incoming call that is not known to be a video call: the own camera is off, the video of the others is received
+    public var receivesVideoInVoiceCall = false
+
+    private var receivesRemoteVideo: Bool {
+        return CallVideoPolicy.receivesRemoteVideo(isAudioOnly: self.isAudioOnly, keepsReceivingVideo: self.receivesVideoInVoiceCall)
+    }
+
     private var isDetailedViewVisible = false
     private var userDisabledVideo = false {
         // The call controller recreates the local video track in this state, so the video stays
@@ -203,7 +211,7 @@ class CallViewController: UIViewController,
     }
 
     func startCall(withSessionId sessionId: String) {
-        let callController = NCCallController(delegate: self, room: self.room, account: self.account, isAudioOnly: self.isAudioOnly, userSessionId: sessionId, voiceChatMode: self.voiceChatModeAtStart)
+        let callController = NCCallController(delegate: self, room: self.room, account: self.account, isAudioOnly: self.isAudioOnly, userSessionId: sessionId, voiceChatMode: self.voiceChatModeAtStart, receivesVideoInVoiceCall: self.receivesVideoInVoiceCall)
         self.callController = callController
 
         callController.disableAudioAtStart = self.audioDisabledAtStart
@@ -1313,7 +1321,7 @@ class CallViewController: UIViewController,
     func updateParticipantCell(cell: CallParticipantViewCell, withPeerConnection peerConnection: NCPeerConnection) {
         var isVideoDisabled = peerConnection.isRemoteVideoDisabled
 
-        if isAudioOnly || !peerConnection.hasRemoteStream() {
+        if !receivesRemoteVideo || !peerConnection.hasRemoteStream() {
             isVideoDisabled = true
         }
 
@@ -1508,7 +1516,7 @@ class CallViewController: UIViewController,
 
                 if self.indexPath(forPeerIdentifier: remotePeer.peerIdentifier) != nil {
                     // This peer already exists in the collection view, so we can just update its cell
-                    let isVideoDisabled = self.isAudioOnly || remotePeer.isRemoteVideoDisabled
+                    let isVideoDisabled = !self.receivesRemoteVideo || remotePeer.isRemoteVideoDisabled
 
                     self.updatePeer(remotePeer) { cell in
                         cell.setVideoView(renderView)
@@ -1566,7 +1574,7 @@ class CallViewController: UIViewController,
                 cell.audioDisabled = peer.isRemoteAudioDisabled
             }
         case "videoOn", "videoOff":
-            if !isAudioOnly {
+            if receivesRemoteVideo {
                 self.updatePeer(peer) { cell in
                     cell.videoDisabled = peer.isRemoteVideoDisabled
                 }
@@ -2811,6 +2819,7 @@ class CallViewController: UIViewController,
         guard let callController else { return }
 
         self.isAudioOnly = true
+        self.receivesVideoInVoiceCall = false
         self.userDisabledVideo = true
 
         callController.downgradeToVoiceOnlyCall()

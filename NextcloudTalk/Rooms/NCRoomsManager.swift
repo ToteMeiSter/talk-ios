@@ -545,7 +545,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // MARK: - Call
 
     // swiftlint:disable:next function_parameter_count
-    public func startCall(withVideo video: Bool, inRoom room: NCRoom, withVideoEnabled videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, withRecordingConsent recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool) {
+    public func startCall(withVideo video: Bool, inRoom room: NCRoom, withVideoEnabled videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, withRecordingConsent recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool, answeredIncomingCall: Bool = false) {
         guard self.callViewController == nil else {
             print("Not starting call due to in another call.")
             return
@@ -560,6 +560,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         self.callViewController = callViewController
 
         callViewController.videoDisabledAtStart = !videoEnabled
+        callViewController.receivesVideoInVoiceCall = answeredIncomingCall
         callViewController.voiceChatModeAtStart = voiceChatMode
         callViewController.initiator = initiator
         callViewController.silentCall = silently
@@ -618,14 +619,24 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     // swiftlint:disable:next function_parameter_count
-    public func startCall(withToken token: String, withAccountId accountId: String, withVideo video: Bool, enabledAtStart videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool) {
+    public func startCall(withToken token: String, withAccountId accountId: String, withVideo video: Bool, enabledAtStart videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool, answeredIncomingCall: Bool = false) {
         guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: accountId) else { return }
 
         NCAPIController.sharedInstance().getRoom(forAccount: account, withToken: token) { roomDict, error in
             guard error == nil else { return }
 
             if let room = NCRoom(dictionary: roomDict, andAccountId: account.accountId) {
-                self.startCall(withVideo: video, inRoom: room, withVideoEnabled: videoEnabled, asInitiator: initiator, silently: silently, withRecordingConsent: recordingConsent, withVoiceChatMode: voiceChatMode)
+                var startsAsVideoCall = video
+
+                if answeredIncomingCall {
+                    // The answer may come before CallKit knows the kind of the call (or its request failed), but this response is fresh
+                    let callFlag = (roomDict?["callFlag"] as? Int).map { CallFlag(rawValue: $0) }
+                    let hasCallFlags = NCDatabaseManager.sharedInstance().serverHasTalkCapability(.callFlags, forAccountId: accountId)
+                    let callType = CallVideoPolicy.callType(callFlag: callFlag, hasCallFlagsCapability: hasCallFlags)
+                    startsAsVideoCall = CallVideoPolicy.startsAsVideoCall(callKitHasVideo: video, serverCallType: callType)
+                }
+
+                self.startCall(withVideo: startsAsVideoCall, inRoom: room, withVideoEnabled: videoEnabled, asInitiator: initiator, silently: silently, withRecordingConsent: recordingConsent, withVoiceChatMode: voiceChatMode, answeredIncomingCall: answeredIncomingCall)
             }
         }
     }
@@ -644,7 +655,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         if let pendingToStartCallToken = self.pendingToStartCallToken, let pendingToStartCallAccountId = self.pendingToStartCallAccountId {
             // Pending calls can only happen when answering a new call. That's why we start with video disabled at start and in voice chat mode.
             // We also can start call silently because we are joining an already started call so no need to notify.
-            self.startCall(withToken: pendingToStartCallToken, withAccountId: pendingToStartCallAccountId, withVideo: pendingToStartCallHasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true)
+            self.startCall(withToken: pendingToStartCallToken, withAccountId: pendingToStartCallAccountId, withVideo: pendingToStartCallHasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true, answeredIncomingCall: true)
             self.pendingToStartCallToken = nil
         }
     }
@@ -780,7 +791,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         if !waitForcallEnd || (!activeCalls && leaveRoomTask == nil) {
             // Calls that have been answered start with video disabled by default, in voice chat mode and silently (without notification).
-            self.startCall(withToken: roomToken, withAccountId: accountId, withVideo: hasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true)
+            self.startCall(withToken: roomToken, withAccountId: accountId, withVideo: hasVideo, enabledAtStart: false, asInitiator: false, silently: true, recordingConsent: false, withVoiceChatMode: true, answeredIncomingCall: true)
         } else {
             self.pendingToStartCallToken = roomToken
             self.pendingToStartCallHasVideo = hasVideo
