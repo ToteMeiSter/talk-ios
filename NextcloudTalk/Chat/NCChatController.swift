@@ -296,7 +296,8 @@ public class NCChatController: NSObject {
         }
     }
 
-    private func updateLastChatBlock(withNewestKnown newestKnown: Int) {
+    /// Only call inside a `writeTransaction`, `realm` is the realm of that transaction.
+    private func updateLastChatBlock(withNewestKnown newestKnown: Int, with realm: RLMRealm) {
         guard newestKnown > 0 else { return }
 
         let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
@@ -305,6 +306,7 @@ public class NCChatController: NSObject {
         }
     }
 
+    /// Only call inside a `writeTransaction`, `realm` is the realm of that transaction.
     private func updateChatBlocks(withLastKnown lastKnown: Int, with realm: RLMRealm) {
         if lastKnown <= 0 {
             return
@@ -350,6 +352,7 @@ public class NCChatController: NSObject {
         }
     }
 
+    /// Only call inside a `writeTransaction`, `realm` is the realm of that transaction.
     private func updateChatBlocks(withReceivedMessages messages: [[String: Any]]?, newestKnown: Int, andLastKnown lastKnown: Int, with realm: RLMRealm) {
         let sortedMessages = sortedMessages(fromMessageArray: messages)
         let newestMessageReceived = sortedMessages.last
@@ -655,8 +658,8 @@ public class NCChatController: NSObject {
     // the reaction relay paths funnel through here so the chat block, the stored message, the new-message
     // notification and the read marker stay in sync.
     private func storeRelayMessage(_ message: NCChatMessage, storableDict: [String: Any], lastNewestMessageId: Int) {
-        storeMessages([storableDict], updatingChatBlocksWith: { _ in
-            self.updateLastChatBlock(withNewestKnown: message.messageId)
+        storeMessages([storableDict], updatingChatBlocksWith: { realm in
+            self.updateLastChatBlock(withNewestKnown: message.messageId, with: realm)
         })
         checkForNewMessages(fromMessageId: lastNewestMessageId)
 
@@ -844,15 +847,15 @@ public class NCChatController: NSObject {
                         }
                     }
 
-                    self.storeMessages(messages, updatingChatBlocksWith: { _ in
-                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+                    self.storeMessages(messages, updatingChatBlocksWith: { realm in
+                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage, with: realm)
                     })
                     self.checkLastCommonReadMessage(lastCommonReadMessage)
 
                     NotificationCenter.default.post(name: .NCChatControllerDidReceiveMessagesInBackground, object: self, userInfo: userInfo)
                 } else {
-                    self.storeMessages(nil, updatingChatBlocksWith: { _ in
-                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+                    self.storeMessages(nil, updatingChatBlocksWith: { realm in
+                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage, with: realm)
                     })
                 }
             }
@@ -1227,8 +1230,8 @@ public class NCChatController: NSObject {
             }
         } else {
             // Update last chat block and store new messages in one transaction
-            self.storeMessages(messages, updatingChatBlocksWith: { _ in
-                self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+            self.storeMessages(messages, updatingChatBlocksWith: { realm in
+                self.updateLastChatBlock(withNewestKnown: lastKnownMessage, with: realm)
             })
 
             if let messages, !messages.isEmpty {
