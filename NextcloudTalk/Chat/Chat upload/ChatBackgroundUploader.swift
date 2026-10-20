@@ -31,6 +31,9 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         return "\(Bundle.main.bundleIdentifier ?? "com.nextcloud.Talk").chat-upload"
     }
 
+    /// How long a transfer that has no task after a launch gets to show up, before it is declared interrupted.
+    private static let orphanCheckDelay: TimeInterval = 8
+
     let store: ChatUploadStore
 
     private var backgroundCompletionHandler: (() -> Void)?
@@ -47,6 +50,16 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
 
     /// Ids of uploads that have an announcement planned for later. There is at most one chain per upload.
     private var scheduledAnnounceIds = Set<String>()
+
+    /// A transfer the system stopped was started again since the app became active. Keeps the cancellations
+    /// of a system that stops transfers over and over from becoming a loop.
+    private var didRestartSuspendedTransfer = false
+
+    /// The tasks of the session are known, see `start()`.
+    private var didCollectTasks = false
+
+    /// The states were prepared for the new process, see `recoverStoredStates()`.
+    private var didRecoverStates = false
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
@@ -66,9 +79,252 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         super.init()
     }
 
+    // MARK: - Lifecycle
+
+    /// Reconnects with the session of an earlier launch and carries on with what is left. To be called
+    /// on every launch, before the first upload is started.
+    func start() {
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(self.applicationDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        center.addObserver(self, selector: #selector(self.applicationDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.addObserver(self, selector: #selector(self.protectedDataDidBecomeAvailable), name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
+
+        // Has to happen before the session delivers anything: an announcement that is in flight in THIS process
+        // must not look like one that was cut off by the death of the last process
+        self.recoverStoredStates()
+
+        // Creating the session is what makes the system deliver the events of transfers that ended while
+        // there was no process.
+        self.session.getAllTasks { [weak self] tasks in
+            DispatchQueue.main.async {
+                self?.reconnect(with: tasks)
+            }
+        }
+    }
+
+    /// `application(_:handleEventsForBackgroundURLSession:completionHandler:)`
+    func handleEventsForBackgroundSession(identifier: String, completionHandler: @escaping () -> Void) {
+        guard identifier == Self.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+
+        self.backgroundCompletionHandler = completionHandler
+
+        // Recreates the session if the app was launched for this. The events might have been delivered
+        // before this was called, in which case there is nothing to wait for.
+        _ = self.session
+        self.callBackgroundCompletionHandlerIfIdle()
+    }
+
+    @objc private func applicationDidBecomeActive() {
+        // Whatever the system wanted to hear is over once the user is back, and a flag from earlier events
+        // must not make the next background launch end at once
+        self.didReceiveAllBackgroundEvents = false
+        self.didRestartSuspendedTransfer = false
+        self.callBackgroundCompletionHandler()
+
+        self.announcePendingUploads()
+        self.restartUploadsFromForeground()
+    }
+
+    @objc private func applicationDidEnterBackground() {
+        if self.backgroundCompletionHandler == nil {
+            self.didReceiveAllBackgroundEvents = false
+        }
+    }
+
+    @objc private func protectedDataDidBecomeAvailable() {
+        self.recoverStoredStates()
+        self.processStoredStates()
+    }
+
+    private func reconnect(with tasks: [URLSessionTask]) {
+        for task in tasks {
+            if let id = task.taskDescription, task.state == .running || task.state == .suspended {
+                self.transferringIds.insert(id)
+            }
+        }
+
+        self.didCollectTasks = true
+        self.processStoredStates()
+
+        // The app is in front already, so the tasks are at hand and `applicationDidBecomeActive` came too early for them
+        if UIApplication.shared.applicationState != .background, UIApplication.shared.isProtectedDataAvailable {
+            self.restart(from: tasks)
+        }
+    }
+
+    /// Prepares the stored states for a new process. Needs the states to be readable, and does nothing before that
+    /// and after the first time.
+    ///
+    /// Everything that looks at the stored states or starts work from them calls this first, because the order of
+    /// `didBecomeActive` and `protectedDataDidBecomeAvailable` after a launch before the first unlock is not defined.
+    /// Else an announcement started in between would be taken for one of the dead process, or the other way round.
+    /// Note that `isProtectedDataAvailable` is `false` whenever the screen is locked, not only before the first unlock,
+    /// so a process of this launch can have announcements in flight when this finally runs: those are skipped here,
+    /// and `ChatUploadState.beginAnnounce` covers the other order.
+    /// The call is idempotent and cheap, which is why it is called from every entry and the notification is not waited for.
+    private func recoverStoredStates() {
+        guard !self.didRecoverStates, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        self.didRecoverStates = true
+
+        for var state in self.store.loadAll() where !self.announcingIds.contains(state.id) {
+            state.recoverAfterRelaunch()
+            try? self.store.save(state)
+        }
+    }
+
+    /// Handles the results of transfers that came in before the states were readable, maybe in an earlier process.
+    ///
+    /// Waits for the tasks of the session to be known: the result of a failure starts the transfer again, and
+    /// `startTransfer` only leaves out a transfer that is running already when it knows the tasks. Else an event that
+    /// was handled before the process died would start a second chain of attempts. Called before any other work on
+    /// the states.
+    private func handleStoredEvents() {
+        guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        for event in self.store.loadEvents() {
+            self.transferFinished(id: event.id, failure: event.failure)
+            self.store.removeEvent(event)
+        }
+    }
+
+    /// Carries on with the states found on disk. Waits for the data to be available (not locked), before the first
+    /// unlock the states cannot be read, which does not mean they are gone.
+    private func processStoredStates() {
+        guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        self.recoverStoredStates()
+        self.handleStoredEvents()
+
+        let now = Date().timeIntervalSince1970
+        let report = self.store.loadAllReport()
+
+        if !report.hasUnreadable {
+            // A transfer that ended between asking the session for its tasks and now left its id behind
+            let uploadingIds = Set(report.states.filter { $0.step == .uploading }.map { $0.id })
+            self.transferringIds = self.transferringIds.filter { uploadingIds.contains($0) }
+        }
+
+        self.store.removeOrphanedFiles(isProtectedDataAvailable: true)
+
+        for state in report.states {
+            switch state.step {
+            case .uploading:
+                self.checkUploading(state)
+            case .uploaded:
+                self.announce(id: state.id)
+            case .failed:
+                if self.isObsolete(state, now: now) {
+                    NCLog.log("Removing the failed upload, it is obsolete (upload \(state.id))")
+                    self.store.remove(state)
+                } else {
+                    // The process might have died before the message was updated
+                    self.markMessageAsFailed(referenceId: state.id)
+                }
+            case .announced:
+                // The file is not needed anymore. The state stays for a while, see `isAnnounced`.
+                self.store.removeFile(for: state)
+
+                if state.isAnnouncedRetentionOver(now: now) {
+                    // Without the mark nothing tells "Resend" that the file is posted already, so the message of the
+                    // upload that was not replaced by the one of the server goes with it
+                    self.removeTemporaryMessage(referenceId: state.id)
+                    self.store.removeState(id: state.id)
+                }
+            }
+        }
+
+        self.callBackgroundCompletionHandlerIfIdle()
+    }
+
+    private func checkUploading(_ state: ChatUploadState) {
+        if state.destination == nil {
+            // Nothing to do for a destination that is asked for right now
+            guard !self.resolvingIds.contains(state.id) else { return }
+
+            // The app went away while it was waiting for the server to tell where to upload to
+            self.interrupt(state, reason: "destination not resolved")
+        } else if !self.transferringIds.contains(state.id), !state.suspendedBySystem, !self.resolvingIds.contains(state.id) {
+            // Events of finished transfers arrive right after the session was created. What is
+            // still without a transfer after that was cancelled, e.g. because the user terminated the app.
+            // A transfer the system stopped is started again when the app is in front.
+            let id = state.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.orphanCheckDelay) { [weak self] in
+                self?.interruptIfWithoutTransfer(id: id)
+            }
+        }
+    }
+
+    /// A failed upload nobody can ask to send again anymore, or nobody did for long.
+    private func isObsolete(_ state: ChatUploadState, now: TimeInterval) -> Bool {
+        if now - state.createdAt > ChatUploadState.failedRetention { return true }
+
+        let database = NCDatabaseManager.sharedInstance()
+
+        guard database.talkAccount(forAccountId: state.accountId) != nil,
+              database.room(withToken: state.roomToken, forAccountId: state.accountId) != nil
+        else { return true }
+
+        return NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", state.id).firstObject() == nil
+    }
+
     /// Whether the file was posted. The temporary message of such an upload that is still shown is stale.
     func isAnnounced(referenceId: String) -> Bool {
         return self.store.load(id: referenceId)?.step == .announced
+    }
+
+    /// Sends the transfers again that are better sent from the foreground.
+    ///
+    /// The system treats a transfer that was created in the background as discretionary and may hold it back
+    /// for hours, so what did not send a byte yet is cancelled and created again now. The cancellation that
+    /// comes back is known to the state and not a failure. A transfer the system stopped is started again.
+    private func restartUploadsFromForeground() {
+        guard self.didCollectTasks, UIApplication.shared.isProtectedDataAvailable else { return }
+
+        self.session.getAllTasks { [weak self] tasks in
+            DispatchQueue.main.async {
+                self?.restart(from: tasks)
+            }
+        }
+    }
+
+    private func restart(from tasks: [URLSessionTask]) {
+        self.recoverStoredStates()
+        self.handleStoredEvents()
+
+        for state in self.store.loadAll() where state.step == .uploading {
+            let task = tasks.first { $0.taskDescription == state.id && ($0.state == .running || $0.state == .suspended) }
+
+            if let task {
+                guard state.startedInBackground, task.countOfBytesSent == 0 else { continue }
+
+                var restarting = state
+                restarting.prepareRestartFromForeground()
+
+                if self.persist(restarting) {
+                    task.cancel()
+                }
+            } else if state.suspendedBySystem, state.destination != nil,
+                      !self.transferringIds.contains(state.id), !self.resolvingIds.contains(state.id) {
+                self.restartStopped(state)
+            }
+        }
+    }
+
+    /// Sends a transfer again that the system stopped, which can be long ago.
+    private func restartStopped(_ state: ChatUploadState) {
+        if state.isExpired(now: Date().timeIntervalSince1970) {
+            self.interrupt(state, reason: "expired")
+        } else if state.destinationKind == .attachmentFolder {
+            // The name was free when it was chosen, see `retry`
+            self.resolveAgain(state)
+        } else {
+            // The pause the server asked for, e.g. with `Retry-After`, is not over because the app was away
+            self.startTransfer(state, after: state.remainingPause(now: Date().timeIntervalSince1970))
+        }
     }
 
     /// Asks the server where to upload to again, and sends the file there.
@@ -91,12 +347,29 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
+    private func interruptIfWithoutTransfer(id: String) {
+        guard let state = self.store.load(id: id), state.step == .uploading,
+              !self.transferringIds.contains(id), !self.resolvingIds.contains(id)
+        else { return }
+
+        self.interrupt(state, reason: "transfer was cancelled")
+    }
+
     private func interrupt(_ state: ChatUploadState, reason: String) {
         var state = state
         state.fail(reason: reason)
         self.persist(state)
         self.markMessageAsFailed(referenceId: state.id)
         NCLog.log("Upload was interrupted: \(reason) (upload \(state.id))")
+    }
+
+    /// Posts the files that are on the server but not in the conversation.
+    private func announcePendingUploads() {
+        self.recoverStoredStates()
+
+        for state in self.store.loadAll() where state.step == .uploaded {
+            self.announce(id: state.id)
+        }
     }
 
     // MARK: - Starting
@@ -412,9 +685,15 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
-    /// The state keeps the transfer for being started again, see `ChatUploadState.suspendedBySystem`.
+    /// Started again when the app comes to the front. When it is in front already, once: a system
+    /// that stops every transfer would else make a loop.
     private func transferSuspended(_ state: ChatUploadState) {
         NCLog.log("The system stopped the transfer (upload \(state.id))")
+
+        if UIApplication.shared.applicationState == .active, !self.didRestartSuspendedTransfer {
+            self.didRestartSuspendedTransfer = true
+            self.restartUploadsFromForeground()
+        }
     }
 
     /// The server did not find the attachment folder. Creates it and sends the file again.
@@ -475,6 +754,8 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
 
         self.scheduledAnnounceIds.remove(id)
+
+        self.recoverStoredStates()
 
         guard !self.announcingIds.contains(id),
               var state = self.store.load(id: id),
