@@ -401,8 +401,8 @@ class DiagnosticsTableViewController: UITableViewController {
     func appBackgroundUploadCell(for indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: cellIdentifierSwitch, for: indexPath)
 
-        cell.textLabel?.text = NSLocalizedString("Upload files in the background", comment: "")
-        cell.detailTextLabel?.text = NSLocalizedString("Experimental: files sent from a chat keep uploading when the app is closed", comment: "")
+        cell.textLabel?.text = NSLocalizedString("Upload files in the background", comment: "Title of the diagnostics switch for uploading files from a chat in the background")
+        cell.detailTextLabel?.text = NSLocalizedString("Experimental: files sent from a chat keep uploading when the app is closed", comment: "Subtitle of the diagnostics switch for uploading files from a chat in the background")
         cell.detailTextLabel?.numberOfLines = 0
         cell.selectionStyle = .none
 
