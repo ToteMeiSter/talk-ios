@@ -10,6 +10,9 @@ import Foundation
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didReceivedParticipantListMessage participantListMessageDict: [AnyHashable: Any])
     @objc func externalSignalingControllerShouldRejoinCall(_ externalSignalingController: NCExternalSignalingController)
     @objc func externalSignalingControllerWillRejoinCall(_ externalSignalingController: NCExternalSignalingController)
+    /// Joining the room for the call again failed, so the call must not be joined (POST /call) without a new session.
+    /// `statusCode` is the HTTP status of the failed request, or 0 if there was none.
+    @objc optional func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, didFailRejoiningCallWithStatusCode statusCode: Int, error: Error?)
     @objc func externalSignalingController(_ externalSignalingController: NCExternalSignalingController, shouldSwitchToCall roomToken: String)
 }
 
@@ -69,6 +72,9 @@ public enum NCExternalSignalingSendMessageStatus {
     private var resumeId: String?
     private var authenticationBackendUrl: String
     private var helloResponseReceived = false
+
+    // Counts the sessions which started a join of the room again (main thread only), see `rejoinRoomForCall`
+    private var rejoinGeneration = 0
     private var nextMessageId: Int = 0
     private var pendingMessages = [WSMessage]()
     private var helloMessage: WSMessage?
@@ -418,8 +424,10 @@ public enum NCExternalSignalingSendMessageStatus {
         if let currentRoom, sessionChanged {
             self.delegate?.externalSignalingControllerWillRejoinCall(self)
 
-            NCRoomsManager.shared.rejoinRoomForCall(currentRoom, forAccount: self.account) { _, _, _, _, _ in
-                self.delegate?.externalSignalingControllerShouldRejoinCall(self)
+            // Behind the pending messages above, on the main thread where the rooms manager and the generation live
+            DispatchQueue.main.async {
+                self.rejoinGeneration += 1
+                self.rejoinRoomForCall(currentRoom)
             }
         }
 
@@ -427,6 +435,55 @@ public enum NCExternalSignalingSendMessageStatus {
         // resumed the server replays the chat relay messages we missed while disconnected (within
         // its ~30s resume window); if a new session was created those messages are lost.
         NotificationCenter.default.post(name: .extSignalingDidReconnect, object: self, userInfo: ["sessionChanged": sessionChanged])
+    }
+
+    /// Joins the room of the call again (a new room session, then the join at the signaling server) and tells the
+    /// delegate to join the call only if that worked. POST /call without a joined room fails with 404, so a failure
+    /// is reported to the delegate, which decides about a repeat (see `retryRejoinRoomForCall`).
+    ///
+    /// Main thread only. The result of a join which belongs to an older session than the current one (a new hello came
+    /// in the meantime, which started a join of its own) is dropped: it is not the answer to the question of the call.
+    private func rejoinRoomForCall(_ token: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        let generation = self.rejoinGeneration
+
+        NCRoomsManager.shared.rejoinRoomForCall(token, forAccount: self.account) { [weak self] sessionId, _, error, statusCode, _ in
+            // Hop to the main thread, where the generation is counted
+            DispatchQueue.main.async {
+                guard let self else { return }
+
+                guard generation == self.rejoinGeneration else {
+                    NCLog.log("Ignoring the result of an old re-join of room \(token) (StatusCode \(statusCode))")
+                    return
+                }
+
+                guard error == nil, sessionId != nil else {
+                    NCLog.log("Re-joining room \(token) failed, StatusCode: \(statusCode)")
+                    self.delegate?.externalSignalingController?(self, didFailRejoiningCallWithStatusCode: statusCode, error: error)
+                    return
+                }
+
+                self.delegate?.externalSignalingControllerShouldRejoinCall(self)
+            }
+        }
+    }
+
+    /// Repeats a failed re-join of the room. Uses the given token, as `currentRoom` is cleared when the join at
+    /// the signaling server fails (that forces a reconnect without resuming).
+    func retryRejoinRoomForCall(_ token: String) {
+        // The rooms manager is used from the main thread, the delegate calls this from the WebRTC queue
+        DispatchQueue.main.async {
+            // The call was left while the retry was on its way (the delegate is removed then). The room may still be
+            // open for a chat, a join would only create a room session nobody needs
+            guard self.delegate != nil else {
+                NCLog.log("Not retrying to re-join room \(token), the call is over")
+                return
+            }
+
+            NCLog.log("Retrying to re-join room \(token)")
+            self.rejoinRoomForCall(token)
+        }
     }
 
     func errorResponseReceived(messageDict: [AnyHashable: Any]) {

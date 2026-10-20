@@ -36,6 +36,9 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     private static let statusCodeShouldIgnoreAttemptButJoinedSuccessfully = 998
     private static let statusCodeIgnoreJoinAttempt = 999
 
+    // Re-joining a room for a call is not possible, because the room is not active anymore (it was left meanwhile)
+    static let statusCodeRoomNotActive = 995
+
     public var chatViewController: ChatViewController?
     public var callViewController: CallViewController?
 
@@ -1168,7 +1171,12 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     public func rejoinRoomForCall(_ token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ sessionId: String?, _ room: NCRoom?, _ error: Error?, _ statusCode: Int, _ statusReason: String?) -> Void) {
         NCLog.log("Rejoining room \(token)")
 
-        guard let roomController = self.activeRooms[token] else { return }
+        guard let roomController = self.activeRooms[token] else {
+            // Report it, otherwise the caller waits for the answer forever (the call stays "reconnecting")
+            NCLog.log("Could not re-join room \(token), the room is not active anymore")
+            completionBlock(nil, nil, NSError(domain: NSCocoaErrorDomain, code: 0), NCRoomsManager.statusCodeRoomNotActive, nil)
+            return
+        }
 
         self.joiningRoomToken = token
         self.joinRoomTask = NCAPIController.sharedInstance().joinRoom(token, forAccount: account, completionBlock: { sessionId, room, error, statusCode, statusReason in
