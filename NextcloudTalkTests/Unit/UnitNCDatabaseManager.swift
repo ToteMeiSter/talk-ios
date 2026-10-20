@@ -91,6 +91,36 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         XCTAssertEqual(NCLog.errorCode(wrapped), "NSCocoaErrorDomain 4, underlying NSURLErrorDomain -1202")
     }
 
+    func testPushProxyFailureDescriptionKeepsReasonAndMasksSensitiveParts() throws {
+        let token = "e5a1c2d3b4f5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+        let identifier = "aGVsbG8gd29ybGQgdGhpcyBpcyBhIGRldmljZSBpZGVudGlmaWVy"
+
+        func failure(_ body: String) -> String {
+            let userInfo = [AFNetworkingOperationFailingURLResponseDataErrorKey: Data(body.utf8)]
+            let error = NSError(domain: AFURLResponseSerializationErrorDomain, code: -1011, userInfo: userInfo)
+            return NCPushProxySessionManager.failureDescription(forTask: nil, error: error)
+        }
+
+        // A JSON answer keeps the reason and drops every other field
+        let json = failure("{\"message\":\"Invalid signature\",\"pushToken\":\"\(token)\",\"deviceIdentifier\":\"\(identifier)\",\"cloudId\":\"alice@cloud.example.org\"}")
+        XCTAssertEqual(json, "HTTP status: none, body: message=Invalid signature, error: AFURLResponseSerializationErrorDomain -1011")
+
+        // A plain text answer is masked: tokens, URLs and accounts are replaced, the reason stays
+        let text = failure("Invalid device identifier signature \(identifier) for \(token), user alice@cloud.example.org at https://cloud.example.org/index.php")
+        XCTAssertTrue(text.contains("body: Invalid device identifier signature <redacted> for <redacted>, user <account> at <url>"))
+        for secret in [token, identifier, "alice", "cloud.example.org"] {
+            XCTAssertFalse(text.contains(secret))
+        }
+
+        // The answer is cut, a token that crosses the limit is not left half readable
+        let long = failure(String(repeating: "x ", count: 245) + token)
+        XCTAssertFalse(long.contains(String(token.prefix(12))))
+        XCTAssertLessThan(long.count, 700)
+
+        // No answer, no body part
+        XCTAssertEqual(failure(""), "HTTP status: none, error: AFURLResponseSerializationErrorDomain -1011")
+    }
+
     func testLogfileNamePerProcess() throws {
         // The app keeps its name, an extension gets its own file so two processes never write to the same file
         XCTAssertEqual(NCLog.logfileName(dateString: "2026-10-16", processName: ""), "debug-2026-10-16.log")
