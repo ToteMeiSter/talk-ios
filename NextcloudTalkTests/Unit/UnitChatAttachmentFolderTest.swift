@@ -26,7 +26,7 @@ final class UnitChatAttachmentFolderTest: TestBaseRealm {
         wait(for: [expectation], timeout: 5)
 
         XCTAssertEqual(result?.created, false)
-        XCTAssertEqual(result?.statusCode, NSURLErrorBadURL)
+        XCTAssertEqual(result?.statusCode, NCAPIController.attachmentFolderUnknownCode)
         XCTAssertNotEqual(result?.statusCode, 0)
     }
 
@@ -37,7 +37,7 @@ final class UnitChatAttachmentFolderTest: TestBaseRealm {
     }
 
     func testErrorsAreNoAvailableFolder() {
-        XCTAssertFalse(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: NSURLErrorBadURL))
+        XCTAssertFalse(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: NCAPIController.attachmentFolderUnknownCode))
         XCTAssertFalse(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: 507))
         XCTAssertFalse(NCAPIController.isAttachmentFolderAvailable(created: false, statusCode: 403))
     }
