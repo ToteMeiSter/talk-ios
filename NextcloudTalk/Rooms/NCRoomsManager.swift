@@ -71,6 +71,12 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         var intent: JoinIntent
     }
 
+    // A running re-join of a room. A later attempt for the same room replaces it, see `rejoinRoomForCall`
+    private struct Rejoin {
+        let attemptId: UUID
+        var task: URLSessionTask?
+    }
+
     private struct PendingAnsweredCall {
         let token: String
         let accountId: String
@@ -95,15 +101,18 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // Replaces the lookup of the external signaling controller after a join, tests have no signaling server
     internal var externalSignalingRequest: ((TalkAccount, String, @escaping (NCExternalSignalingController?, SignalingSettings?, Error?) -> Void) -> Void)?
 
+    // How long a join waits for the answer of the external signaling server, replaceable in tests
+    internal var externalSignalingJoinTimeout: TimeInterval = 20
+
     private var joiningRoomToken: String?
     private var joiningIntent: JoinIntent?
     private var leavingRoomTokens = Set<String>()
     private var joiningSessionId: String?
     private var joinRoomTask: URLSessionTask?
     // A re-join of a call has its own state: it runs next to the join of another room
-    private var rejoiningRoomToken: String?
-    private var rejoinTask: URLSessionTask?
-    private var rejoinAttemptId: UUID?
+    private var rejoins = [String: Rejoin]()
+    // Rooms whose exit must be repeated once the running one has finished, see `endSessionOfLeftRoom`
+    private var roomsToExitAgain = Set<String>()
     private var pendingJoin: PendingJoin?
     private var upgradeCallToken: String?
     private var upgradeCallAccountId: String?
@@ -1404,6 +1413,14 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         return joiningRoomToken == token
     }
 
+    /// A request which has no error, or was cancelled, can have been handled by the server: the session which it created
+    /// is not known. A request which failed was not handled (assumed: a timeout can also hit a request which arrived)
+    private func mayHaveCreatedSession(_ error: OcsError?) -> Bool {
+        guard let error else { return true }
+
+        return error.underlyingError.code == NSURLErrorCancelled
+    }
+
     private func isLeavingRoom(withToken token: String) -> Bool {
         return self.leavingRoomTokens.contains(token)
     }
@@ -1415,6 +1432,14 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         let task = self.exitRoomRequest(token, account) { error in
             self.leavingRoomTokens.remove(token)
+
+            // A request of a re-join which was still on its way can have been handled after this exit. Exit again
+            // (before the answer is reported, so nothing starts while this exit runs)
+            if self.roomsToExitAgain.remove(token) != nil, self.isRoomLeftAndUnused(token) {
+                NCLog.log("Exiting room \(token) again, a request of a re-join was handled after the first exit")
+                self.exitRoomTracked(token, forAccount: account) { _ in }
+            }
+
             completionBlock(error)
 
             if self.leavingRoomTokens.isEmpty {
@@ -1432,10 +1457,15 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     }
 
     private func startPendingJoin(forToken token: String) {
-        guard let pendingJoin = self.pendingJoin, pendingJoin.token == token else { return }
+        guard let pendingJoin = self.pendingJoin, pendingJoin.token == token, !self.isLeavingRoom(withToken: token) else { return }
 
         self.pendingJoin = nil
         self.joinRoomHelper(pendingJoin.token, forAccountId: pendingJoin.intent.accountId, intent: pendingJoin.intent)
+    }
+
+    /// Nobody holds the room: no room controller, no join which runs or waits for an exit
+    private func isRoomLeftAndUnused(_ token: String) -> Bool {
+        return self.activeRooms[token] == nil && !self.isJoiningRoom(withToken: token) && self.pendingJoin?.token != token
     }
 
     private func isJoiningRoom(withSessionId sessionId: String) -> Bool {
@@ -1448,7 +1478,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         self.joinRoomTask = self.joinRoomRequest(token, account, { sessionId, room, error, statusCode, statusReason in
             if !self.isJoiningRoom(withToken: token) {
                 // Treat a cancelled request as success, as we can't determine if the request was processed on the server or not
-                if let error, error.underlyingError.code != NSURLErrorCancelled {
+                if !self.mayHaveCreatedSession(error) {
                     NCLog.log("Not joining the room any more. Ignore attempt as the join request failed anyway.")
                     completionBlock(nil, nil, nil, NCRoomsManager.statusCodeIgnoreJoinAttempt, nil)
                 } else {
@@ -1494,7 +1524,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
                 let federation = signalingSettings?.getFederationJoinDictionary()
 
-                extSignalingController.joinRoom(withRoomId: token, withSessionId: sessionId, withFederation: federation) { error in
+                self.joinExternalSignaling(extSignalingController, token: token, sessionId: sessionId, federation: federation) { error in
                     // If the sessionId is not the same anymore we tried to join with, we either already left again before
                     // joining the external signaling server succeeded, or we already have another join in process
                     if !self.isJoiningRoom(withToken: token) {
@@ -1519,6 +1549,29 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 }
             }
         })
+    }
+
+    /// Joins the room at the external signaling server and waits for the answer for a limited time. The answer can get
+    /// lost (the room message waits in the queue of a connection which has no hello, and a newer room message drops it
+    /// without a result), and a join which waits for ever keeps the room for the call for ever.
+    private func joinExternalSignaling(_ controller: NCExternalSignalingController, token: String, sessionId: String, federation: [AnyHashable: Any]?, completion: @escaping (NSError?) -> Void) {
+        var answered = false
+
+        let answer: (NSError?) -> Void = { error in
+            guard !answered else { return }
+
+            answered = true
+            completion(error)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + self.externalSignalingJoinTimeout) {
+            guard !answered else { return }
+
+            NCLog.log("No answer of the external signaling server to the join of room \(token) in time")
+            answer(NSError(domain: NSCocoaErrorDomain, code: NCRoomsManager.statusCodeFailedToJoinExternal))
+        }
+
+        controller.joinRoom(withRoomId: token, withSessionId: sessionId, withFederation: federation, withCompletionBlock: answer)
     }
 
     private func getExternalSignalingHelper(for account: TalkAccount, forRoom token: String, withCompletion completion: @escaping (NCExternalSignalingController?, SignalingSettings?, Error?) -> Void) {
@@ -1565,23 +1618,35 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
         // A second re-join of the same room replaces the first one. Its request is cancelled (the caller gets the
         // cancellation as the result), so two requests do not create two room sessions of which one stays behind.
-        if self.rejoinAttemptId != nil, self.rejoiningRoomToken == token {
+        // Every room has its own re-join, a re-join of another room does not hide this one
+        if let running = self.rejoins[token] {
             NCLog.log("Re-joining room \(token) while a re-join of it is running, cancelling the earlier one")
-            self.rejoinTask?.cancel()
+            running.task?.cancel()
         }
 
         let attemptId = UUID()
-        self.rejoinAttemptId = attemptId
+        self.rejoins[token] = Rejoin(attemptId: attemptId, task: nil)
 
-        self.rejoiningRoomToken = token
-        self.rejoinTask = self.joinRoomRequest(token, account, { sessionId, room, error, statusCode, statusReason in
+        let task = self.joinRoomRequest(token, account, { sessionId, room, error, statusCode, statusReason in
             // The result of a cancelled earlier attempt must not clear what the later attempt has set
             defer {
-                if self.rejoinAttemptId == attemptId {
-                    self.rejoinAttemptId = nil
-                    self.rejoiningRoomToken = nil
-                    self.rejoinTask = nil
+                if self.rejoins[token]?.attemptId == attemptId {
+                    self.rejoins.removeValue(forKey: token)
                 }
+            }
+
+            // The room was left (or joined again) while the request was on its way. The call is over, so the result
+            // is not for the call
+            guard self.activeRooms[token] === roomController else {
+                self.endSessionOfLeftRoom(token, forAccount: account, error: error)
+
+                if let error {
+                    completionBlock(nil, nil, error, statusCode, statusReason)
+                } else {
+                    completionBlock(nil, nil, NSError(domain: NSCocoaErrorDomain, code: 0), NCRoomsManager.statusCodeRoomNotActive, nil)
+                }
+
+                return
             }
 
             if error == nil, let sessionId {
@@ -1603,7 +1668,14 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
                     let federation = signalingSettings?.getFederationJoinDictionary()
 
-                    extSignalingController.joinRoom(withRoomId: token, withSessionId: sessionId, withFederation: federation) { error in
+                    self.joinExternalSignaling(extSignalingController, token: token, sessionId: sessionId, federation: federation) { error in
+                        // The room was left while the signaling server was asked. The exit of that leave ends the session
+                        guard self.activeRooms[token] === roomController else {
+                            NCLog.log("Room \(token) was left while re-joining it at the signaling server")
+                            completionBlock(nil, nil, NSError(domain: NSCocoaErrorDomain, code: 0), NCRoomsManager.statusCodeRoomNotActive, nil)
+                            return
+                        }
+
                         if error == nil {
                             NCLog.log("Re-Joined room \(token) in external signaling server successfully.")
                             completionBlock(sessionId, room, nil, 0, nil)
@@ -1618,6 +1690,27 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 completionBlock(nil, nil, error, statusCode, statusReason)
             }
         })
+
+        // The answer can come before the task is stored, then the attempt is finished already
+        if self.rejoins[token]?.attemptId == attemptId {
+            self.rejoins[token]?.task = task
+        }
+    }
+
+    /// The request of a re-join of a room which was left in the meantime can have created a session. The leave
+    /// cancelled the request, but a cancel does not revoke it, so the server can handle it after the exit of the leave
+    /// and end up with a session which nobody uses. Exit once more, after the running exit if there is one.
+    /// A room which is joined (or waits for an exit to be joined) again needs no exit: the join replaces the session.
+    private func endSessionOfLeftRoom(_ token: String, forAccount account: TalkAccount, error: OcsError?) {
+        guard self.mayHaveCreatedSession(error), self.isRoomLeftAndUnused(token) else { return }
+
+        if self.isLeavingRoom(withToken: token) {
+            NCLog.log("Re-join of room \(token) ended after the room was left, exiting again after the running exit")
+            self.roomsToExitAgain.insert(token)
+        } else {
+            NCLog.log("Re-join of room \(token) ended after the room was left, exiting the session which it can have created")
+            self.exitRoomTracked(token, forAccount: account) { _ in }
+        }
     }
 
     public func leaveRoom(_ token: String, forAccount account: TalkAccount) {
@@ -1645,10 +1738,10 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
         // A re-join belongs to a running call, it goes on as long as the call or the chat uses the room
         let roomIsInUse = self.activeRooms[token].map { $0.inCall || $0.inChat } ?? false
 
-        if self.rejoiningRoomToken == token, !roomIsInUse {
+        if let rejoin = self.rejoins[token], !roomIsInUse {
             NCLog.log("Leaving room \(token), but still re-joining -> cancel")
 
-            self.rejoinTask?.cancel()
+            rejoin.task?.cancel()
         }
 
         let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
