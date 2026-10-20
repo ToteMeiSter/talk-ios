@@ -185,6 +185,8 @@ final class UnitExternalSignalingControllerTest: TestBaseRealm {
 
         signalingController.helloResponseReceived(messageDict: helloMessage(withSessionId: "session-2"))
         drainMainQueue()
+        // The completion block of a dropped message is executed in a main queue hop of its own
+        drainMainQueue()
         XCTAssertEqual(status, .applicationError)
     }
 
