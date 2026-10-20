@@ -3789,7 +3789,7 @@ import Toast
             let cell = self.getCell(for: message)
 
             if let messageCell = cell as? BaseChatTableViewCell {
-                messageCell.setSelectionMode(self.messageSelection.isActive, selected: self.messageSelection.contains(message.messageId))
+                messageCell.setSelectionMode(self.messageSelection.isActive, selected: self.isSelected(message))
             }
 
             return cell
