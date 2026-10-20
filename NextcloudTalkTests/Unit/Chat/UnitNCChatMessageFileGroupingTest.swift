@@ -43,6 +43,14 @@ final class UnitNCChatMessageFileGroupingTest: TestBaseRealm {
         XCTAssertTrue(try self.message(["message": "Look at this {file}"]).isGroupableFileMessage)
     }
 
+    /// A temporary message has no message id yet, so it cannot be told apart from the others of its group
+    func testATemporaryFileMessageIsNotGroupable() throws {
+        let temporary = try self.message()
+        temporary.isTemporary = true
+
+        XCTAssertFalse(temporary.isGroupableFileMessage)
+    }
+
     func testFilesSharedBeforeTheAgreedReferenceIdAreNotGroupable() throws {
         XCTAssertFalse(try self.message(["referenceId": String(repeating: "a", count: 64)]).isGroupableFileMessage)
         XCTAssertFalse(try self.message(["referenceId": ""]).isGroupableFileMessage)
