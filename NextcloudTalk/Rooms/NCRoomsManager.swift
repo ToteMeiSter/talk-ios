@@ -440,7 +440,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
 
     public func startChat(inRoom room: NCRoom) {
         guard self.callViewController == nil else {
-            print("Not starting chat due to in a call.")
+            NCLog.log("Not starting chat due to in a call.")
             return
         }
 
@@ -547,7 +547,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
     // swiftlint:disable:next function_parameter_count
     public func startCall(withVideo video: Bool, inRoom room: NCRoom, withVideoEnabled videoEnabled: Bool, asInitiator initiator: Bool, silently: Bool, withRecordingConsent recordingConsent: Bool, withVoiceChatMode voiceChatMode: Bool) {
         guard self.callViewController == nil else {
-            print("Not starting call due to in another call.")
+            NCLog.log("Not starting call due to in another call.")
             return
         }
 
@@ -678,7 +678,7 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
                 completionBlock(error)
             }
         } else {
-            print("Couldn't find a room controller from the room we are switching from")
+            NCLog.log("Couldn't find a room controller from the room we are switching from")
             completionBlock(nil)
         }
     }

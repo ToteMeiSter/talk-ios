@@ -254,7 +254,7 @@ public enum NCExternalSignalingSendMessageStatus {
         // Wiggle interval a little bit to prevent all clients from connecting
         // simultaneously in case the server connection is interrupted.
         let interval = self.reconnectInterval - (self.reconnectInterval / 2) + Int.random(in: 1...self.reconnectInterval)
-        print("Reconnecting in \(interval)")
+        NCLog.log("Reconnecting in \(interval)s")
 
         DispatchQueue.main.async {
             self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(interval), repeats: false, block: { [weak self] _ in
@@ -516,7 +516,7 @@ public enum NCExternalSignalingSendMessageStatus {
             self.joinedRoomToken = nil
             self.joinRoom(withRoomId: "", withSessionId: "", withFederation: nil, withCompletionBlock: nil)
         } else {
-            print("External signaling: Not leaving because it's not the room we joined")
+            NCLog.log("External signaling: Not leaving because it's not the room we joined")
         }
     }
 
@@ -628,7 +628,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if eventTarget == "participants" {
             self.processRoomParticipantsEvents(eventDict: eventDict)
         } else {
-            print("Unsupported event target: \(eventDict)")
+            NCLog.log("Unsupported event target: \(eventTarget ?? "nil")")
         }
     }
 
@@ -651,12 +651,12 @@ public enum NCExternalSignalingSendMessageStatus {
                 self.participantsMap[signalingSessionId] = participant
 
                 if !participant.isFederated, participant.userId == self.account.userId {
-                    print("App user joined room")
+                    NCLog.log("App user joined room")
                     continue
                 }
 
                 // Only notify if another participant joined the room and not ourselves from a different device
-                print("Participant joined room")
+                NCLog.log("Participant joined room")
 
                 guard let currentRoom else { continue }
 
@@ -700,7 +700,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if eventType == "switchto", let wrappedMessage = eventDict["switchto"] as? [AnyHashable: Any] {
             self.processSwitchToMessageEvent(messageDict: wrappedMessage)
         } else {
-            print("Unknown room event: \(eventDict)")
+            NCLog.log("Unknown room event: \(eventType)")
         }
     }
 
@@ -722,7 +722,7 @@ public enum NCExternalSignalingSendMessageStatus {
         } else if messageType == "recording" {
             self.delegate?.externalSignalingController(self, didReceivedSignalingMessage: messageDict)
         } else {
-            print("Unknown room message type \(messageDict)")
+            NCLog.log("Unknown room message type \(messageType)")
         }
     }
 
@@ -732,7 +732,7 @@ public enum NCExternalSignalingSendMessageStatus {
         if let roomToken, !roomToken.isEmpty {
             self.delegate?.externalSignalingController(self, shouldSwitchToCall: roomToken)
         } else {
-            print("Unknown switchTo message: \(messageDict)")
+            NCLog.log("Unknown switchTo message without a room token")
         }
     }
 
@@ -771,7 +771,7 @@ public enum NCExternalSignalingSendMessageStatus {
 
             NotificationCenter.default.post(name: .extSignalingDidUpdateParticipants, object: self, userInfo: userInfo)
         } else {
-            print("Unknown room event: \(eventDict)")
+            NCLog.log("Unknown participants event: \(eventType)")
         }
     }
 

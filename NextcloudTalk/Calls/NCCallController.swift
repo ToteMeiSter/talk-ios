@@ -214,7 +214,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         DarwinNotificationCenter.shared.removeHandler(notificationName: DarwinNotificationCenter.broadcastStartedNotification, owner: self)
         DarwinNotificationCenter.shared.removeHandler(notificationName: DarwinNotificationCenter.broadcastStoppedNotification, owner: self)
         AllocationTracker.shared.removeAllocation()
-        print("NCCallController dealloc")
+        NCLog.log("NCCallController dealloc")
     }
 
     public func startCall() {
@@ -334,10 +334,10 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                     }
 
                     self.delegate?.callControllerDidFailedJoiningCall(self, statusCode: statusCode, errorReason: self.getJoinCallErrorReason(statusCode))
-                    print("Could not rejoin call. Error \(error)")
+                    NCLog.log("Could not rejoin call, StatusCode: \(statusCode), Error: \(NCLog.errorCode(error))")
                 } else {
                     self.delegate?.callControllerDidJoinCall(self)
-                    print("Rejoined call")
+                    NCLog.log("Rejoined call")
 
                     if self.externalSignalingController?.hasMCU == true {
                         self.createPublisherPeerConnection()
@@ -350,7 +350,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     }
 
     public func willRejoinCall() {
-        print("willRejoinCall")
+        NCLog.log("willRejoinCall")
 
         WebRTCCommon.shared.dispatch {
             self.userInCall = 0
@@ -361,7 +361,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     }
 
     public func willSwitchToCall(_ token: String) {
-        print("willSwitchToCall")
+        NCLog.log("willSwitchToCall")
 
         WebRTCCommon.shared.dispatch {
             let isAudioEnabled = self.isAudioEnabled()
@@ -371,7 +371,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
             self.leaveCallInServer(forAll: false) { error in
                 if let error {
-                    print("Could not leave call. Error: \(error)")
+                    NCLog.log("Could not leave call. Error: \(NCLog.errorCode(error))")
                 }
 
                 self.delegate?.callController(self, isSwitchingToCall: token, withAudioEnabled: isAudioEnabled, andVideoEnabled: isVideoEnabled)
@@ -463,7 +463,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         self.leaveCallInServer(forAll: allParticipants) { error in
             if let error {
-                print("Could not leave call. Error: \(error)")
+                NCLog.log("Could not leave call. Error: \(NCLog.errorCode(error))")
             }
 
             self.delegate?.callControllerDidEndCall(self)
@@ -762,7 +762,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     public func startRecording() {
         NCAPIController.shared.startRecording(inRoom: self.room.token, forAccount: self.account) { error in
             if let error {
-                print("Could not start call recording. Error: \(error)")
+                NCLog.log("Could not start call recording. Error: \(NCLog.errorCode(error))")
             }
         }
     }
@@ -770,7 +770,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
     public func stopRecording() {
         NCAPIController.shared.stopRecording(inRoom: self.room.token, forAccount: self.account) { error in
             if let error {
-                print("Could not stop call recording. Error: \(error)")
+                NCLog.log("Could not stop call recording. Error: \(NCLog.errorCode(error))")
             }
         }
     }
@@ -889,10 +889,10 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         if let removedPeerConnection = connectionsDict[peerKey] {
             if roomType == kRoomTypeVideo {
-                print("Removing peer from call: \(sessionId)")
+                NCLog.log("Removing peer from call: \(sessionId)")
                 self.delegate?.callController(self, peerLeft: removedPeerConnection)
             } else if roomType == kRoomTypeScreen, !ownScreenshare {
-                print("Removing screensharing from peer: \(sessionId)")
+                NCLog.log("Removing screensharing from peer: \(sessionId)")
                 self.delegate?.callController(self, didReceiveUnshareScreenFromPeer: removedPeerConnection)
             }
 
@@ -958,7 +958,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
             recorder.isMeteringEnabled = true
             recorder.record()
         } else {
-            print("Failed initializing recorder.")
+            NCLog.log("Failed initializing recorder.")
         }
     }
 
@@ -1118,7 +1118,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         }
 
         // Create a peer connection
-        print("Creating a peer for \(sessionId)")
+        NCLog.log("Creating a peer for \(sessionId)")
         let iceServers = self.signalingController.getIceServers()
         peerConnectionWrapper = NCPeerConnection(sessionId: sessionId, sid: sid, andICEServers: iceServers, forAudioOnlyCall: screensharingPeer ? false : self.isAudioOnly)
         peerConnectionWrapper?.roomType = roomType
@@ -1300,7 +1300,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         WebRTCCommon.shared.assertQueue()
 
         if self.publisherPeerConnection != nil || (self.localAudioTrack == nil && self.localVideoTrack == nil) {
-            print("Not creating publisher peer connection. Already created or no local media.")
+            NCLog.log("Not creating publisher peer connection. Already created or no local media.")
             return
         }
 
@@ -1379,13 +1379,13 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         WebRTCCommon.shared.assertQueue()
 
         if self.screenPublisherPeerConnection != nil || self.localScreenTrack == nil {
-            print("Not creating publisher peer connection. Already created or no local media.")
+            NCLog.log("Not creating publisher peer connection. Already created or no local media.")
             return
         }
 
         guard self.canPublish() else { return }
 
-        print("Creating publisher peer connection with sessionId: \(self.signalingSessionId)")
+        NCLog.log("Creating publisher peer connection with sessionId: \(self.signalingSessionId)")
 
         let iceServers = self.signalingController.getIceServers()
         guard let peerConnectionWrapper = NCPeerConnection(forPublisherWithSessionId: self.signalingSessionId, andICEServers: iceServers, forAudioOnlyCall: true)
@@ -1490,7 +1490,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
         WebRTCCommon.shared.dispatch {
             if Int(Date().timeIntervalSince1970) < timeout {
-                print("Re-requesting an offer to session \(sessionId)")
+                NCLog.log("Re-requesting an offer to session \(sessionId)")
                 externalSignalingController.requestOffer(forSessionId: sessionId, andRoomType: roomType, withSid: sid)
             } else {
                 DispatchQueue.main.async {
@@ -1506,7 +1506,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         let peerKey = self.getPeerKey(withSessionId: signalingMessage.from, ofType: signalingMessage.roomType, forOwnScreenshare: false)
 
         if let pendingRequestTimer = pendingOffersDict[peerKey] {
-            print("Pending requested offer arrived. Removing timer.")
+            NCLog.log("Pending requested offer arrived. Removing timer.")
 
             DispatchQueue.main.async {
                 pendingRequestTimer.invalidate()
@@ -1531,19 +1531,19 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         WebRTCCommon.shared.dispatch {
             // Send current audio state
             if self.isAudioEnabled() {
-                print("Send audioOn to all")
+                NCLog.log("Send audioOn to all")
                 self.sendMessageToAll(ofType: "audioOn", withPayload: nil)
             } else {
-                print("Send audioOff to all")
+                NCLog.log("Send audioOff to all")
                 self.sendMessageToAll(ofType: "audioOff", withPayload: nil)
             }
 
             // Send current video state
             if self.isVideoEnabled() {
-                print("Send videoOn to all")
+                NCLog.log("Send videoOn to all")
                 self.sendMessageToAll(ofType: "videoOn", withPayload: nil)
             } else {
-                print("Send videoOff to all")
+                NCLog.log("Send videoOff to all")
                 self.sendMessageToAll(ofType: "videoOff", withPayload: nil)
             }
         }
@@ -1697,7 +1697,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                     }
                 }
             } else {
-                print("Unknown message: \(message["data"])")
+                NCLog.log("Unknown signaling message of type \(messageType)")
             }
         }
     }
@@ -1899,7 +1899,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
             self.processReaction(signalingMessage)
 
         default:
-            print("Received an unknown signaling message: \(signalingMessage)")
+            NCLog.log("Received an unknown signaling message of type \(signalingMessage.type ?? "nil")")
         }
     }
 
@@ -2083,7 +2083,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
             if let externalSignalingController, externalSignalingController.hasMCU {
                 // Only request offer if the user is sharing audio or video streams
                 if self.userHasStreams(sessionId) {
-                    print("Requesting offer to the MCU for session: \(sessionId)")
+                    NCLog.log("Requesting offer to the MCU for session: \(sessionId)")
                     self.requestOfferWithRepetition(forSessionId: sessionId, withRoomType: kRoomTypeVideo)
                 } else {
                     // Set peer as dummyPeer if it has no streams
@@ -2093,10 +2093,10 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                 let result = sessionId.compare(self.signalingSessionId)
 
                 if result == .orderedAscending {
-                    print("Creating offer...")
+                    NCLog.log("Creating offer...")
                     peerConnectionWrapper.sendOffer()
                 } else {
-                    print("Waiting for offer...")
+                    NCLog.log("Waiting for offer...")
                 }
 
                 if self.screensharingActive {

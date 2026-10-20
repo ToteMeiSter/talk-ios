@@ -559,7 +559,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         transaction.addAction(endCallAction)
         self.callController.request(transaction) { error in
             if let error {
-                NSLog("%@", error.localizedDescription)
+                NCLog.log("CallKit end call request failed: \(error.localizedDescription)")
             }
         }
     }
@@ -572,7 +572,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         transaction.addAction(muteAction)
         self.callController.request(transaction) { error in
             if let error {
-                NSLog("%@", error.localizedDescription)
+                NCLog.log("CallKit mute request failed: \(error.localizedDescription)")
             }
         }
     }
@@ -586,7 +586,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     // MARK: - CXProviderDelegate
 
     public func providerDidReset(_ provider: CXProvider) {
-        NSLog("Provider:didReset")
+        NCLog.log("Provider:didReset")
     }
 
     public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
@@ -664,7 +664,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        NSLog("Provider:didActivateAudioSession - %@", audioSession)
+        NCLog.log("Provider:didActivateAudioSession")
 
         WebRTCCommon.shared.dispatch {
             NCAudioController.shared.providerDidActivate(audioSession: audioSession)
@@ -672,7 +672,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        NSLog("Provider:didDeactivateAudioSession - %@", audioSession)
+        NCLog.log("Provider:didDeactivateAudioSession")
 
         WebRTCCommon.shared.dispatch {
             NCAudioController.shared.providerDidDeactivate(audioSession: audioSession)
