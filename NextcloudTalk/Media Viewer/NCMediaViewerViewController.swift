@@ -13,7 +13,6 @@ import UIKit
 @objc protocol NCMediaViewerViewControllerDelegate: AnyObject {
     func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, canDelete message: NCChatMessage) -> Bool
-    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, deletesFileGroupWith message: NCChatMessage) -> Bool
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestReplyTo message: NCChatMessage)
     func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage)
 }
@@ -607,11 +606,7 @@ import UIKit
 
         let messageCopy = NCChatMessage(value: message)
 
-        let title = delegate.mediaViewerViewController(self, deletesFileGroupWith: messageCopy)
-            ? NSLocalizedString("Delete all files shared together?", comment: "Title of the confirmation shown before a group of files shared together is deleted from the media viewer")
-            : NSLocalizedString("Delete this message?", comment: "Title of the confirmation shown before a picture or video message is deleted from the media viewer")
-
-        let alert = UIAlertController(title: title,
+        let alert = UIAlertController(title: NSLocalizedString("Delete this message?", comment: "Title of the confirmation shown before a picture or video message is deleted from the media viewer"),
                                       message: nil,
                                       preferredStyle: .alert)
 
@@ -674,7 +669,7 @@ import UIKit
     }
 
     private func showErrorAlert(title: String) {
-        let alert = UIAlertController(title: title, message: nil, preferredStyle: .alert)
+        let alert = UIAlertController(title: NSLocalizedString("Delete this message?", comment: "Title of the confirmation shown before a picture or video message is deleted from the media viewer"), message: nil, preferredStyle: .alert)
 
         alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default))
 
