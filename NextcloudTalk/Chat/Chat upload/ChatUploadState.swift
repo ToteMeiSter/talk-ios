@@ -188,12 +188,38 @@ struct ChatUploadState: Codable, Equatable {
         return now - self.createdAt > Self.maxAge
     }
 
+    /// Whether a file shared together with this one, and chosen before it, is still on its way. The clients recognize the
+    /// files of a group by adjacent messages in the order the user chose, so this one is posted after those.
+    ///
+    /// Only an upload that is under way holds the others back: one that is posted, or gave up (the user can send it
+    /// again, and then it lands after the others), or is gone, does not. Neither does one that is older than a temporary
+    /// message lives, so the wait for a file is as long as its own attempts are allowed to take, and never longer.
     func isWaitingForEarlierFiles(among states: [ChatUploadState], now: TimeInterval) -> Bool {
-        return false
+        guard let own = FileUploadReference(referenceId: self.id) else { return false }
+
+        return states.contains { other in
+            guard other.id != self.id,
+                  other.accountId == self.accountId,
+                  other.roomToken == self.roomToken,
+                  other.step == .uploading || other.step == .uploaded,
+                  !other.isExpired(now: now),
+                  let reference = FileUploadReference(referenceId: other.id)
+            else { return false }
+
+            return reference.uploadHash == own.uploadHash && reference.position < own.position
+        }
     }
 
+    /// Whether the upload was chosen after the given one, within the same group of files.
     func follows(_ other: ChatUploadState) -> Bool {
-        return false
+        guard let own = FileUploadReference(referenceId: self.id),
+              let reference = FileUploadReference(referenceId: other.id)
+        else { return false }
+
+        return self.accountId == other.accountId
+            && self.roomToken == other.roomToken
+            && own.uploadHash == reference.uploadHash
+            && own.position > reference.position
     }
 
     /// The state of a posted file is not needed anymore.

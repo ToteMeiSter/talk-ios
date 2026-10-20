@@ -361,6 +361,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         self.persist(state)
         self.markMessageAsFailed(referenceId: state.id)
         NCLog.log("Upload was interrupted: \(reason) (upload \(state.id))")
+        self.announceFilesFollowing(state)
     }
 
     /// Posts the files that are on the server but not in the conversation.
@@ -485,6 +486,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
 
         self.transferringIds.remove(referenceId)
+        self.announceFilesFollowing(state)
     }
 
     @MainActor
@@ -663,6 +665,7 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             self.transferSuspended(state)
         case .failed:
             self.markMessageAsFailed(referenceId: id)
+            self.announceFilesFollowing(state)
         case .finished, .none:
             break
         }
@@ -763,6 +766,10 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
               let destination = state.destination
         else { return }
 
+        // The files of a group are posted in the order they were chosen in, whichever transfer ended first. The one
+        // that is waited for calls `announceFilesFollowing` when it is over, one way or the other.
+        guard !state.isWaitingForEarlierFiles(among: self.store.loadAll(), now: Date().timeIntervalSince1970) else { return }
+
         // The chain of a process that is gone is not there anymore. Do not ask before the pause of the server is over.
         let pause = state.remainingPause(now: Date().timeIntervalSince1970)
 
@@ -814,6 +821,17 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
         }
     }
 
+    /// An upload is over (posted, given up or dropped): the files chosen after it in the same group can be posted now.
+    private func announceFilesFollowing(_ state: ChatUploadState) {
+        let following = self.store.loadAll()
+            .filter { $0.step == .uploaded && $0.follows(state) }
+            .sorted { $0.id < $1.id }
+
+        for next in following {
+            self.announce(id: next.id)
+        }
+    }
+
     private func announceFinished(id: String, failure: ChatFileUploadFailure?) {
         guard var state = self.store.load(id: id) else { return }
 
@@ -825,10 +843,12 @@ final class ChatBackgroundUploader: NSObject, URLSessionDelegate, URLSessionTask
             NCLog.log("Uploaded and shared (upload \(state.id))")
             // The state stays for a while, see `isAnnounced`
             self.store.removeFile(for: state)
+            self.announceFilesFollowing(state)
         case .announce(let delay):
             self.announce(id: id, after: delay)
         case .failed:
             self.markMessageAsFailed(referenceId: id)
+            self.announceFilesFollowing(state)
         case .startTransfer, .recreateAttachmentFolder, .suspended, .none:
             break
         }
