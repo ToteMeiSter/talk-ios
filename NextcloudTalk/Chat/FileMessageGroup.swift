@@ -31,8 +31,14 @@ struct FileMessageGroup {
         }
     }
 
-    /// The group a message belongs to, found by the message itself.
-    static func containing(messageId: Int, in groups: [Int: FileMessageGroup]) -> FileMessageGroup? {
+    /// The group a message belongs to, found by the message itself: the one shown for the group or any hidden in it.
+    /// `hiddenMessageIds` maps a hidden message to its anchor. With it the lookup is a dictionary access, which a
+    /// caller that asks for every row needs; without it the groups are searched.
+    static func containing(messageId: Int, in groups: [Int: FileMessageGroup], hiddenMessageIds: [Int: Int]? = nil) -> FileMessageGroup? {
+        if let hiddenMessageIds {
+            return groups[hiddenMessageIds[messageId] ?? messageId]
+        }
+
         return groups[messageId] ?? groups.values.first { group in
             group.messages.contains { $0.messageId == messageId }
         }
@@ -82,12 +88,6 @@ struct FileMessageGroup {
         return groups
     }
 
-    /// The group a message belongs to, whether it is the message shown for the group or one hidden in it.
-    /// `groups` is by the id of the anchor, `hiddenMessageIds` maps a hidden message to its anchor.
-    static func group(of message: NCChatMessage, in groups: [Int: FileMessageGroup], hiddenMessageIds: [Int: Int]) -> FileMessageGroup? {
-        return groups[hiddenMessageIds[message.messageId] ?? message.messageId]
-    }
-
     /// The selected messages with all files of every group they belong to. A group is one row of the chat, so
     /// picking it picks every file of its upload. Each group stands where its first selected message was, its
     /// files in the order of the upload, and the other messages keep their order.
@@ -96,7 +96,7 @@ struct FileMessageGroup {
         var addedIds = Set<Int>()
 
         for message in selected {
-            let members = Self.group(of: message, in: groups, hiddenMessageIds: hiddenMessageIds)?.messagesInUploadOrder ?? [message]
+            let members = Self.containing(messageId: message.messageId, in: groups, hiddenMessageIds: hiddenMessageIds)?.messagesInUploadOrder ?? [message]
 
             for member in members where addedIds.insert(member.messageId).inserted {
                 expanded.append(member)

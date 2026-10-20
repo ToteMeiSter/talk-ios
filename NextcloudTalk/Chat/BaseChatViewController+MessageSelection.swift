@@ -183,7 +183,7 @@ extension BaseChatViewController {
     }
 
     private func fileMessageGroup(of message: NCChatMessage) -> FileMessageGroup? {
-        return FileMessageGroup.group(of: message, in: self.fileMessageGroups, hiddenMessageIds: self.messageIdsHiddenInFileGroups)
+        return FileMessageGroup.containing(messageId: message.messageId, in: self.fileMessageGroups, hiddenMessageIds: self.messageIdsHiddenInFileGroups)
     }
 
     /// Whether the row of the message is picked: for a group, when any file of it is
