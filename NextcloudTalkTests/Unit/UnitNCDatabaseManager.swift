@@ -97,13 +97,13 @@ final class UnitNCDatabaseManager: TestBaseRealm {
 
         func failure(_ body: String) -> String {
             let userInfo = [AFNetworkingOperationFailingURLResponseDataErrorKey: Data(body.utf8)]
-            let error = NSError(domain: AFURLResponseSerializationErrorDomain, code: -1011, userInfo: userInfo)
+            let error = NSError(domain: NSURLErrorDomain, code: -1011, userInfo: userInfo)
             return NCPushProxySessionManager.failureDescription(forTask: nil, error: error)
         }
 
         // A JSON answer keeps the reason and drops every other field
         let json = failure("{\"message\":\"Invalid signature\",\"pushToken\":\"\(token)\",\"deviceIdentifier\":\"\(identifier)\",\"cloudId\":\"alice@cloud.example.org\"}")
-        XCTAssertEqual(json, "HTTP status: none, body: message=Invalid signature, error: AFURLResponseSerializationErrorDomain -1011")
+        XCTAssertEqual(json, "HTTP status: none, body: message=Invalid signature, error: NSURLErrorDomain -1011")
 
         // A plain text answer is masked: tokens, URLs and accounts are replaced, the reason stays
         let text = failure("Invalid device identifier signature \(identifier) for \(token), user alice@cloud.example.org at https://cloud.example.org/index.php")
@@ -118,7 +118,7 @@ final class UnitNCDatabaseManager: TestBaseRealm {
         XCTAssertLessThan(long.count, 700)
 
         // No answer, no body part
-        XCTAssertEqual(failure(""), "HTTP status: none, error: AFURLResponseSerializationErrorDomain -1011")
+        XCTAssertEqual(failure(""), "HTTP status: none, error: NSURLErrorDomain -1011")
     }
 
     func testLogfileNamePerProcess() throws {
