@@ -259,6 +259,7 @@ jobs:
       with:
         path: 'testResults-${{ matrix.configs.talkbranch }}.html'
         archive: false # This ignores the name parameter, therefore we rename in the create step
+        retention-days: 3
 
     - name: Print logs
       if: ${{ !cancelled() }}
@@ -271,3 +272,4 @@ jobs:
       with:
         name: testResults-${{ matrix.configs.talkbranch }}.xcresult
         path: 'testResult.xcresult'
+        retention-days: 3
