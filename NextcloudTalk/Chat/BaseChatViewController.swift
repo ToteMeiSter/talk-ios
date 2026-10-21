@@ -1370,21 +1370,26 @@ import Toast
     }
 
     func didPressResend(for message: NCChatMessage) {
-        // Make sure there's no unread message separator, as the indexpath could be invalid after removing a message
-        self.removeUnreadMessagesSeparator()
-
-        self.removePermanentlyTemporaryMessage(temporaryMessage: message)
-
-        // The file was posted, the message of the server is the one to show. Sending it again would post it twice.
-        if let referenceId = message.referenceId, ChatBackgroundUploader.shared.isAnnounced(referenceId: referenceId) {
-            return
-        }
-
         guard let originalMessage = message.sendingMessageWithDisplayNames else { return }
 
         // Voice messages and files are sent again by uploading them
         let localFilePath = message.file()?.fileStatus?.fileLocalPath
-        let isVoiceMessage = message.messageType == kMessageTypeVoiceMessage
+        let isVoiceMessage = message.isVoiceMessage
+
+        // The file was posted, the message of the server is the one to show. Sending it again would post it twice.
+        if let referenceId = message.referenceId, ChatBackgroundUploader.shared.isAnnounced(referenceId: referenceId) {
+            self.removeFailedMessage(message)
+            return
+        }
+
+        // The recording is kept in a temporary directory, it might have been deleted in the meantime
+        if isVoiceMessage, localFilePath.map({ !FileManager.default.fileExists(atPath: $0) }) ?? true {
+            NCUserInterfaceController.sharedInstance().presentAlert(withTitle: NSLocalizedString("Failed to share recording", comment: ""),
+                                                                    withMessage: NSLocalizedString("The recording is no longer available", comment: ""))
+            return
+        }
+
+        self.removeFailedMessage(message)
 
         if !isVoiceMessage, localFilePath == nil {
             self.sendChatMessage(message: originalMessage, withParentMessage: message.parent, messageParameters: message.messageParametersJSONString ?? "", silently: message.isSilent)
@@ -1432,6 +1437,12 @@ import Toast
 
             self.upload(upload)
         }
+    }
+
+    private func removeFailedMessage(_ message: NCChatMessage) {
+        // Make sure there's no unread message separator, as the indexpath could be invalid after removing a message
+        self.removeUnreadMessagesSeparator()
+        self.removePermanentlyTemporaryMessage(temporaryMessage: message)
     }
 
     func didPressCopy(for message: NCChatMessage) {
