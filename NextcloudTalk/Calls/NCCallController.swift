@@ -1193,6 +1193,8 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
                                                          roomType: peer.roomType,
                                                          payload: [:])
 
+                    guard let message else { continue }
+
                     self.signalingController.send(message)
                 }
             }
@@ -2067,7 +2069,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
 
     // MARK: - Signaling controller delegate
 
-    func signalingController(_ signalingController: NCSignalingController!, didReceiveSignalingMessage message: [AnyHashable: Any]!) {
+    func signalingController(_ signalingController: NCSignalingController, didReceiveSignalingMessage message: [String: Any]) {
         WebRTCCommon.shared.dispatch {
             guard !self.isLeavingCall, let messageType = message["type"] as? String else { return }
 
@@ -2087,7 +2089,7 @@ internal class NCCallController: NSObject, NCPeerConnectionDelegate, NCSignaling
         }
     }
 
-    func signalingControllerSessionExpired(_ signalingController: NCSignalingController!) {
+    func signalingControllerSessionExpired(_ signalingController: NCSignalingController) {
         NCLog.log("Internal signaling session expired for \(self.room.token), ending call")
 
         // The join failure path already shows the reason in the foreground and ends via CallKit in the background
