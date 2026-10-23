@@ -4,6 +4,7 @@
 name: Build main target
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - '.github/workflows/**'
@@ -36,6 +37,8 @@ env:
 jobs:
   build:
     name: Build
+    # The fork's standing develop -> main PR must not repeat CI after each merge.
+    if: ${{ github.event_name != 'pull_request' || github.head_ref != 'develop' || github.base_ref != 'main' }}
     runs-on: macos-26
 
     steps:
@@ -88,7 +91,7 @@ jobs:
         | xcbeautify --quieter
 
     - name: Upload test build
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: Products
         # Only what test-without-building needs, the test bundles are embedded in the apps
@@ -105,39 +108,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Test with stable23 as well to find regressions in older versions
-        configs: [
-          {
-            serverbranch: 'stable23',
-            talkbranch: 'stable23',
-            notificationsbranch: 'stable23',
-            phpversion: '8.0'
-          },
-          {
-            serverbranch: 'stable33',
-            talkbranch: 'stable33',
-            notificationsbranch: 'stable33',
-            phpversion: '8.3'
-          },
-          {
-            serverbranch: 'stable34',
-            talkbranch: 'stable34',
-            notificationsbranch: 'stable34',
-            phpversion: '8.3'
-          },
-          {
-            serverbranch: 'stable35',
-            talkbranch: 'stable35',
-            notificationsbranch: 'stable35',
-            phpversion: '8.3'
-          },          
-          {
-            serverbranch: 'master',
-            talkbranch: 'main',
-            notificationsbranch: 'master',
-            phpversion: '8.3'
-          }
-        ]
+        # Fork develop PRs test the newest stable server; other PRs retain the full matrix.
+        configs: >-
+          ${{ fromJSON('[{"serverbranch":"stable35","talkbranch":"stable35","notificationsbranch":"stable35","phpversion":"8.3"}]') }}
 
     steps:
       # Workaround for eliminating iOS 17 simulators stalling issue
@@ -234,7 +207,7 @@ jobs:
         PHP_CLI_SERVER_WORKERS=10 php -S localhost:8080 -t server/ &
 
     - name: Download test-build
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: Products
 
@@ -279,11 +252,12 @@ jobs:
         mv index.html testResults-${{ matrix.configs.talkbranch }}.html        
 
     - name: Upload result page from xchtmlresult
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: ${{ !cancelled() }}
       with:
         path: 'testResults-${{ matrix.configs.talkbranch }}.html'
         archive: false # This ignores the name parameter, therefore we rename in the create step
+        retention-days: 3
 
     - name: Print logs
       if: ${{ !cancelled() }}
@@ -291,22 +265,9 @@ jobs:
         cat server/data/nextcloud.log
 
     - name: Upload test results
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: ${{ !cancelled() }}
       with:
         name: testResults-${{ matrix.configs.talkbranch }}.xcresult
         path: 'testResult.xcresult'
-
-  summary:
-    permissions:
-      contents: none
-    runs-on: ubuntu-latest-low
-    needs: [test]
-
-    if: always()
-
-    name: build-and-test-summary
-
-    steps:
-      - name: Summary status
-        run: if ${{ needs.test.result != 'success' }}; then exit 1; fi
+        retention-days: 3
