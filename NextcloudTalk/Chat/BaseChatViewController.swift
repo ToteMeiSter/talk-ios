@@ -1546,9 +1546,21 @@ import Toast
         }
     }
 
-    func didPressDelete(for message: NCChatMessage, showSuccess: Bool = true) {
+    /// The messages a delete of `message` applies to: its whole file group, or the message itself.
+    /// Nil when it can't be deleted, which is also what hides the delete entry of its menu and of the selection mode.
+    func messagesToDelete(for message: NCChatMessage) -> [NCChatMessage]? {
+        guard self.room.canChat else { return nil }
+
+        let targets = self.fileMessageGroups[message.messageId]?.messages ?? [message]
+
+        return targets.allSatisfy({ $0.isDeletable(for: self.account, in: self.room) }) ? targets : nil
+    }
+
+    /// `completion` tells whether the message was deleted, to count the results of deleting several messages.
+    func didPressDelete(for message: NCChatMessage, showSuccess: Bool = true, showError: Bool = true, completion: ((Bool) -> Void)? = nil) {
         if message.sendingFailed || message.isOfflineMessage {
             self.removePermanentlyTemporaryMessage(temporaryMessage: message)
+            completion?(true)
             return
         }
 
@@ -1572,17 +1584,24 @@ import Toast
                 if let deleteMessage = NCChatMessage(dictionary: parent, andAccountId: self.account.accountId) {
                     self.updateMessage(withMessageId: deleteMessage.messageId, updatedMessage: deleteMessage)
                 }
+
+                completion?(true)
             } else if error != nil {
-                switch statusCode {
-                case 400:
-                    NotificationPresenter.shared().present(text: NSLocalizedString("Message could not be deleted because it is too old", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
-                case 405:
-                    NotificationPresenter.shared().present(text: NSLocalizedString("Only normal chat messages can be deleted", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
-                default:
-                    NotificationPresenter.shared().present(text: NSLocalizedString("An error occurred while deleting the message", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                if showError {
+                    switch statusCode {
+                    case 400:
+                        NotificationPresenter.shared().present(text: NSLocalizedString("Message could not be deleted because it is too old", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                    case 405:
+                        NotificationPresenter.shared().present(text: NSLocalizedString("Only normal chat messages can be deleted", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                    default:
+                        NotificationPresenter.shared().present(text: NSLocalizedString("An error occurred while deleting the message", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                    }
                 }
 
                 self.updateMessage(withMessageId: message.messageId, updatedMessage: message)
+                completion?(false)
+            } else {
+                completion?(false)
             }
         }
     }

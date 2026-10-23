@@ -2771,12 +2771,12 @@ import SwiftUI
 
         // Delete option. A group is deleted as a whole, so no file of it is left behind unseen.
         if let fileGroup = self.fileMessageGroups[message.messageId] {
-            if self.room.canChat, fileGroup.messages.allSatisfy({ $0.isDeletable(for: self.account, in: self.room) }) {
+            if self.messagesToDelete(for: message) != nil {
                 destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
                     self.didPressDeleteAll(in: fileGroup)
                 })
             }
-        } else if message.sendingFailed || message.isOfflineMessage || (message.isDeletable(for: self.account, in: self.room) && self.room.canChat) {
+        } else if message.sendingFailed || message.isOfflineMessage || self.messagesToDelete(for: message) != nil {
             destructiveMenuActions.append(UIAction(title: NSLocalizedString("Delete", comment: ""), image: .init(systemName: "trash"), attributes: .destructive) { _ in
                 self.didPressDelete(for: message)
             })

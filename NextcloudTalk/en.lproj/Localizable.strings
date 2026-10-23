@@ -94,6 +94,12 @@
 /* Replies in a thread */
 "%ld replies" = "%ld replies";
 
+/* Messages of a selection that failed to delete, e.g. '1 of 3 messages could not be deleted' */
+"%1$ld of %2$ld messages could not be deleted" = "%1$ld of %2$ld messages could not be deleted";
+
+/* Number of messages deleted from a chat */
+"%ld messages deleted successfully" = "%ld messages deleted successfully";
+
 /* Number of messages selected in a chat, e.g. '3 selected' */
 "%ld selected" = "%ld selected";
 
@@ -909,6 +915,9 @@
 
 /* No comment provided by engineer. */
 "Deleting message" = "Deleting message";
+
+/* Confirmation to delete the selected messages of a chat, e.g. 'Delete 3 messages?' */
+"Delete %ld messages?" = "Delete %ld messages?";
 
 /* No comment provided by engineer. */
 "Deleting poll draft failed" = "Deleting poll draft failed";

@@ -207,9 +207,14 @@ extension BaseChatViewController {
         self.selectionTitleLabel?.sizeToFit()
 
         let canForward = self.forwardPlan(for: selectedMessages) != nil
+        let canDelete = self.messagesToDelete(forSelected: selectedMessages) != nil
 
         for item in self.selectionToolbar?.items ?? [] {
-            item.isEnabled = item.tag == selectionForwardItemTag ? canForward : true
+            switch item.tag {
+            case selectionForwardItemTag: item.isEnabled = canForward
+            case selectionDeleteItemTag: item.isEnabled = canDelete
+            default: item.isEnabled = true
+            }
         }
     }
 
@@ -257,9 +262,15 @@ extension BaseChatViewController {
             self?.didPressCopySelected()
         })
 
+        let deleteItem = UIBarButtonItem(title: NSLocalizedString("Delete", comment: ""), primaryAction: UIAction { [weak self] _ in
+            self?.didPressDeleteSelected()
+        })
+        deleteItem.tag = selectionDeleteItemTag
+        deleteItem.tintColor = .systemRed
+
         let toolbar = UIToolbar()
         toolbar.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.items = [forwardItem, UIBarButtonItem(systemItem: .flexibleSpace), copyItem]
+        toolbar.items = [forwardItem, UIBarButtonItem(systemItem: .flexibleSpace), copyItem, UIBarButtonItem(systemItem: .flexibleSpace), deleteItem]
         self.view.addSubview(toolbar)
 
         NSLayoutConstraint.activate([
@@ -330,6 +341,51 @@ extension BaseChatViewController {
         self.didPressForward(items: items, skippedFiles: plan.skippedFiles)
     }
 
+    /// The messages the selected ones are deleted with, by the rule of the message menu. Nil, if one can't be deleted.
+    private func messagesToDelete(forSelected selectedMessages: [NCChatMessage]) -> [NCChatMessage]? {
+        return MessageSelection.deletionTargets(of: selectedMessages, id: { $0.messageId }, targets: { self.messagesToDelete(for: $0) })
+    }
+
+    /// Asks first, with the number of messages. The messages that are not deleted stay selected.
+    private func didPressDeleteSelected() {
+        guard let targets = self.messagesToDelete(forSelected: self.selectedMessages()) else {
+            self.updateSelectionUI()
+            return
+        }
+
+        let title = String.localizedStringWithFormat(NSLocalizedString("Delete %ld messages?", comment: "Confirmation to delete the selected messages of a chat, e.g. 'Delete 3 messages?'"), targets.count)
+        let alert = UIAlertController(title: title, message: nil, preferredStyle: .alert)
+
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Delete", comment: ""), style: .destructive) { [weak self] _ in
+            self?.deleteSelected(targets)
+        })
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
+
+        self.present(alert, animated: true)
+    }
+
+    /// The server deletes one message per request. The result is told once for all of them.
+    private func deleteSelected(_ targets: [NCChatMessage]) {
+        let collector = DeletionCollector(ids: targets.map { $0.messageId }) { [weak self] outcome in
+            guard let self else { return }
+
+            // The deleted messages are not selectable anymore, so the mode ends when all are deleted
+            self.updateSelectionUI()
+
+            if outcome.allDeleted {
+                NotificationPresenter.shared().present(text: String.localizedStringWithFormat(NSLocalizedString("%ld messages deleted successfully", comment: "Number of messages deleted from a chat"), outcome.deletedCount), dismissAfterDelay: 5.0, includedStyle: .success)
+            } else {
+                NotificationPresenter.shared().present(text: String.localizedStringWithFormat(NSLocalizedString("%1$ld of %2$ld messages could not be deleted", comment: "Messages of a selection that failed to delete, e.g. '1 of 3 messages could not be deleted'"), outcome.failedIds.count, outcome.total), dismissAfterDelay: 5.0, includedStyle: .error)
+            }
+        }
+
+        for message in targets {
+            self.didPressDelete(for: message, showSuccess: false, showError: false) { deleted in
+                collector.record(id: message.messageId, deleted: deleted)
+            }
+        }
+    }
+
     private func didPressCopySelected() {
         let selectedMessages = self.selectedMessages()
 
@@ -344,3 +400,4 @@ extension BaseChatViewController {
 }
 
 private let selectionForwardItemTag = 1
+private let selectionDeleteItemTag = 2

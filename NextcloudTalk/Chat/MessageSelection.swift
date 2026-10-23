@@ -110,3 +110,71 @@ struct MessageSelection {
         return texts.joined(separator: self.textSeparator)
     }
 }
+
+// MARK: - Deleting the selected messages
+
+extension MessageSelection {
+
+    /// The messages a delete of the `selected` ones applies to, each once. Nil when nothing is selected or one of them
+    /// can't be deleted: `targets` gives the rule of the message menu, so that the delete action is only offered when
+    /// every selected message could be deleted on its own.
+    static func deletionTargets<T>(of selected: [T], id: (T) -> Int, targets: (T) -> [T]?) -> [T]? {
+        guard !selected.isEmpty else { return nil }
+
+        var result: [T] = []
+        var seenIds = Set<Int>()
+
+        for item in selected {
+            guard let itemTargets = targets(item) else { return nil }
+
+            for target in itemTargets where seenIds.insert(id(target)).inserted {
+                result.append(target)
+            }
+        }
+
+        return result
+    }
+}
+
+/// What deleting several messages did. The server deletes one message per request, so some can fail.
+struct DeleteOutcome: Equatable {
+
+    let total: Int
+    let failedIds: [Int]
+
+    var deletedCount: Int {
+        return self.total - self.failedIds.count
+    }
+
+    var allDeleted: Bool {
+        return self.failedIds.isEmpty
+    }
+}
+
+/// Collects the results of the single deletes and reports once, when every message has an answer.
+final class DeletionCollector {
+
+    private let ids: [Int]
+    private var answered = Set<Int>()
+    private var failedIds: [Int] = []
+    private let completion: (DeleteOutcome) -> Void
+
+    init(ids: [Int], completion: @escaping (DeleteOutcome) -> Void) {
+        self.ids = ids
+        self.completion = completion
+    }
+
+    /// An answer for a message that is not expected, or a second one for it, is ignored.
+    func record(id: Int, deleted: Bool) {
+        guard self.ids.contains(id), self.answered.insert(id).inserted else { return }
+
+        if !deleted {
+            self.failedIds.append(id)
+        }
+
+        if self.answered.count == self.ids.count {
+            self.completion(DeleteOutcome(total: self.ids.count, failedIds: self.failedIds))
+        }
+    }
+}
+

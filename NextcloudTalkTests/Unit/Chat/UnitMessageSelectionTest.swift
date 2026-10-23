@@ -396,4 +396,66 @@ final class UnitMessageSelectionTest: TestBaseRealm {
         XCTAssertEqual(MessageSelection.joinedText(of: ["only"]), "only")
         XCTAssertEqual(MessageSelection.joinedText(of: ["multi\nline", "next"]), "multi\nline\nnext")
     }
+
+    // MARK: - Deleting the selected messages
+
+    func testDeleteIsOfferedOnlyWhenEverySelectedMessageCanBeDeleted() {
+        let deletable: Set<Int> = [1, 2]
+
+        XCTAssertEqual(MessageSelection.deletionTargets(of: [1, 2], id: { $0 }, targets: { deletable.contains($0) ? [$0] : nil }), [1, 2])
+        XCTAssertNil(MessageSelection.deletionTargets(of: [1, 2, 3], id: { $0 }, targets: { deletable.contains($0) ? [$0] : nil }), "One message that can't be deleted hides the action")
+        XCTAssertNil(MessageSelection.deletionTargets(of: [Int](), id: { $0 }, targets: { [$0] }), "Nothing selected")
+    }
+
+    func testDeleteOfAFileGroupTakesAllItsFilesOnce() {
+        // 10 is the anchor of the group 10, 11, 12; the group is selected once, and 11 was picked as well by an expanded selection
+        let groups = [10: [10, 11, 12], 11: [10, 11, 12]]
+
+        XCTAssertEqual(MessageSelection.deletionTargets(of: [10, 11, 20], id: { $0 }, targets: { groups[$0] ?? [$0] }), [10, 11, 12, 20])
+    }
+
+    func testCollectorReportsOnceWhenEveryMessageHasAnAnswer() {
+        var outcomes: [DeleteOutcome] = []
+        let collector = DeletionCollector(ids: [1, 2, 3]) { outcomes.append($0) }
+
+        collector.record(id: 1, deleted: true)
+        collector.record(id: 2, deleted: false)
+        XCTAssertTrue(outcomes.isEmpty, "A message is still being deleted")
+
+        collector.record(id: 3, deleted: true)
+        collector.record(id: 3, deleted: false)
+        collector.record(id: 99, deleted: false)
+
+        XCTAssertEqual(outcomes, [DeleteOutcome(total: 3, failedIds: [2])])
+        XCTAssertEqual(outcomes.first?.deletedCount, 2)
+        XCTAssertEqual(outcomes.first?.allDeleted, false)
+    }
+
+    func testCollectorReportsAllDeleted() {
+        var outcome: DeleteOutcome?
+        let collector = DeletionCollector(ids: [1, 2]) { outcome = $0 }
+
+        collector.record(id: 2, deleted: true)
+        collector.record(id: 1, deleted: true)
+
+        XCTAssertEqual(outcome?.allDeleted, true)
+        XCTAssertEqual(outcome?.deletedCount, 2)
+    }
+
+    func testDeletedMessagesLeaveTheSelectionAndTheFailedOnesStay() {
+        var selection = MessageSelection()
+        selection.begin(with: 1, isSelectable: true)
+        selection.toggle(2, isSelectable: true)
+        selection.toggle(3, isSelectable: true)
+
+        // 1 and 3 are deleted, so they are not selectable anymore; 2 failed and is restored
+        selection.prune(to: [1, 2, 3], id: { $0 }, isSelectable: { $0 == 2 })
+
+        XCTAssertEqual(selection.selectedIds, [2])
+        XCTAssertTrue(selection.isActive)
+
+        selection.prune(to: [1, 2, 3], id: { $0 }, isSelectable: { _ in false })
+
+        XCTAssertFalse(selection.isActive, "The mode ends when everything is deleted")
+    }
 }
