@@ -443,6 +443,9 @@ final class UIRoomTest: XCTestCase {
         self.sendSelectionTestMessage("SelectionTwo", in: app)
         waitForCount(query: app.cells.matching(identifier: "CellMessageSent"), count: 2, timeout: TestConstants.timeoutShort)
 
+        // Let the keyboard and the rows settle, a press while the rows still move misses the zone next to the bubble
+        sleep(3)
+
         let sentCells = app.cells.matching(identifier: "CellMessageSent")
         let first = sentCells.element(boundBy: 0)
         let second = sentCells.element(boundBy: 1)
@@ -473,6 +476,12 @@ final class UIRoomTest: XCTestCase {
         // Copy leaves the mode, too
         first.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).press(forDuration: 1.5)
         XCTAssert(app.staticTexts["1 selected"].waitForExistence(timeout: TestConstants.timeoutShort))
+        let copyButton = app.toolbars.buttons["Copy"]
+        XCTContext.runActivity(named: "DIAG2 copy exists=\(copyButton.exists) enabled=\(copyButton.isEnabled) hittable=\(copyButton.isHittable) frame=\(copyButton.frame) count=\(app.toolbars.buttons.matching(identifier: "Copy").count) keyboards=\(app.keyboards.count) inputbar=\(app.otherElements["SLKTextInputbar"].exists)") { activity in
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.lifetime = .keepAlways
+            activity.add(shot)
+        }
         waitForReady(object: app.toolbars.buttons["Copy"]).tap()
         XCTAssertFalse(app.toolbars.buttons["Copy"].waitForExistence(timeout: TestConstants.timeoutShort))
     }
