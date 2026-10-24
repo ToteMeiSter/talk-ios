@@ -1744,18 +1744,16 @@ class NCRoomsManager: NSObject, CallViewControllerDelegate {
             rejoin.task?.cancel()
         }
 
-        let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
-
         // Remove room controller and exit room
         if let roomController = self.activeRooms[token], !roomController.inCall, !roomController.inChat {
 
             self.activeRooms.removeValue(forKey: token)
 
-            self.exitRoomTracked(token, forAccount: activeAccount) { error in
+            self.exitRoomTracked(token, forAccount: account) { error in
                 var userInfo = [:]
                 userInfo["token"] = token
 
-                if let extSignalingController = NCSettingsController.sharedInstance().externalSignalingController(forAccountId: activeAccount.accountId) {
+                if let extSignalingController = NCSettingsController.sharedInstance().externalSignalingController(forAccountId: account.accountId) {
                     extSignalingController.leaveRoom(withRoomId: token)
                 }
 
