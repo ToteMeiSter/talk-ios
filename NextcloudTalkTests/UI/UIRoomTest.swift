@@ -481,7 +481,8 @@ final class UIRoomTest: XCTestCase {
         let cell = app.cells["CellMessageSent"]
         XCTAssert(cell.waitForExistence(timeout: TestConstants.timeoutShort))
 
+        // The menu opens at the touch point; its first page holds the reactions, "Reply" is on the next page
         cell.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
-        waitForReady(object: app.buttons["Reply"])
+        XCTAssert(app.descendants(matching: .any)["Add reaction"].waitForExistence(timeout: TestConstants.timeoutShort))
     }
 }
