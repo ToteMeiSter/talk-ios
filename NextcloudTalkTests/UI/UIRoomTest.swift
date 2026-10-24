@@ -496,7 +496,7 @@ final class UIRoomTest: XCTestCase {
         // The menu opens at the touch point; its first page holds the reactions, "Reply" is on the next page
         cell.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
         // Servers without reactions (stable23) start the menu with "Reply"
-        let menuShown = app.descendants(matching: .any)["Add reaction"].waitForExistence(timeout: TestConstants.timeoutShort) || app.buttons["Reply"].exists
+        let menuShown = app.descendants(matching: .any)["Add reaction"].waitForExistence(timeout: TestConstants.timeoutShort) || app.descendants(matching: .any)["Reply"].exists
         XCTAssert(menuShown)
     }
 
