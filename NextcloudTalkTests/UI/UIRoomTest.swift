@@ -459,8 +459,13 @@ final class UIRoomTest: XCTestCase {
         second.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).tap()
         XCTAssert(app.staticTexts["1 selected"].waitForExistence(timeout: TestConstants.timeoutShort))
 
-        // Close leaves the mode and brings the input bar back
-        waitForReady(object: app.navigationBars.buttons["Close"]).tap()
+        // Screenshot for the check of the look (title, input bar) in the mode
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        // Close leaves the mode and brings the input bar back (the system label of the button is "close")
+        waitForReady(object: app.navigationBars.buttons.matching(NSPredicate(format: "label ==[c] 'close'")).firstMatch).tap()
         XCTAssertFalse(app.staticTexts["1 selected"].waitForExistence(timeout: TestConstants.timeoutShort))
         XCTAssertFalse(app.toolbars.buttons["Copy"].exists)
         XCTAssert(app.otherElements["SLKTextInputbar"].textViews["Write message, @ to mention someone …"].waitForExistence(timeout: TestConstants.timeoutShort))
