@@ -22,6 +22,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
     // MARK: - Public var
     public let kReceivedChatMessagesLimit = 100
 
+    /// What `checkOrCreateAttachmentFolder` reports when the account has no attachment folder URL. 0 is "the folder
+    /// is there" for its callers. An `NSURLErrorDomain` code that the retry policy sees as permanent, so waiting and
+    /// asking again does not happen.
+    static let attachmentFolderUnknownCode = NSURLErrorBadURL
+
     // MARK: - Private var
     private let kDavEndpoint = "/remote.php/dav"
     private let kNCOCSAPIVersion = "/ocs/v2.php"
@@ -138,7 +143,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
         self.cookieStorages.removeValue(forKey: account.accountId)
     }
 
-    private func authHeader(forAccount account: TalkAccount) -> String? {
+    internal func authHeader(forAccount account: TalkAccount) -> String? {
         if let cachedHeader = self.authTokenCache[account.accountId] {
             return cachedHeader
         }
@@ -277,7 +282,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
             var room: NCRoom?
 
             // Room object is returned only since Talk 11
-            if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.listableRooms) {
+            if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.listableRooms, forAccountId: account.accountId) {
                 room = NCRoom(dictionary: ocsResponse?.dataDict, andAccountId: account.accountId)
 
                 // In case there's no token, or a non-matching token, don't return
@@ -2254,7 +2259,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
             if let contactsDict = ocsResponse?.dataArrayDict {
                 let contacts = contactsDict
                     .compactMap( { NCUser(dictionary: $0) })
-                    .filter({ !($0.userId == account.userId && $0.source as String == kParticipantTypeUser) })
+                    .filter({ !($0.userId == account.userId && $0.source == kParticipantTypeUser) })
 
                 completionBlock(contacts, ocsError)
             } else {
@@ -2281,7 +2286,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
             if let contactsDict = ocsResponse?.dataArrayDict {
                 let contacts = contactsDict
                     .compactMap( { NCUser(dictionary: $0) })
-                    .filter({ !($0.userId == account.userId && $0.source as String == kParticipantTypeUser) })
+                    .filter({ !($0.userId == account.userId && $0.source == kParticipantTypeUser) })
 
                 completionBlock(contacts, ocsError)
             } else {
@@ -2550,10 +2555,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
 
     // MARK: - Push Notifications
 
-    public func subscribeAccount(_ account: TalkAccount, withPublicKey publicKey: Data, toNextcloudServerWithCompletionBlock completionBlock: @escaping (_ responseDict: [String: Any]?, _ error: OcsError?) -> Void) {
+    @nonobjc
+    public func registerDevice(forAccount account: TalkAccount, withPublicKey publicKey: Data) async throws -> PushDeviceRegistration {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let devicePublicKey = String(data: publicKey, encoding: .utf8)
-        else { return }
+        else { throw ApiControllerError.preconditionError }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/notifications/api/v2/push"
         let parameters = [
@@ -2562,14 +2568,21 @@ class NCAPIController: NSObject, NKCommonDelegate {
             "proxyServer": pushNotificationServer
         ]
 
-        apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { ocsResponse, ocsError in
-            completionBlock(ocsResponse?.dataDict, ocsError)
-        }
+        let ocsResponse = try await apiSessionManager.postOcs(urlString, account: account, parameters: parameters)
+
+        guard let registration = PushDeviceRegistration(dataDict: ocsResponse.dataDict)
+        else { throw ApiControllerError.unexpectedOcsResponse }
+
+        return registration
     }
 
-    public func unsubscribeAccount(_ account: TalkAccount, fromNextcloudServerWithCompletionBlock completionBlock: @escaping (_ error: OcsError?) -> Void) {
+    @nonobjc
+    public func unregisterDevice(forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            completionBlock(OcsError.genericError())
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/notifications/api/v2/push"
 
@@ -2578,33 +2591,39 @@ class NCAPIController: NSObject, NKCommonDelegate {
         }
     }
 
-    public func subscribeAccount(_ account: TalkAccount, toPushServerWithCompletionBlock completionBlock: @escaping (_ error: Error?) -> Void) {
+    @nonobjc
+    public func registerDevice(_ registration: PushDeviceRegistration, atPushProxyWithPushToken pushToken: String) async throws {
         let urlString = "\(pushNotificationServer)/devices"
         let parameters = [
-            "pushToken": NCKeyChainController.sharedInstance().combinedPushToken(),
-            "deviceIdentifier": account.deviceIdentifier,
-            "deviceIdentifierSignature": account.deviceSignature,
-            "userPublicKey": account.userPublicKey
+            "pushToken": pushToken,
+            "deviceIdentifier": registration.deviceIdentifier,
+            "deviceIdentifierSignature": registration.signature,
+            "userPublicKey": registration.userPublicKey
         ]
 
-        NCPushProxySessionManager.shared.post(urlString, parameters: parameters, progress: nil) { _, _ in
-            completionBlock(nil)
-        } failure: { _, error in
-            completionBlock(error)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            NCPushProxySessionManager.shared.post(urlString, parameters: parameters, progress: nil) { _, _ in
+                continuation.resume()
+            } failure: { task, error in
+                NCLog.log("Push proxy request to subscribe failed. \(NCPushProxySessionManager.failureDescription(forTask: task, error: error))")
+                continuation.resume(throwing: error)
+            }
         }
     }
 
-    public func unsubscribeAccount(_ account: TalkAccount, fromPushServerWithCompletionBlock completionBlock: @escaping (_ error: Error?) -> Void) {
+    @nonobjc
+    public func unregisterDevice(_ registration: PushDeviceRegistration, fromPushProxyWithCompletionBlock completionBlock: @escaping (_ error: Error?) -> Void) {
         let urlString = "\(pushNotificationServer)/devices"
         let parameters = [
-            "deviceIdentifier": account.deviceIdentifier,
-            "deviceIdentifierSignature": account.deviceSignature,
-            "userPublicKey": account.userPublicKey
+            "deviceIdentifier": registration.deviceIdentifier,
+            "deviceIdentifierSignature": registration.signature,
+            "userPublicKey": registration.userPublicKey
         ]
 
         NCPushProxySessionManager.shared.delete(urlString, parameters: parameters) { _, _ in
             completionBlock(nil)
-        } failure: { _, error in
+        } failure: { task, error in
+            NCLog.log("Push proxy request to unsubscribe failed. \(NCPushProxySessionManager.failureDescription(forTask: task, error: error))")
             completionBlock(error)
         }
     }
@@ -2736,6 +2755,24 @@ class NCAPIController: NSObject, NKCommonDelegate {
                                 forAccount account: TalkAccount,
                                 completionBlock: @escaping (_ error: OcsError?) -> Void) -> URLSessionDataTask? {
 
+        return self.sendChatMessageReturningId(message, toRoom: token, threadTitle: threadTitle, replyTo: replyTo, replyToToken: replyToToken, referenceId: referenceId, silently: silently, forAccount: account) { _, error in
+            completionBlock(error)
+        }
+    }
+
+    // Same as sendChatMessage, but also returns the id the server assigned to the new message
+    @discardableResult
+    // swiftlint:disable:next function_parameter_count
+    public func sendChatMessageReturningId(_ message: String,
+                                           toRoom token: String,
+                                           threadTitle: String?,
+                                           replyTo: Int,
+                                           replyToToken: String? = nil,
+                                           referenceId: String?,
+                                           silently: Bool,
+                                           forAccount account: TalkAccount,
+                                           completionBlock: @escaping (_ messageId: Int?, _ error: OcsError?) -> Void) -> URLSessionDataTask? {
+
         guard let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
         else { return nil }
@@ -2767,8 +2804,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
             parameters["threadTitle"] = threadTitle
         }
 
-        return apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { _, ocsError in
-            completionBlock(ocsError)
+        return apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { ocsResponse, ocsError in
+            completionBlock(ocsResponse?.dataDict?["id"] as? Int, ocsError)
         }
     }
 
@@ -2829,15 +2866,18 @@ class NCAPIController: NSObject, NKCommonDelegate {
     }
 
     @discardableResult
-    public func setChatReadMarker(_ lastReadMessage: Int, inRoom token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) -> URLSessionDataTask? {
+    public func setChatReadMarker(_ lastReadMessage: Int, inRoom token: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?, _ lastCommonReadMessage: Int) -> Void) -> URLSessionDataTask? {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)
         else { return nil }
 
         let urlString = self.getRequestURL(forEndpoint: "chat/\(encodedToken)/read", withAPIType: .chat, forAccount: account)
 
-        return apiSessionManager.postOcs(urlString, account: account, parameters: ["lastReadMessage": lastReadMessage]) { _, ocsError in
-            completionBlock(ocsError)
+        return apiSessionManager.postOcs(urlString, account: account, parameters: ["lastReadMessage": lastReadMessage]) { ocsResponse, ocsError in
+            // The response of the read request also carries the last message read by everybody, -1 if not available
+            let headerLastCommonRead = Int(ocsResponse?.value(forHTTPHeaderField: "x-chat-last-common-read") ?? "") ?? -1
+
+            completionBlock(ocsError, headerLastCommonRead)
         }
     }
 
@@ -2874,7 +2914,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 var result: [String: [NCChatMessage]] = [:]
 
                 for (key, value) in dataDict {
-                    result[key] = value.compactMap({ NCChatMessage(dictionary: $0) })
+                    result[key] = value.compactMap({ NCChatMessage(dictionary: $0, andAccountId: account.accountId) })
                 }
 
                 completionBlock(result, nil)
@@ -2908,7 +2948,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
         return apiSessionManager.getOcs(urlString, account: account, parameters: parameters) { ocsResponse, ocsError in
             if let dataDict = ocsResponse?.dataDict as? [String: [String: Any]] {
                 let headerLastKnownMessage = Int(ocsResponse?.value(forHTTPHeaderField: "x-chat-last-given")) ?? -1
-                completionBlock(dataDict.compactMap({ NCChatMessage(dictionary: $0.value) }), headerLastKnownMessage, nil)
+                completionBlock(dataDict.compactMap({ NCChatMessage(dictionary: $0.value, andAccountId: account.accountId) }), headerLastKnownMessage, nil)
             } else {
                 completionBlock(nil, -1, ocsError)
             }
@@ -3118,6 +3158,7 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 <d:getcontenttype />\
                 <d:resourcetype />\
                 <fileid xmlns=\"http://owncloud.org/ns\"/>\
+                <permissions xmlns=\"http://owncloud.org/ns\"/>\
                 <is-encrypted xmlns=\"http://nextcloud.org/ns\"/>\
                 <has-preview xmlns=\"http://nextcloud.org/ns\"/>\
             </d:prop>\
@@ -3158,17 +3199,42 @@ class NCAPIController: NSObject, NKCommonDelegate {
             parameters["talkMetaData"] = jsonString
         }
 
+        // A 403 is not handled here: the server uses it for "already shared" as well as for a refused share,
+        // so only the caller knows which one it is (see `isAlreadyShared`).
         apiSessionManager.postOcs(urlString, account: account, parameters: parameters) { _, ocsError in
-            if let ocsError {
-                // Do not return error when re-sharing a file or folder.
-                if ocsError.responseStatusCode != 403 {
-                    completionBlock(ocsError)
-                    return
-                }
-            }
-
-            completionBlock(nil)
+            completionBlock(ocsError)
         }
+    }
+
+    /// Whether a failed `shareFileOrFolder` only says that the path is already shared with the conversation.
+    ///
+    /// The server answers 403 for "Path is already shared with this conversation" (Talk's `RoomShareProvider`).
+    /// A refused share looks the same: since server 34.0.2 "You are not allowed to share ..." and "more permission
+    /// than you have" are 403 as well (`RestrictInteractionListener`), before that the refusal is a 404.
+    /// The text is localized, so it can not tell them apart. The provider runs after all checks of the server,
+    /// so a 403 can only mean "already shared" for a node the user may share and update: the default permissions
+    /// of a file share are read, update and share. For any other node it is a refusal.
+    @nonobjc
+    static func isAlreadyShared(statusCode: Int, canShare: Bool) -> Bool {
+        return statusCode == 403 && canShare
+    }
+
+    @nonobjc
+    static func isAlreadyShared(_ error: Error, canShare: Bool) -> Bool {
+        guard let ocsError = error as? OcsError else { return false }
+        return isAlreadyShared(statusCode: ocsError.responseStatusCode, canShare: canShare)
+    }
+
+    /// Whether the WebDAV permissions (`oc:permissions`) of a node include everything a share of it asks for by default
+    /// (`shareapi_default_permissions`, 31): the right to share ("R") and to update ("W"), for a folder also to create
+    /// ("C", "K") and to delete ("D") inside. A 403 for a node with less is a refusal, not "already shared".
+    /// Without permissions in the listing nothing is known, so the node is treated as shareable.
+    @nonobjc
+    static func canShare(davPermissions: String, isDirectory: Bool) -> Bool {
+        if davPermissions.isEmpty { return true }
+
+        let required = isDirectory ? ["R", "W", "C", "K", "D"] : ["R", "W"]
+        return required.allSatisfy { davPermissions.contains($0) }
     }
 
     func uniqueNameForFileUpload(withName fileName: String, isOriginalName: Bool, forAccount account: TalkAccount, completionBlock: @escaping (_ fileServerURL: String?, _ fileServerPath: String?, _ errorCode: Int, _ errorDescription: String?) -> Void) {
@@ -3197,12 +3263,25 @@ class NCAPIController: NSObject, NKCommonDelegate {
         }
     }
 
+    /// Deletes a file or folder using its absolute WebDAV URL. A file that is gone already is no error.
+    ///
+    /// - Returns: The status code, `0` when the file was deleted or is not there.
+    func deleteFile(atServerURL serverURL: String, forAccount account: TalkAccount, completionBlock: @escaping (_ statusCode: Int) -> Void) {
+        self.setupNCCommunication(forAccount: account)
+
+        let options = NKRequestOptions(timeout: TimeInterval(60), queue: .main)
+        NextcloudKit.shared.deleteFileOrFolder(serverUrlFileName: serverURL, options: options) { _, error in
+            completionBlock(error.errorCode == 404 ? 0 : error.errorCode)
+        }
+    }
+
     func checkOrCreateAttachmentFolder(forAccount account: TalkAccount, completionBlock: @escaping (_ created: Bool, _ statusCode: Int) -> Void) {
         self.setupNCCommunication(forAccount: account)
 
         guard let attachmentFolderServerURL = self.attachmentFolderServerURL(forAccount: account)
         else {
-            completionBlock(false, 0)
+            // Not knowing where the folder is, is an error
+            completionBlock(false, NCAPIController.attachmentFolderUnknownCode)
             return
         }
 
@@ -3211,7 +3290,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
             if error.errorCode == 404 {
                 // Attachment folder does not exist
                 NextcloudKit.shared.createFolder(serverUrlFileName: attachmentFolderServerURL, options: options) { _, _, _, error in
-                    completionBlock(error.errorCode == 0, error.errorCode)
+                    let result = NCAPIController.attachmentFolderResult(forCreateErrorCode: error.errorCode)
+                    completionBlock(result.created, result.statusCode)
                 }
             } else {
                 print("Error checking attachment folder: \(error.errorDescription)")
@@ -3322,14 +3402,34 @@ class NCAPIController: NSObject, NKCommonDelegate {
         }
     }
 
-    /// Creates the attachment folder when it is missing. Returns whether it had to be created.
+    /// Creates the attachment folder when it is missing. Returns whether the folder is there afterwards, which includes
+    /// a folder that was there already, e.g. because an upload running at the same time created it.
     @MainActor
     func checkOrCreateAttachmentFolder(forAccount account: TalkAccount) async -> Bool {
         return await withCheckedContinuation { continuation in
-            checkOrCreateAttachmentFolder(forAccount: account) { created, _ in
-                continuation.resume(returning: created)
+            checkOrCreateAttachmentFolder(forAccount: account) { created, statusCode in
+                continuation.resume(returning: NCAPIController.isAttachmentFolderAvailable(created: created, statusCode: statusCode))
             }
         }
+    }
+
+    /// What `checkOrCreateAttachmentFolder` reports for the answer of MKCOL. 405 means the folder is there: another
+    /// upload of the same batch created it between the check and the request.
+    static func attachmentFolderResult(forCreateErrorCode errorCode: Int) -> (created: Bool, statusCode: Int) {
+        switch errorCode {
+        case 0:
+            return (true, 0)
+        case 405:
+            return (false, 0)
+        default:
+            return (false, errorCode)
+        }
+    }
+
+    /// The callback of `checkOrCreateAttachmentFolder` answers `(false, 0)` for a folder that exists, and `(true, 0)` for
+    /// one it created. Anything else is an error.
+    static func isAttachmentFolderAvailable(created: Bool, statusCode: Int) -> Bool {
+        return created || statusCode == 0
     }
 
     @MainActor
@@ -3424,7 +3524,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func setUserProfileImage(_ image: UIImage, forAccount account: TalkAccount, completionBlock: @escaping (_ error: Error?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            // Asynchronous like the network path: callers may still be presenting or dismissing a view controller
+            DispatchQueue.main.async { completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0)) }
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/spreed/temp-user-avatar"
 
@@ -3441,7 +3545,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     @nonobjc
     public func removeUserProfileImage(forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let urlString = "\(account.server)/ocs/v2.php/apps/spreed/temp-user-avatar"
 
@@ -3549,7 +3656,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func getUserAvatar(forUser userId: String, withStyle style: UIUserInterfaceStyle, ignoreCache: Bool, forAccount account: TalkAccount, completionBlock: @escaping (_ image: UIImage?, _ error: Error?) -> Void) -> SDWebImageCombinedOperation? {
         guard let encodedUserId = userId.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let requestModifier = self.getRequestModifier(forAccount: account)
-        else { return nil }
+        else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         // Since https://github.com/nextcloud/server/pull/31010 we can only request avatars in 64px or 512px
         // As we never request lower than 96px, we always get 512px anyway
@@ -3562,7 +3672,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
             urlString = "\(urlString)/dark"
         }
 
-        guard let url = URL(string: urlString) else { return nil }
+        guard let url = URL(string: urlString) else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         var options: SDWebImageOptions
 
@@ -3585,6 +3698,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 }
             } else if let image {
                 completionBlock(image, nil)
+            } else {
+                completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
             }
         }
     }
@@ -3641,7 +3756,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let encodedToken = room.token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: room.accountId),
               let requestModifier = self.getRequestModifier(forAccount: account)
-        else { return nil }
+        else {
+            // Callers like the NotificationServiceExtension wait for the completion block, so always report the failure
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         var endpoint = "room/\(encodedToken)/avatar"
 
@@ -3658,7 +3777,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
         let url = URL(string: urlString)
 
-        guard let url else { return nil }
+        guard let url else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         /*
          SDWebImageRetryFailed:         By default SDWebImage blacklists URLs that failed to load and does not try to
@@ -3701,6 +3823,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 }
             } else if let image {
                 completionBlock(image, nil)
+            } else {
+                completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
             }
         }
     }
@@ -3710,7 +3834,11 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId),
               let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let imageData = image.jpegData(compressionQuality: 0.7)
-        else { return }
+        else {
+            // Asynchronous like the network path: callers may still be presenting or dismissing a view controller
+            DispatchQueue.main.async { completionBlock(NSError(domain: NSCocoaErrorDomain, code: 0)) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
@@ -3729,7 +3857,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
     public func setEmojiAvatar(forRoom token: String, withEmoji emoji: String, withColor color: String, forAccount account: TalkAccount, completionBlock: @escaping (_ error: OcsError?) -> Void) {
         guard let encodedToken = token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar/emoji"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
@@ -3754,7 +3885,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         guard let encodedToken = room.token.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
               let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: room.accountId),
               let apiSessionManager = self.getAPISessionManager(forAccountId: account.accountId)
-        else { return }
+        else {
+            DispatchQueue.main.async { completionBlock(OcsError.genericError()) }
+            return
+        }
 
         let endpoint = "room/\(encodedToken)/avatar"
         let urlString = self.getRequestURL(forEndpoint: endpoint, withAPIType: .avatar, forAccount: account)
@@ -3780,7 +3914,10 @@ class NCAPIController: NSObject, NKCommonDelegate {
         let url = URL(string: urlString)
         guard let url,
               let requestModifier = self.getRequestModifier(forAccount: account)
-        else { return nil }
+        else {
+            completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
+            return nil
+        }
 
         let options: SDWebImageOptions = [.retryFailed, .refreshCached]
 
@@ -3796,6 +3933,8 @@ class NCAPIController: NSObject, NKCommonDelegate {
                 }
             } else if let image {
                 completionBlock(image, nil)
+            } else {
+                completionBlock(nil, NSError(domain: NSCocoaErrorDomain, code: 0))
             }
         }
     }

@@ -3,6 +3,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+import UniformTypeIdentifiers
+
+/// An error that knows what it may write into the exported log.
+public protocol NCLogDescribable {
+    var logDescription: String { get }
+}
+
 @objcMembers public class NCLog: NSObject {
 
     private static let backgroundLogQueue = DispatchQueue(label: "\(bundleIdentifier).backgroundLogQueue", qos: .background)
@@ -21,12 +28,17 @@
         return dateFormatter
     }()
 
+    // Logs live in the app group container, so the app can show the logs of its extensions.
+    // Falls back to the documents directory of the current process if the container is not available.
     private static var logfilePath: URL? = {
-        guard let documentDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        else { return nil }
-
         let fileManager = FileManager.default
-        let logDir = documentDir.appendingPathComponent("logs")
+
+        let baseDir = fileManager.containerURL(forSecurityApplicationGroupIdentifier: groupIdentifier)
+            ?? fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
+
+        guard let baseDir else { return nil }
+
+        let logDir = baseDir.appendingPathComponent("logs")
         let logPath = logDir.path
 
         // Allow writing to files while the app is in the background
@@ -36,6 +48,32 @@
 
         return logDir
     }()
+
+    // Before logs moved to the app group, the app wrote to its documents directory. Those files are still read and cleaned up.
+    private static var legacyLogfilePath: URL? = {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("logs")
+    }()
+
+    // Empty for the app, "ShareExtension" etc. for an app extension, so two processes never write to the same file
+    private static let processName: String = {
+        guard Bundle.main.bundleURL.pathExtension == "appex" else { return "" }
+        return Bundle.main.bundleURL.deletingPathExtension().lastPathComponent
+    }()
+
+    static func logfileName(dateString: String, processName: String) -> String {
+        let suffix = processName.isEmpty ? "" : "-\(processName)"
+        return "debug-\(dateString)\(suffix).log"
+    }
+
+    private static func isLogfile(_ name: String) -> Bool {
+        return name.hasPrefix("debug-") && name.hasSuffix(".log")
+    }
+
+    private static var allLogDirectories: [URL] {
+        return [logfilePath, legacyLogfilePath].compactMap { $0 }.reduce(into: [URL]()) { result, url in
+            if !result.contains(url) { result.append(url) }
+        }
+    }
 
     public static func log(_ message: String) {
         guard let logfilePath else { return }
@@ -51,7 +89,7 @@
                 logMessage += "(\(currentQueueName)): \(message)\n"
 
                 let dateString = fileNameDateFormatter.string(from: now)
-                let logFileName = "debug-\(dateString).log"
+                let logFileName = logfileName(dateString: dateString, processName: processName)
                 let fullPath = logfilePath.appendingPathComponent(logFileName).path
 
                 if let fileHandle = FileHandle(forWritingAtPath: fullPath) {
@@ -60,7 +98,9 @@
                     try fileHandle.write(contentsOf: logMessage.data(using: .utf8)!)
                     try fileHandle.close()
                 } else {
-                    try logMessage.write(toFile: fullPath, atomically: false, encoding: .utf8)
+                    if !FileManager.default.createFile(atPath: fullPath, contents: logMessage.data(using: .utf8)!) {
+                        NSLog("Exception in NCLog.log: could not create logfile %@", fullPath)
+                    }
                 }
 
                 NSLog("%@", logMessage)
@@ -71,43 +111,82 @@
         }
     }
 
-    public static func getLogfiles() -> [URL] {
-        guard let logfilePath else { return [] }
+    // Logs are exported by the user, so lines must not carry file names, paths, accounts or server addresses.
+    // The description of an error can contain them (the path of a file error, the URL of a failed request),
+    // therefore log domain and code only. Errors that wrap another error describe themselves, see `NCLogDescribable`.
+    public static func errorCode(_ error: Error) -> String {
+        if let describable = error as? NCLogDescribable {
+            return describable.logDescription
+        }
 
+        let nsError = error as NSError
+
+        // The error of a failed server request travels inside the user info
+        if let describable = nsError.userInfo["ocsError"] as? NCLogDescribable {
+            return describable.logDescription
+        }
+
+        var description = "\(nsError.domain) \(nsError.code)"
+
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            description += ", underlying \(underlyingError.domain) \(underlyingError.code)"
+        }
+
+        return description
+    }
+
+    // Describes a file without its name. The extension is written only when the system knows its type: any other
+    // "extension" can be a part of the name ("J.Smith", "Meeting 10.10 Smith"), so it is not logged.
+    public static func fileTraits(fileName: String) -> String {
+        let fileExtension = (fileName as NSString).pathExtension.lowercased()
+
+        if fileExtension.isEmpty {
+            return "file without extension"
+        }
+
+        guard let type = UTType(filenameExtension: fileExtension), !type.isDynamic else {
+            return "file with unusual extension"
+        }
+
+        return "file with extension \(fileExtension)"
+    }
+
+    public static func getLogfiles() -> [URL] {
+        return logfiles(in: allLogDirectories)
+    }
+
+    // Sort descending by file name so the most recent logfile is listed first
+    static func logfiles(in directories: [URL]) -> [URL] {
         let fileManager = FileManager.default
 
-        guard let files = try? fileManager.contentsOfDirectory(at: logfilePath, includingPropertiesForKeys: nil)
-        else { return [] }
-
-        // Sort descending by file name so the most recent logfile is listed first
-        return files
-            .filter { $0.lastPathComponent.hasPrefix("debug-") && $0.lastPathComponent.hasSuffix(".log") }
+        return directories
+            .flatMap { (try? fileManager.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)) ?? [] }
+            .filter { isLogfile($0.lastPathComponent) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
 
     public static func removeOldLogfiles() {
-        guard let logfilePath else { return }
-
-        let logPath = logfilePath.path
         let fileManager = FileManager.default
 
         var dayComponent = DateComponents()
         dayComponent.day = -10
 
-        guard let enumerator = fileManager.enumerator(atPath: logPath),
-              let thresholdDate = Calendar.current.date(byAdding: dayComponent, to: Date())
+        guard let thresholdDate = Calendar.current.date(byAdding: dayComponent, to: Date())
         else { return }
 
-        while let file = enumerator.nextObject() as? String {
-            let filePathURL = logfilePath.appendingPathComponent(file)
-            let filePath = filePathURL.path
+        for logDir in allLogDirectories {
+            guard let enumerator = fileManager.enumerator(atPath: logDir.path) else { continue }
 
-            guard let creationDate = (try? FileManager.default.attributesOfItem(atPath: filePath))?[.creationDate] as? Date
-            else { continue }
+            while let file = enumerator.nextObject() as? String {
+                let filePath = logDir.appendingPathComponent(file).path
 
-            if creationDate.compare(thresholdDate) == .orderedAscending && file.hasPrefix("debug-") && file.hasSuffix(".log") {
-                NSLog("Deleting old logfile %@", filePath)
-                try? fileManager.removeItem(atPath: filePath)
+                guard let creationDate = (try? fileManager.attributesOfItem(atPath: filePath))?[.creationDate] as? Date
+                else { continue }
+
+                if creationDate.compare(thresholdDate) == .orderedAscending && isLogfile(file) {
+                    NSLog("Deleting old logfile %@", filePath)
+                    try? fileManager.removeItem(atPath: filePath)
+                }
             }
         }
     }

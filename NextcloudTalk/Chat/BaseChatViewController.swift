@@ -16,10 +16,9 @@ import Toast
 
 @objcMembers public class BaseChatViewController: InputbarViewController,
                                                   UITextFieldDelegate,
-                                                  UIImagePickerControllerDelegate,
                                                   UIAdaptivePresentationControllerDelegate,
                                                   PHPickerViewControllerDelegate,
-                                                  UINavigationControllerDelegate,
+                                                  InAppCameraViewControllerDelegate,
                                                   ShareLocationViewControllerDelegate,
                                                   GiphyPickerViewControllerDelegate,
                                                   CNContactPickerDelegate,
@@ -29,6 +28,7 @@ import Toast
                                                   QLPreviewControllerDelegate,
                                                   QLPreviewControllerDataSource,
                                                   ShareConfirmationViewControllerDelegate,
+                                                  NCMediaViewerViewControllerDelegate,
                                                   AVAudioRecorderDelegate,
                                                   AVAudioPlayerDelegate,
                                                   SystemMessageTableViewCellDelegate,
@@ -36,7 +36,8 @@ import Toast
                                                   UITableViewDataSourcePrefetching,
                                                   MessageSeparatorTableViewCellDelegate,
                                                   DateHeaderViewDelegate,
-                                                  PinnedMessageViewDelegate {
+                                                  PinnedMessageViewDelegate,
+                                                  UITextDropDelegate {
 
     // MARK: - Internal var
     internal var messages: [Date: [NCChatMessage]] = [:]
@@ -49,9 +50,24 @@ import Toast
 
     internal var replyMessageView: ReplyMessageView?
     internal var voiceMessagesPlayer: AVAudioPlayer?
+    /// Counts the taps on voice messages. Only the result of the latest tap may start playback.
+    internal var voiceMessageSelection = 0
+    /// The voice message that is downloaded for playback because of the latest tap, until that download ends
+    internal var pendingVoiceMessageDownload: (fileId: String, selection: Int)?
     internal var interactingMessage: NCChatMessage?
     internal var lastMessageBeforeInteraction: IndexPath?
     internal var contextMenuActionBlock: (() -> Void)?
+
+    // Multi-selection mode, see BaseChatViewController+MessageSelection
+    internal var messageSelection = MessageSelection()
+    internal var rowGestureDelegate: ChatRowGestureDelegate?
+    internal var rowTapRecognizer: UITapGestureRecognizer?
+    internal var rowLongPressRecognizer: UILongPressGestureRecognizer?
+    internal var messageEditMenuInteraction: UIEditMenuInteraction?
+    internal var editMenuIndexPath: IndexPath?
+    internal var selectionToolbar: UIToolbar?
+    internal var selectionTitleLabel: UILabel?
+    internal var selectionSavedChrome: SelectionSavedChrome?
     internal var editingMessage: NCChatMessage?
 
     internal lazy var emojiTextField: EmojiTextField = {
@@ -89,8 +105,6 @@ import Toast
 
     private var isVoiceRecordingLocked = false
 
-    private var imagePicker: UIImagePickerController?
-
     private var stopTypingTimer: Timer?
     private var typingTimer: Timer?
     private var voiceMessageLongPressGesture: UILongPressGestureRecognizer?
@@ -99,6 +113,18 @@ import Toast
     private var expandedUIHostingController: UIHostingController<ExpandedVoiceMessageRecordingView>?
     private var longPressStartingPoint: CGPoint?
     private var recordCancelled: Bool = false
+
+    // Video messages, see BaseChatViewController+VideoMessage.swift. The mode lives here and not in the
+    // button, as SlackTextViewController replaces the button state whenever the text changes.
+    internal var recordButtonMode = RecordButtonMode(rawValue: NCUserDefaults.preferredRecordButtonMode() ?? "") ?? .voice {
+        didSet { NCUserDefaults.setPreferredRecordButtonMode(recordButtonMode.rawValue) }
+    }
+    internal var isVideoGestureActive = false
+    internal var videoMessageRecorder: VideoMessageRecorder?
+    internal var videoMessagePreviewView: VideoMessagePreviewView?
+    internal var videoMessageScrimView: UIView?
+    internal var lockedVideoSendButton: UIButton?
+    internal var videoMessageLimitTimer: Timer?
 
     private var animationDispatchGroup = DispatchGroup()
     private var animationDispatchQueue = DispatchQueue(label: "\(groupIdentifier).animationQueue")
@@ -116,6 +142,13 @@ import Toast
     private var leftButtonLongPressGesture: UILongPressGestureRecognizer?
 
     private var messageHeightCache = NCChatMessageHeightCache()
+
+    /// The files of one upload, shown as a single message, by the id of the message they are shown as
+    internal var fileMessageGroups: [Int: FileMessageGroup] = [:]
+
+    /// Messages shown as part of the group of their upload instead of on their own, mapped to the
+    /// message whose row shows them
+    internal var messageIdsHiddenInFileGroups: [Int: Int] = [:]
 
     private lazy var inputbarBorderView: UIView = {
         let inputbarBorderView = UIView()
@@ -215,6 +248,7 @@ import Toast
 
         NotificationCenter.default.addObserver(self, selector: #selector(willShowKeyboard(notification:)), name: UIWindow.keyboardWillShowNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willHideKeyboard(notification:)), name: UIWindow.keyboardWillHideNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(chatUploadDidFail(notification:)), name: .NCChatUploadDidFail, object: nil)
 
         AllocationTracker.shared.addAllocation("ChatViewController")
     }
@@ -269,6 +303,8 @@ import Toast
         // Set delegate to retrieve typing events
         self.tableView?.separatorStyle = .none
 
+        self.setUpMessageSelectionGestures()
+
         if #available(iOS 26.0, *) {
             // Our date headers make UIKit choose a hard edge, drawing a border below the navigation bar
             self.tableView?.topEdgeEffect.style = .soft
@@ -279,6 +315,9 @@ import Toast
         self.tableView?.register(UINib(nibName: "BaseChatTableViewCell", bundle: nil), forCellReuseIdentifier: chatMessageCellIdentifier)
         self.tableView?.register(UINib(nibName: "BaseChatTableViewCell", bundle: nil), forCellReuseIdentifier: chatGroupedMessageCellIdentifier)
         self.tableView?.register(UINib(nibName: "BaseChatTableViewCell", bundle: nil), forCellReuseIdentifier: chatReplyMessageCellIdentifier)
+
+        self.tableView?.register(UINib(nibName: "BaseChatTableViewCell", bundle: nil), forCellReuseIdentifier: fileGroupMessageCellIdentifier)
+        self.tableView?.register(UINib(nibName: "BaseChatTableViewCell", bundle: nil), forCellReuseIdentifier: fileGroupGroupedMessageCellIdentifier)
 
         self.tableView?.register(UINib(nibName: "BaseChatTableViewCell", bundle: nil), forCellReuseIdentifier: fileMessageCellIdentifier)
         self.tableView?.register(UINib(nibName: "BaseChatTableViewCell", bundle: nil), forCellReuseIdentifier: fileGroupedMessageCellIdentifier)
@@ -330,11 +369,10 @@ import Toast
         self.scrollToBottomButton.trailingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.trailingAnchor, constant: -10).isActive = true
         self.voiceRecordingLockButton.trailingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.trailingAnchor, constant: -10).isActive = true
 
-        self.addMenuToLeftButton()
-
         self.replyMessageView?.addObserver(self, forKeyPath: "visible", options: .new, context: nil)
 
         self.textView.pastableMediaTypes = .images
+        self.textView.textDropDelegate = self
 
         // Allow pasting Memojis and Genmojis
         self.textView.allowsEditingTextAttributes = true
@@ -458,12 +496,31 @@ import Toast
 
         self.isVisible = false
 
+        // The camera is not available anymore without the view
+        self.finishVideoMessageRecording(send: false)
+
         if !self.textInputbar.isHidden {
             self.savePendingMessage()
         }
 
         if dismissNotificationsOnViewWillDisappear {
             NotificationPresenter.shared().dismiss(animated: false)
+        }
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+
+        self.updateVideoMessagePreviewLayout()
+    }
+
+    public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+
+        // The orientation of the interface is the new one at the latest when the transition is done (on an iPad
+        // it can change after the layout), so the preview is placed once more then
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.updateVideoMessagePreviewLayout()
         }
     }
 
@@ -551,7 +608,21 @@ import Toast
 
     // MARK: - Temporary messages
 
-    internal func createTemporaryMessage(message: String, replyTo parentMessage: NCChatMessage?, messageParameters: String, silently: Bool, isVoiceMessage: Bool) -> NCChatMessage? {
+    /// - Parameters:
+    ///   - message: The text of the message. For voice messages and files the name of the file.
+    ///   - messageParameters: The message parameters. For voice messages and files the local path of the file.
+    ///   - isFileMessage: The message is a file other than a voice message, shown with `caption` as text.
+    ///   - filePathForReferenceId: Gives the local path of the file once the reference id of the message is known,
+    ///                             for files that are copied to a place named after it. Defaults to `messageParameters`.
+    internal func createTemporaryMessage(message: String,
+                                         replyTo parentMessage: NCChatMessage?,
+                                         messageParameters: String,
+                                         silently: Bool,
+                                         isVoiceMessage: Bool,
+                                         isFileMessage: Bool = false,
+                                         caption: String? = nil,
+                                         referenceId presetReferenceId: String? = nil,
+                                         filePathForReferenceId: ((String) -> String)? = nil) -> NCChatMessage? {
         let temporaryMessage = NCChatMessage()
 
         temporaryMessage.accountId = self.account.accountId
@@ -563,18 +634,29 @@ import Toast
         temporaryMessage.threadId = thread?.threadId ?? 0
         temporaryMessage.isThread = thread != nil
 
-        let referenceId = "temp-\(Date().timeIntervalSince1970 * 1000)"
-        temporaryMessage.referenceId = NCUtils.sha1(fromString: referenceId)
+        // The reference id is the key of a stored upload, so two messages must never get the same one
+        let referenceId = "temp-\(Date().timeIntervalSince1970 * 1000)-\(UUID().uuidString)"
+        // Files shared together keep the reference id of their upload, the others are grouped by it
+        let hashedReferenceId = presetReferenceId ?? NCUtils.sha1(fromString: referenceId)
+        temporaryMessage.referenceId = hashedReferenceId
         temporaryMessage.internalId = referenceId
         temporaryMessage.isTemporary = true
         temporaryMessage.parentId = parentMessage?.internalId
 
-        if isVoiceMessage {
+        if isVoiceMessage || isFileMessage {
             var messageParametersDict = [String: Any]()
             let parameterId = UUID().uuidString
 
-            temporaryMessage.message = message
-            temporaryMessage.messageType = kMessageTypeVoiceMessage
+            if isVoiceMessage {
+                temporaryMessage.message = message
+                temporaryMessage.messageType = kMessageTypeVoiceMessage
+            } else {
+                // Like the server does it: the text of a file is its caption, without one there is a placeholder
+                let trimmedCaption = caption?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                temporaryMessage.message = trimmedCaption.isEmpty ? "{file}" : trimmedCaption
+            }
+
+            let localFilePath = filePathForReferenceId?(hashedReferenceId) ?? messageParameters
 
             let fileParameterDict: [String: Any] = [
                 "id": parameterId,
@@ -584,7 +666,7 @@ import Toast
                 "fileId": parameterId,
                 "fileName": message,
                 "filePath": messageParameters,
-                "fileLocalPath": messageParameters
+                "fileLocalPath": localFilePath
             ]
 
             messageParametersDict["file"] = fileParameterDict
@@ -688,6 +770,7 @@ import Toast
             updatedMessage.isGroupMessage = message.isGroupMessage && message.actorType != "bots" && updatedMessage.lastEditTimestamp == 0
             updatedMessage.copyPendingReactions(from: message)
             self.messages[keyDate]?[indexPath.row] = updatedMessage
+            self.regroupFileMessages()
 
             // Check if there are any messages that reference our message as a parent -> these need to be reloaded as well
             if let visibleIndexPaths = self.tableView?.indexPathsForVisibleRows {
@@ -737,15 +820,23 @@ import Toast
     func showVoiceMessageRecordButton() {
         self.rightButton.setTitle("", for: .normal)
 
+        let isVideoMode = self.effectiveRecordMode == .video
+
         if self.room.hasScheduledMessages {
             self.setInputbarImage(UIImage(systemName: "clock"), for: self.rightButton)
         } else {
-            self.setInputbarImage(UIImage(systemName: "mic"), for: self.rightButton)
+            self.setInputbarImage(UIImage(systemName: isVideoMode ? "video" : "mic"), for: self.rightButton)
         }
 
         self.rightButton.tag = sendButtonTagVoice
-        self.rightButton.accessibilityLabel = NSLocalizedString("Record voice message", comment: "")
-        self.rightButton.accessibilityHint = NSLocalizedString("Tap and hold to record a voice message", comment: "")
+
+        if isVideoMode {
+            self.rightButton.accessibilityLabel = NSLocalizedString("Record video message", comment: "")
+            self.rightButton.accessibilityHint = NSLocalizedString("Tap and hold to record a video message", comment: "")
+        } else {
+            self.rightButton.accessibilityLabel = NSLocalizedString("Record voice message", comment: "")
+            self.rightButton.accessibilityHint = NSLocalizedString("Tap and hold to record a voice message", comment: "")
+        }
 
         self.addGestureRecognizerToRightButton()
     }
@@ -753,7 +844,7 @@ import Toast
     func showAttachmentButton() {
         self.setInputbarImage(UIImage(systemName: "plus"), for: self.leftButton)
         self.leftButton.accessibilityLabel = NSLocalizedString("Share a file from your Nextcloud", comment: "")
-        self.leftButton.accessibilityHint = NSLocalizedString("Double tap to open file browser", comment: "")
+        self.leftButton.accessibilityHint = NSLocalizedString("Double tap to choose what to share", comment: "Accessibility hint of the button that opens the attachment sheet")
         self.leftButton.accessibilityIdentifier = "shareButton"
     }
 
@@ -836,7 +927,10 @@ import Toast
             return
         }
 
-        super.didPressLeftButton(sender)
+        // No sharing options in federation v1, the button has no image there
+        guard !self.room.isFederated else { return }
+
+        self.presentAttachmentSheet()
     }
 
     public override func didPressRightButton(_ sender: Any?) {
@@ -856,7 +950,7 @@ import Toast
                 let scheduledViewController = ScheduledMessagesChatViewController(forRoom: self.room, withAccount: self.account)!
                 self.presentWithNavigation(scheduledViewController, animated: true)
             } else {
-                self.showVoiceMessageRecordHint()
+                self.handleTapOnRecordButton()
             }
         default:
             break
@@ -866,6 +960,11 @@ import Toast
     func addGestureRecognizerToRightButton() {
         // Remove a potential menu so it does not interfere with the long gesture recognizer
         self.rightButton.menu = nil
+
+        // Changing the mode of the record button does not replace the button, so avoid adding a second recognizer
+        if let voiceMessageLongPressGesture, self.rightButton.gestureRecognizers?.contains(voiceMessageLongPressGesture) == true {
+            return
+        }
 
         // Add long press gesture recognizer for voice message recording button
         self.voiceMessageLongPressGesture = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPressInVoiceMessageRecordButton(gestureRecognizer:)))
@@ -994,121 +1093,14 @@ import Toast
         self.rightButton.menu = UIMenu(children: actions.reversed())
     }
 
-    func addMenuToLeftButton() {
-        // The keyboard will be hidden when an action is invoked. Depending on what
-        // attachment is shared, not resigning might lead to a currupted chat view
-        var items: [UIMenuElement] = []
-
-        let cameraAction = UIAction(title: NSLocalizedString("Camera", comment: ""), image: UIImage(systemName: "camera")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.checkAndPresentCamera()
-        }
-
-        let photoLibraryAction = UIAction(title: NSLocalizedString("Photo Library", comment: ""), image: UIImage(systemName: "photo")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentPhotoLibrary()
-        }
-
-        let shareLocationAction = UIAction(title: NSLocalizedString("Location", comment: ""), image: UIImage(systemName: "location")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentShareLocation()
-        }
-
-        let contactShareAction = UIAction(title: NSLocalizedString("Contacts", comment: ""), image: UIImage(systemName: "person")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentShareContact()
-        }
-
-        let filesAction = UIAction(title: NSLocalizedString("Files", comment: ""), image: UIImage(systemName: "doc")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentDocumentPicker()
-        }
-
-        let ncFilesAction = UIAction(title: filesAppName, image: UIImage(named: "logo-action")?.withRenderingMode(.alwaysTemplate)) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentNextcloudFilesBrowser()
-        }
-
-        let pollAction = UIAction(title: NSLocalizedString("Poll", comment: ""), image: UIImage(systemName: "chart.bar")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentPollCreation()
-        }
-
-        let threadAction = UIAction(title: NSLocalizedString("Thread", comment: "Context menu action to reply to a message in a thread"), image: UIImage(systemName: "bubble.left.and.bubble.right")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentThreadCreation()
-        }
-
-        // Not localized: "GIF" is a file format and "Giphy" a company name
-        let giphyAction = UIAction(title: "GIF (Giphy)", image: UIImage(systemName: "play.square.stack")) { [unowned self] _ in
-            self.textView.resignFirstResponder()
-            self.presentGiphyPicker()
-        }
-
-        // Add actions (inverted)
-        var objectItems = [UIMenuElement]()
-        objectItems.append(contactShareAction)
-
-        if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.locationSharing, for: self.room) {
-            objectItems.append(shareLocationAction)
-        }
-
-        if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.talkPolls, for: self.room),
-            self.room.type != .oneToOne, self.room.type != .noteToSelf {
-
-            objectItems.append(pollAction)
-        }
-
-        if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.threads, for: self.room),
-           self.thread == nil {
-
-            objectItems.append(threadAction)
-        }
-
-        // TODO: Remove this check when rich objects and polls can be shared in threads
-        if thread == nil {
-            items.append(UIMenu(options: .displayInline, children: objectItems))
-        }
-
-        items.append(ncFilesAction)
-        items.append(filesAction)
-
-        let serverCapabilities = NCDatabaseManager.sharedInstance().serverCapabilities(forAccountId: self.account.accountId)
-        if serverCapabilities?.giphyEnabled == true, serverCapabilities?.giphyConfigured == true {
-            items.append(giphyAction)
-        }
-
-        items.append(photoLibraryAction)
-
-        if UIImagePickerController.isSourceTypeAvailable(.camera) {
-            items.append(cameraAction)
-        }
-
-        self.leftButton.menu = UIMenu(children: items)
-        self.leftButton.showsMenuAsPrimaryAction = true
-
-        // Ensure that our longPressGestureRecognizer does not interfere with the native ones
-        _ = self.leftButton.gestureRecognizers?.map { recognizer in
-            if let leftButtonLongPressGesture {
-                recognizer.require(toFail: leftButtonLongPressGesture)
-            }
-        }
-    }
-
     func longPress(gestureRecognizer: UILongPressGestureRecognizer) {
         guard gestureRecognizer.state == .began else { return }
-
-        // Remove the menu, so we don't accidentially open the menu on a long press
-        self.leftButton.menu = nil
 
         // Add haptic feedback
         let generator = UIImpactFeedbackGenerator(style: .heavy)
         generator.impactOccurred()
 
         self.presentPhotoLibrary()
-
-        // Re-add the menu to the left button
-        self.addMenuToLeftButton()
     }
 
     func presentNextcloudFilesBrowser() {
@@ -1143,23 +1135,19 @@ import Toast
 
     func presentCamera() {
         DispatchQueue.main.async {
-            self.imagePicker = UIImagePickerController()
+            guard InAppCameraViewController.isCameraAvailable else { return }
 
-            if let imagePicker = self.imagePicker,
-                let sourceType = UIImagePickerController.availableMediaTypes(for: imagePicker.sourceType) {
-                imagePicker.sourceType = .camera
-                imagePicker.cameraFlashMode = UIImagePickerController.CameraFlashMode(rawValue: NCUserDefaults.preferredCameraFlashMode()) ?? .off
-                imagePicker.mediaTypes = sourceType
-                imagePicker.delegate = self
-                self.present(imagePicker, animated: true)
-            }
+            let camera = InAppCameraViewController()
+            camera.delegate = self
+            camera.modalPresentationStyle = .fullScreen
+            self.present(camera, animated: true)
         }
     }
 
     func presentPhotoLibrary() {
         DispatchQueue.main.async {
             var pickerConfig = PHPickerConfiguration()
-            pickerConfig.selectionLimit = 20
+            pickerConfig.selectionLimit = kShareConfirmationMaxItems
             pickerConfig.filter = PHPickerFilter.any(of: [.images, .videos])
 
             self.photoPicker = PHPickerViewController(configuration: pickerConfig)
@@ -1294,14 +1282,26 @@ import Toast
     }
 
     func didPressForward(for message: NCChatMessage) {
-        var shareViewController: ShareViewController
-
         if message.isObjectShare {
-            shareViewController = ShareViewController(toForwardObjectShare: message, fromChatViewController: self)
+            self.present(shareViewController: ShareViewController(toForwardObjectShare: message, fromChatViewController: self))
         } else {
-            shareViewController = ShareViewController(toForwardMessage: message.parsedMessage().string, fromChatViewController: self)
+            self.didPressForward(text: ForwardedNote.text(message.parsedMessage().string, author: ForwardedNote.author(of: message)))
         }
+    }
 
+    func didPressForward(file message: NCChatMessage) {
+        self.present(shareViewController: ShareViewController(toForwardFile: NCChatMessage(value: message), fromChatViewController: self))
+    }
+
+    func didPressForward(text: String) {
+        self.present(shareViewController: ShareViewController(toForwardMessage: text, fromChatViewController: self))
+    }
+
+    func didPressForward(items: [ForwardItem], skippedFiles: Int) {
+        self.present(shareViewController: ShareViewController(toForwardItems: items, skippedFiles: skippedFiles, fromChatViewController: self))
+    }
+
+    private func present(shareViewController: ShareViewController) {
         shareViewController.delegate = self
         self.presentWithNavigation(shareViewController, animated: true)
     }
@@ -1360,24 +1360,64 @@ import Toast
         NotificationPresenter.shared().present(text: NSLocalizedString("Message unpinned", comment: ""), dismissAfterDelay: 5.0, includedStyle: .success)
     }
 
+    internal func prepareVoiceMessageForResend(_ message: NCChatMessage) {
+        message.sendingFailed = false
+        message.isOfflineMessage = false
+
+        // Like a resent text message, the message is sent now: it needs to be placed at the end of the chat
+        // and must not expire (getTemporaryMessages) based on the timestamp of the failed attempt
+        message.timestamp = Int(Date().timeIntervalSince1970)
+    }
+
     func didPressResend(for message: NCChatMessage) {
-        // Make sure there's no unread message separator, as the indexpath could be invalid after removing a message
-        self.removeUnreadMessagesSeparator()
-
-        self.removePermanentlyTemporaryMessage(temporaryMessage: message)
-
         guard let originalMessage = message.sendingMessageWithDisplayNames else { return }
 
-        if message.messageType != kMessageTypeVoiceMessage {
+        // Voice messages and files are sent again by uploading them
+        let localFilePath = message.file()?.fileStatus?.fileLocalPath
+        let isVoiceMessage = message.isVoiceMessage
+
+        // The file was posted, the message of the server is the one to show. Sending it again would post it twice.
+        if let referenceId = message.referenceId, ChatBackgroundUploader.shared.isAnnounced(referenceId: referenceId) {
+            self.removeFailedMessage(message)
+            return
+        }
+
+        // The recording is kept in a temporary directory, it might have been deleted in the meantime
+        if isVoiceMessage, localFilePath.map({ !FileManager.default.fileExists(atPath: $0) }) ?? true {
+            NCUserInterfaceController.sharedInstance().presentAlert(withTitle: NSLocalizedString("Failed to share recording", comment: ""),
+                                                                    withMessage: NSLocalizedString("The recording is no longer available", comment: ""))
+            return
+        }
+
+        self.removeFailedMessage(message)
+
+        if !isVoiceMessage, localFilePath == nil {
             self.sendChatMessage(message: originalMessage, withParentMessage: message.parent, messageParameters: message.messageParametersJSONString ?? "", silently: message.isSilent)
         } else {
+            // Show and store the message as sending again, so it can be marked as failed again
+            self.prepareVoiceMessageForResend(message)
+
+            RLMRealm.writeTransaction { realm in
+                realm.addOrUpdate(NCChatMessage(value: message))
+            }
+
             if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
                 self.appendTemporaryMessage(temporaryMessage: message)
             }
 
+            // A stored upload goes on where it stopped. A file that is on the server is not uploaded again.
+            if let referenceId = message.referenceId, ChatBackgroundUploader.shared.retry(referenceId: referenceId) {
+                return
+            }
+
             var metaData = ChatFileUploadMetadata()
-            metaData.isVoiceMessage = true
+            metaData.isVoiceMessage = isVoiceMessage
+            metaData.silent = message.isSilent
             metaData.threadId = self.thread?.threadId
+
+            if !isVoiceMessage, message.message != "{file}" {
+                metaData.caption = message.message
+            }
 
             if message.parentMessageId > 0 {
                 metaData.replyTo = message.parentMessageId
@@ -1388,8 +1428,8 @@ import Toast
                 metaData.replyToToken = replyToToken
             }
 
-            var upload = ChatFileUpload(localPath: message.file().fileStatus!.fileLocalPath!,
-                                        fileName: originalMessage,
+            var upload = ChatFileUpload(localPath: localFilePath ?? "",
+                                        fileName: message.file()?.fileStatus?.fileName ?? originalMessage,
                                         room: self.room,
                                         account: self.account)
             upload.metadata = metaData
@@ -1399,9 +1439,24 @@ import Toast
         }
     }
 
+    private func removeFailedMessage(_ message: NCChatMessage) {
+        // Make sure there's no unread message separator, as the indexpath could be invalid after removing a message
+        self.removeUnreadMessagesSeparator()
+        self.removePermanentlyTemporaryMessage(temporaryMessage: message)
+    }
+
     func didPressCopy(for message: NCChatMessage) {
+        self.copyToPasteboard(message.parsedMessage().string)
+    }
+
+    /// The messages as one text, one message per line
+    func didPressCopy(messages: [NCChatMessage]) {
+        self.copyToPasteboard(MessageSelection.joinedText(of: messages.map { $0.parsedMessage().string }))
+    }
+
+    private func copyToPasteboard(_ text: String) {
         let pasteboard = UIPasteboard.general
-        pasteboard.string = message.parsedMessage().string
+        pasteboard.string = text
         NotificationPresenter.shared().present(text: NSLocalizedString("Message copied", comment: ""), dismissAfterDelay: 5.0, includedStyle: .dark)
     }
 
@@ -1480,8 +1535,57 @@ import Toast
         }
     }
 
-    func didPressDelete(for message: NCChatMessage) {
+    /// The group of a file, also when the media viewer shows a file older than the loaded part of the chat
+    func fileGroup(of message: NCChatMessage) -> FileMessageGroup? {
+        if let fileGroup = FileMessageGroup.containing(messageId: message.messageId, in: self.fileMessageGroups) {
+            return fileGroup
+        }
+
+        guard let upload = message.fileUploadReference else { return nil }
+
+        let query = NSPredicate(format: "accountId = %@ AND token = %@ AND referenceId BEGINSWITH %@", self.account.accountId, self.room.token, upload.uploadHash)
+        let stored = NCChatMessage.objects(with: query).sortedResults(usingKeyPath: "messageId", ascending: true)
+        var messages: [NCChatMessage] = []
+
+        for case let storedMessage as NCChatMessage in stored {
+            messages.append(storedMessage)
+        }
+
+        return FileMessageGroup.groups(in: messages).first { group in
+            group.messages.contains { $0.messageId == message.messageId }
+        }
+    }
+
+    /// Whether the message can be deleted, which for a file of a group means the whole group
+    func canDelete(_ message: NCChatMessage) -> Bool {
+        if let fileGroup = self.fileGroup(of: message) {
+            return fileGroup.canDelete(for: self.account, in: self.room)
+        }
+
+        return message.canDelete(for: self.account, in: self.room)
+    }
+
+    /// The menu of the chat and the media viewer delete the same way: a file of a group takes its group along
+    func deleteMessageOrFileGroup(_ message: NCChatMessage) {
+        if let fileGroup = self.fileGroup(of: message) {
+            self.didPressDeleteAll(in: fileGroup)
+        } else {
+            self.didPressDelete(for: message)
+        }
+    }
+
+    func didPressDeleteAll(in fileGroup: FileMessageGroup) {
+        // One success notification for the whole group, errors are still shown per file
+        for message in fileGroup.messages {
+            self.didPressDelete(for: message, showSuccess: message.messageId == fileGroup.anchor.messageId)
+        }
+    }
+
+    func didPressDelete(for message: NCChatMessage, showSuccess: Bool = true) {
         if message.sendingFailed || message.isOfflineMessage {
+            // Nothing is left to send, so the stored copy of the file is not needed anymore
+            ChatBackgroundUploader.shared.discard(referenceId: message.referenceId)
+
             self.removePermanentlyTemporaryMessage(temporaryMessage: message)
             return
         }
@@ -1497,9 +1601,9 @@ import Toast
                let messageDict,
                let parent = messageDict["parent"] as? [AnyHashable: Any] {
 
-                if statusCode == 202 {
+                if statusCode == 202, showSuccess {
                     self.view.makeToast(NSLocalizedString("Message deleted successfully, but Matterbridge is configured and the message might already be distributed to other services", comment: ""), duration: 5, position: .center)
-                } else if statusCode == 200 {
+                } else if statusCode == 200, showSuccess {
                     NotificationPresenter.shared().present(text: NSLocalizedString("Message deleted successfully", comment: ""), dismissAfterDelay: 5.0, includedStyle: .success)
                 }
 
@@ -1560,9 +1664,6 @@ import Toast
         guard self.hasGlassInputbar else { return }
 
         if self.textInputbar.isEditing {
-            // The attachment menu is the primary action of the left button, so no press is reported while it's set
-            self.leftButton.menu = nil
-            self.leftButton.showsMenuAsPrimaryAction = false
             self.leftButtonLongPressGesture?.isEnabled = false
 
             self.setInputbarImage(UIImage(systemName: "xmark"), for: self.leftButton)
@@ -1575,7 +1676,6 @@ import Toast
         } else {
             self.leftButtonLongPressGesture?.isEnabled = true
             self.showAttachmentButton()
-            self.addMenuToLeftButton()
 
             // Both buttons are set up from scratch instead of being restored: showAttachmentButton() knows
             // about federation, and canPressRightButton() about send or record for the text we have now
@@ -1725,18 +1825,18 @@ import Toast
         self.stopTypingTimer =  nil
     }
 
-    func addTypingIndicator(withUserIdentifier userIdentifier: String, andDisplayName displayName: String) {
+    func addTypingIndicator(withUserIdentifier userIdentifier: String, andDisplayName displayName: String, sessionId: String?) {
         DispatchQueue.main.async {
             if let view = self.textInputbar.typingView as? TypingIndicatorView {
-                view.addTyping(userIdentifier: userIdentifier, displayName: displayName)
+                view.addTyping(userIdentifier: userIdentifier, displayName: displayName, sessionId: sessionId)
             }
         }
     }
 
-    func removeTypingIndicator(withUserIdentifier userIdentifier: String) {
+    func removeTypingIndicator(withUserIdentifier userIdentifier: String, sessionId: String?) {
         DispatchQueue.main.async {
             if let view = self.textInputbar.typingView as? TypingIndicatorView {
-                view.removeTyping(userIdentifier: userIdentifier)
+                view.removeTyping(userIdentifier: userIdentifier, sessionId: sessionId)
             }
         }
     }
@@ -1746,7 +1846,12 @@ import Toast
     public func shareConfirmationViewControllerDidFail(_ viewController: ShareConfirmationViewController) {
         self.dismiss(animated: true) {
             if viewController.forwardingMessage {
-                NotificationPresenter.shared().present(text: NSLocalizedString("Failed to forward message", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                // Some of the messages are sent already, the user must know it to not send them twice
+                if viewController.forwardSentCount > 0 {
+                    NotificationPresenter.shared().present(text: String.localizedStringWithFormat(NSLocalizedString("Forwarded %1$ld of %2$ld messages", comment: "A forward of several messages stopped by an error, e.g. 'Forwarded 2 of 5 messages'"), viewController.forwardSentCount, viewController.forwardTotalCount), dismissAfterDelay: 5.0, includedStyle: .error)
+                } else {
+                    NotificationPresenter.shared().present(text: NSLocalizedString("Failed to forward message", comment: ""), dismissAfterDelay: 5.0, includedStyle: .error)
+                }
             }
         }
     }
@@ -1758,6 +1863,10 @@ import Toast
                 userInfo["token"] = viewController.room.token
                 userInfo["accountId"] = viewController.account.accountId
                 NotificationCenter.default.post(name: .NCChatViewControllerForwardNotification, object: self, userInfo: userInfo)
+
+                if viewController.forwardSkippedFiles > 0 {
+                    NotificationPresenter.shared().present(text: String.localizedStringWithFormat(NSLocalizedString("%ld files were not forwarded", comment: "Files among the selected messages that were left out of a forward"), viewController.forwardSkippedFiles), dismissAfterDelay: 5.0, includedStyle: .dark)
+                }
             }
         }
     }
@@ -1772,9 +1881,35 @@ import Toast
         let shareConfirmationVC = ShareConfirmationViewController(room: self.room, thread: self.thread, account: self.account, serverCapabilities: serverCapabilities!)!
         shareConfirmationVC.delegate = self
         shareConfirmationVC.isModal = true
+        shareConfirmationVC.uploadHandler = { [weak self] uploads in
+            self?.sendFiles(uploads)
+        }
         let navigationController = NCNavigationController(rootViewController: shareConfirmationVC)
 
         return (shareConfirmationVC, navigationController)
+    }
+
+    // MARK: - NCMediaViewerViewController Delegate
+
+    // Only the real chat replies and deletes, the other chats (context, scheduled messages) say no
+    func mediaViewerViewControllerCanReply(_ viewController: NCMediaViewerViewController) -> Bool {
+        return false
+    }
+
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, canDelete message: NCChatMessage) -> Bool {
+        return false
+    }
+
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, deletesFileGroupWith message: NCChatMessage) -> Bool {
+        return self.fileGroup(of: message) != nil
+    }
+
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestReplyTo message: NCChatMessage) {
+        self.didPressReply(for: message)
+    }
+
+    func mediaViewerViewController(_ viewController: NCMediaViewerViewController, didRequestDelete message: NCChatMessage) {
+        self.deleteMessageOrFileGroup(message)
     }
 
     // MARK: - ShareViewController Delegate
@@ -1804,6 +1939,46 @@ import Toast
                 shareConfirmationVC.shareItemController.addItem(with: image)
             }
         }
+    }
+
+    // MARK: - TextView drop support
+
+    private func isPlainTextDrop(_ drop: UITextDropRequest) -> Bool {
+        // Text files also conform to plain text, but unlike dragged text they have a name
+        return drop.dropSession.items.allSatisfy {
+            $0.itemProvider.hasItemConformingToTypeIdentifier("public.plain-text") && $0.itemProvider.suggestedName == nil
+        }
+    }
+
+    public func textDroppableView(_ textDroppableView: UIView & UITextDroppable, proposalForDrop drop: UITextDropRequest) -> UITextDropProposal {
+        if self.isPlainTextDrop(drop) {
+            return drop.suggestedProposal
+        }
+
+        let proposal = UITextDropProposal(operation: .copy)
+        proposal.dropPerformer = .delegate
+
+        return proposal
+    }
+
+    public func textDroppableView(_ textDroppableView: UIView & UITextDroppable, willPerformDrop drop: UITextDropRequest) {
+        guard !self.isPlainTextDrop(drop),
+              let (shareConfirmationVC, navigationController) = self.createShareConfirmationViewController()
+        else { return }
+
+        shareConfirmationVC.setChatMessage(self.textView.text)
+        self.setChatMessage("")
+
+        // Start loading before presenting, dropped items are only accessible during the drop
+        for dragItem in drop.dropSession.items {
+            dragItem.itemProvider.loadFileRepresentation(forTypeIdentifier: "public.item") { url, error in
+                guard error == nil, let url else { return }
+
+                shareConfirmationVC.shareItemController.addItem(with: url)
+            }
+        }
+
+        self.present(navigationController, animated: true)
     }
 
     // MARK: - PHPhotoPicker Delegate
@@ -1855,46 +2030,27 @@ import Toast
         }
     }
 
-    // MARK: - UIImagePickerController delegate
+    // MARK: - InAppCameraViewController delegate
 
-    public func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-        self.saveImagePickerSettings(picker)
-
-        guard let (shareConfirmationVC, navigationController) = self.createShareConfirmationViewController(),
-              let mediaType = info[.mediaType] as? String
-        else { return }
+    func inAppCameraViewController(_ controller: InAppCameraViewController, didCaptureMediaAt fileURL: URL) {
+        guard let (shareConfirmationVC, navigationController) = self.createShareConfirmationViewController() else {
+            try? FileManager.default.removeItem(at: fileURL)
+            controller.dismiss(animated: true)
+            return
+        }
 
         shareConfirmationVC.setChatMessage(self.textView.text)
         self.setChatMessage("")
 
-        if mediaType == "public.image" {
-            guard let image = info[.originalImage] as? UIImage else { return }
-
-            self.dismiss(animated: true) {
-                self.present(navigationController, animated: true) {
-                    shareConfirmationVC.shareItemController.addItem(with: image)
-                }
-            }
-        } else if mediaType == "public.movie" {
-            guard let imageUrl = info[.mediaURL] as? URL else { return }
-
-            self.dismiss(animated: true) {
-                self.present(navigationController, animated: true) {
-                    shareConfirmationVC.shareItemController.addItem(with: imageUrl)
-                }
+        controller.dismiss(animated: true) {
+            self.present(navigationController, animated: true) {
+                shareConfirmationVC.shareItemController.addItem(with: fileURL)
             }
         }
     }
 
-    public func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-        self.saveImagePickerSettings(picker)
-        self.dismiss(animated: true)
-    }
-
-    public func saveImagePickerSettings(_ picker: UIImagePickerController) {
-        if picker.sourceType == .camera && picker.cameraCaptureMode == .photo {
-            NCUserDefaults.setPreferredCameraFlashMode(picker.cameraFlashMode.rawValue)
-        }
+    func inAppCameraViewControllerDidCancel(_ controller: InAppCameraViewController) {
+        controller.dismiss(animated: true)
     }
 
     // MARK: - UIDocumentPickerViewController Delegate
@@ -1975,10 +2131,12 @@ import Toast
         self.view.makeToast(NSLocalizedString("Tap and hold to record a voice message, release the button to send it.", comment: ""), duration: 3, point: toastPosition, title: nil, image: nil, completion: nil)
     }
 
-    func showVoiceMessageRecordingView() {
+    func showVoiceMessageRecordingView(iconName: String = "mic.fill") {
         self.voiceMessageRecordingView = VoiceMessageRecordingView()
 
         guard let voiceMessageRecordingView = self.voiceMessageRecordingView else { return }
+
+        voiceMessageRecordingView.recordingImageView.image = UIImage(systemName: iconName)
 
         voiceMessageRecordingView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -2052,6 +2210,11 @@ import Toast
     }
 
     func handleDelete() {
+        if self.videoMessageRecorder != nil {
+            self.finishVideoMessageRecording(send: false)
+            return
+        }
+
         self.recordCancelled = true
         self.stopRecordingVoiceMessage()
         handleCollapseVoiceRecording()
@@ -2059,6 +2222,11 @@ import Toast
     }
 
     func handleSend() {
+        if self.videoMessageRecorder != nil {
+            self.finishVideoMessageRecording(send: true)
+            return
+        }
+
         if let recorder = self.recorder, recorder.isRecording {
             self.recordCancelled = false
             self.stopRecordingVoiceMessage()
@@ -2093,6 +2261,45 @@ import Toast
         self.expandedUIHostingController?.removeFromParent()
         self.expandedUIHostingController?.view.isHidden = true
         self.textInputbar.bringSubviewToFront(self.textInputbar)
+    }
+
+    /// A locked video recording stays in the row of the inputbar, which shows the indicator and the time. It gets the
+    /// button to cancel in the row and the one to send over the record button, which is no longer held.
+    internal func showLockedVideoMessageActions() {
+        self.lockedVideoSendButton?.removeFromSuperview()
+
+        self.voiceMessageRecordingView?.showCancelButton { [weak self] in
+            self?.handleDelete()
+        }
+
+        var configuration = UIButton.Configuration.filled()
+        configuration.image = UIImage(systemName: "paperplane.fill")
+        configuration.cornerStyle = .capsule
+        configuration.baseBackgroundColor = NCAppBranding.themeColor()
+        configuration.baseForegroundColor = NCAppBranding.themeTextColor()
+
+        let sendButton = UIButton(configuration: configuration)
+        sendButton.translatesAutoresizingMaskIntoConstraints = false
+        sendButton.accessibilityLabel = NSLocalizedString("Send message", comment: "")
+        sendButton.addAction(UIAction { [weak self] _ in self?.handleSend() }, for: .touchUpInside)
+
+        self.textInputbar.addSubview(sendButton)
+        self.lockedVideoSendButton = sendButton
+
+        // The send button takes its place, VoiceOver does not read the record button below it as well
+        self.rightButton.accessibilityElementsHidden = true
+
+        NSLayoutConstraint.activate([
+            sendButton.centerXAnchor.constraint(equalTo: self.rightButton.centerXAnchor),
+            sendButton.centerYAnchor.constraint(equalTo: self.rightButton.centerYAnchor),
+            sendButton.widthAnchor.constraint(equalTo: self.rightButton.widthAnchor),
+            sendButton.heightAnchor.constraint(equalTo: self.rightButton.heightAnchor)
+        ])
+    }
+
+    /// Brings the lock button of the recording above the views that are added for a video, which are shown over the chat
+    internal func bringVoiceRecordingLockButtonToFront() {
+        self.view.bringSubviewToFront(self.voiceRecordingLockButton)
     }
 
     func setupAudioRecorder() {
@@ -2163,6 +2370,12 @@ import Toast
         self.showVoiceMessageRecordButton()
         guard let recorder = self.recorder else { return }
 
+        self.shareRecording(fromPath: recorder.url.path, namePrefix: "Talk recording from", fileExtension: "mp3", isVoiceMessage: true)
+    }
+
+    /// Uploads a recording without a confirmation. Voice messages get a temporary message and the voice message
+    /// type, other recordings (videos) are ordinary files without both.
+    internal func shareRecording(fromPath sourcePath: String, namePrefix: String, fileExtension: String, isVoiceMessage: Bool) {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
         let dateString = dateFormatter.string(from: Date())
@@ -2176,18 +2389,26 @@ import Toast
             roomString = regex.stringByReplacingMatches(in: roomString, range: .init(location: 0, length: roomString.count), withTemplate: " ")
         }
 
-        var audioFileName = "Talk recording from \(dateString) (\(roomString))"
+        var baseFileName = "\(namePrefix) \(dateString) (\(roomString))"
 
         // Trim the file name if too long
-        if audioFileName.count > 146 {
-            audioFileName = String(audioFileName.prefix(146))
+        if baseFileName.count > 146 {
+            baseFileName = String(baseFileName.prefix(146))
         }
-
-        audioFileName += ".mp3"
 
         let chatFileController = NCChatFileController(account: self.account)
         let tempDirectoryURL = URL(fileURLWithPath: chatFileController.tempDirectoryPath)
-        let destinationFilePath = tempDirectoryURL.appendingPathComponent(audioFileName).path
+
+        // Never replace or lose a recording made in the same second, as the temporary directory is shared
+        var fileName = "\(baseFileName).\(fileExtension)"
+        var duplicateCounter = 1
+
+        while FileManager.default.fileExists(atPath: tempDirectoryURL.appendingPathComponent(fileName).path) {
+            duplicateCounter += 1
+            fileName = "\(baseFileName) (\(duplicateCounter)).\(fileExtension)"
+        }
+
+        let destinationFilePath = tempDirectoryURL.appendingPathComponent(fileName).path
 
         var replyToMessage: NCChatMessage?
         if let replyMessageView, replyMessageView.isVisible {
@@ -2195,58 +2416,163 @@ import Toast
             replyMessageView.dismiss()
         }
 
-        if let temporaryMessage = self.createTemporaryMessage(
-            message: audioFileName,
+        // Recordings of videos are files like any other and show their state in the chat the same way
+        let temporaryMessage = self.createTemporaryMessage(
+            message: fileName,
             replyTo: replyToMessage,
             messageParameters: "\(destinationFilePath)",
             silently: false,
-            isVoiceMessage: true
-        ) {
-            let movedFileToTemporaryDirectory = chatFileController.moveFileToTemporaryDirectory(
-                fromSourcePath: recorder.url.path,
-                destinationPath: destinationFilePath
-            )
+            isVoiceMessage: isVoiceMessage,
+            isFileMessage: !isVoiceMessage
+        )
 
-            if !movedFileToTemporaryDirectory {
-                print("Failed to move voice-message to temporary directory.")
-                return
-            }
-
-            if movedFileToTemporaryDirectory, NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
-                self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
-            }
-
-            var metaData = ChatFileUploadMetadata()
-            metaData.isVoiceMessage = true
-            metaData.replyTo = replyToMessage?.messageId
-            metaData.threadId = self.thread?.threadId
-
-            // A parent living in another conversation means this is a private reply
-            if let replyToToken = replyToMessage?.token, replyToToken != self.room.token {
-                metaData.replyToToken = replyToToken
-            }
-
-            var upload = ChatFileUpload(localPath: destinationFilePath,
-                                        fileName: audioFileName,
-                                        room: self.room,
-                                        account: self.account)
-            upload.metadata = metaData
-            upload.referenceId = temporaryMessage.referenceId
-
-            self.upload(upload)
-        } else {
+        guard let temporaryMessage else {
             print("Temporary message could not be created")
+            return
         }
+
+        let movedFileToTemporaryDirectory = self.moveRecording(
+            fromSourcePath: sourcePath,
+            destinationPath: destinationFilePath,
+            using: chatFileController,
+            for: temporaryMessage
+        )
+
+        if !movedFileToTemporaryDirectory {
+            print("Failed to move recording to temporary directory.")
+            return
+        }
+
+        if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) {
+            self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
+        }
+
+        var metaData = ChatFileUploadMetadata()
+        metaData.isVoiceMessage = isVoiceMessage
+        metaData.replyTo = replyToMessage?.messageId
+        metaData.threadId = self.thread?.threadId
+
+        // A parent living in another conversation means this is a private reply
+        if let replyToToken = replyToMessage?.token, replyToToken != self.room.token {
+            metaData.replyToToken = replyToToken
+        }
+
+        var upload = ChatFileUpload(localPath: destinationFilePath,
+                                    fileName: fileName,
+                                    room: self.room,
+                                    account: self.account)
+        upload.metadata = metaData
+        upload.referenceId = temporaryMessage.referenceId
+
+        self.upload(upload)
+    }
+
+    /// Moves a recording to the temporary directory. The temporary message of the recording is stored already,
+    /// when the move fails it is removed again: there is nothing to upload or resend, and it would show as sending until it expires.
+    internal func moveRecording(fromSourcePath sourcePath: String, destinationPath: String, using chatFileController: NCChatFileController, for temporaryMessage: NCChatMessage) -> Bool {
+        let isMoved = chatFileController.moveFileToTemporaryDirectory(fromSourcePath: sourcePath, destinationPath: destinationPath)
+
+        if !isMoved {
+            self.removePermanentlyTemporaryMessage(temporaryMessage: temporaryMessage)
+        }
+
+        return isMoved
     }
 
     func upload(_ upload: ChatFileUpload) {
+        // Uploads with a temporary message are carried on by the system when the app is suspended, and the
+        // temporary message shows how they are doing
+        if upload.referenceId != nil {
+            Task {
+                await ChatBackgroundUploader.shared.enqueue(upload)
+            }
+
+            return
+        }
+
         Task {
             do {
                 try await ChatFileUploader.upload(upload)
-                NCLog.log("Successfully uploaded and shared \(upload.fileName)")
+                NCLog.log("Successfully uploaded and shared a \(NCLog.fileTraits(fileName: upload.fileName))")
             } catch {
                 self.presentUploadError(error, for: upload)
             }
+        }
+    }
+
+    /// Sends the files of the share confirmation. Every file gets a temporary message in the chat, which shows
+    /// how its upload is doing, and is uploaded in a way that survives the app being suspended.
+    internal func sendFiles(_ uploads: [ChatFileUpload]) {
+        var stagedUploads: [ChatFileUpload] = []
+
+        for var upload in uploads {
+            let sourceURL = URL(fileURLWithPath: upload.localPath)
+
+            // The message points to the copy of the store: the file of the caller is deleted right after this
+            guard let temporaryMessage = self.createTemporaryMessage(message: upload.fileName,
+                                                                     replyTo: nil,
+                                                                     messageParameters: upload.localPath,
+                                                                     silently: upload.metadata.silent,
+                                                                     isVoiceMessage: false,
+                                                                     isFileMessage: true,
+                                                                     caption: upload.metadata.caption,
+                                                                     referenceId: upload.referenceId,
+                                                                     filePathForReferenceId: { ChatBackgroundUploader.shared.store.plannedFileURL(forId: $0, sourceURL: sourceURL).path })
+            else { continue }
+
+            upload.referenceId = temporaryMessage.referenceId
+
+            // The file is copied here, the caller may delete it right after this returns
+            let isStaged = ChatBackgroundUploader.shared.stage(upload)
+
+            if !isStaged {
+                // `stage` marked the stored message as failed. The notification about it is handled before the
+                // message below is appended, so the copy that is appended has to say it as well.
+                temporaryMessage.sendingFailed = true
+                temporaryMessage.isOfflineMessage = false
+            }
+
+            if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: self.room) {
+                self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
+            }
+
+            if isStaged {
+                stagedUploads.append(upload)
+            }
+        }
+
+        for upload in stagedUploads {
+            guard let referenceId = upload.referenceId else { continue }
+
+            Task {
+                await ChatBackgroundUploader.shared.begin(referenceId: referenceId, room: upload.room, account: upload.account)
+            }
+        }
+    }
+
+    @objc private func chatUploadDidFail(notification: Notification) {
+        guard let referenceId = notification.userInfo?["referenceId"] as? String else { return }
+
+        DispatchQueue.main.async {
+            self.markTemporaryMessageAsFailed(referenceId: referenceId)
+        }
+    }
+
+    internal func markTemporaryMessageAsFailed(referenceId: String) {
+        // Allow to resend or delete the message, instead of showing it as sending until it expires
+        RLMRealm.writeTransaction { _ in
+            if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage {
+                managedTemporaryMessage.sendingFailed = true
+                managedTemporaryMessage.isOfflineMessage = false
+            }
+        }
+
+        self.modifyMessageWith(referenceId: referenceId) { message in
+            // The message might have been received from the server in the meantime
+            guard message.isTemporary else { return }
+
+            message.sendingFailed = true
+            message.isOfflineMessage = false
         }
     }
 
@@ -2256,13 +2582,13 @@ import Toast
         switch error {
         case ChatFileUploadError.destinationUnavailable(let underlyingError):
             // Nothing has been uploaded yet, so keep this silent as before
-            NCLog.log("Could not determine where to upload \(upload.fileName) to. Error: \(underlyingError?.localizedDescription ?? "unknown")")
+            NCLog.log("Could not determine where to upload a \(NCLog.fileTraits(fileName: upload.fileName)) to. Error: \(underlyingError.map { NCLog.errorCode($0) } ?? "unknown")")
             return
         case ChatFileUploadError.attachmentFolderUnavailable:
             NCLog.log("Failed to check or create attachment folder")
             message = NSLocalizedString("Failed to check or create attachment folder", comment: "")
         case ChatFileUploadError.shareFailed:
-            NCLog.log("Failed to share \(upload.fileName)")
+            NCLog.log("Failed to share a \(NCLog.fileTraits(fileName: upload.fileName))")
             message = NSLocalizedString("Failed to share recording", comment: "")
         case ChatFileUploadError.quotaExceeded:
             NCLog.log("User storage quota exceeded")
@@ -2270,8 +2596,11 @@ import Toast
         case ChatFileUploadError.tooManyRequests:
             NCLog.log("Too many requests while uploading")
             message = NSLocalizedString("Too many requests, please try again later", comment: "")
+        case ChatFileUploadError.uploadFailed(let errorCode, let errorDescription) where !errorDescription.isEmpty:
+            NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: upload.fileName)). Error code: \(errorCode)")
+            message = errorDescription
         default:
-            NCLog.log("Failed to upload \(upload.fileName). Error: \(error.localizedDescription)")
+            NCLog.log("Failed to upload a \(NCLog.fileTraits(fileName: upload.fileName)). Error: \(NCLog.errorCode(error))")
             message = NSLocalizedString("Unknown error occurred", comment: "")
         }
 
@@ -2308,16 +2637,76 @@ import Toast
 
     // MARK: - Voice Message Player
 
-    func setupVoiceMessagePlayer(with fileStatus: NCChatFileStatus) {
-        guard let fileLocalPath = fileStatus.fileLocalPath,
-              let data = try? Data(contentsOf: URL(fileURLWithPath: fileLocalPath)),
-              let player = try? AVAudioPlayer(data: data)
-        else { return }
+    /// Registers a tap on a voice message and returns its selection. A later tap makes earlier selections outdated.
+    @discardableResult
+    func selectVoiceMessage() -> Int {
+        self.voiceMessageSelection &+= 1
+        return self.voiceMessageSelection
+    }
+
+    /// A voice message may only start when no other voice message was tapped since `selection` was taken.
+    func shouldStartVoiceMessage(selection: Int) -> Bool {
+        return selection == self.voiceMessageSelection
+    }
+
+    /// Whether the latest tap already waits for the download of this file. Another tap would only add a second handler for the same start.
+    /// Only a download requested by that tap counts: a download of the same file started by someone else, e.g. for the transcription, does not.
+    func isVoiceMessageDownloadPending(forFileId fileId: String, downloadStatus: NCChatFileStatus?) -> Bool {
+        return downloadStatus != nil && self.pendingVoiceMessageDownload?.fileId == fileId
+    }
+
+    /// Called when the download requested by the tap with `selection` ended, whether it succeeded, failed or was cancelled.
+    /// A newer tap keeps its own pending download.
+    func finishVoiceMessageDownload(selection: Int) {
+        if self.pendingVoiceMessageDownload?.selection == selection {
+            self.pendingVoiceMessageDownload = nil
+        }
+    }
+
+    /// Reads the file and builds the player. Doesn't touch the view controller, so it can run off the main thread.
+    nonisolated static func makeVoiceMessagePlayer(atPath path: String) -> AVAudioPlayer? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? AVAudioPlayer(data: data)
+    }
+
+    /// Starts the voice message unless another one was tapped since `selection` was taken, e.g. while this one was downloading.
+    /// Reading the file and building the player happens off the main thread. `completion` is called on the main thread
+    /// with whether the voice message was started.
+    func setupVoiceMessagePlayer(with fileStatus: NCChatFileStatus, selection: Int, completion: ((Bool) -> Void)? = nil) {
+        guard self.shouldStartVoiceMessage(selection: selection),
+              let fileLocalPath = fileStatus.fileLocalPath
+        else {
+            completion?(false)
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let player = BaseChatViewController.makeVoiceMessagePlayer(atPath: fileLocalPath)
+
+            DispatchQueue.main.async {
+                guard let self, let player else {
+                    completion?(false)
+                    return
+                }
+
+                // Not inline in completion?(...): without a completion the argument would not be evaluated
+                let didStart = self.startVoiceMessagePlayer(player, with: fileStatus, selection: selection)
+                completion?(didStart)
+            }
+        }
+    }
+
+    /// Makes `player` the current one and plays it, unless another voice message was tapped while it was built.
+    @discardableResult
+    func startVoiceMessagePlayer(_ player: AVAudioPlayer, with fileStatus: NCChatFileStatus, selection: Int) -> Bool {
+        guard self.shouldStartVoiceMessage(selection: selection) else { return false }
 
         self.voiceMessagesPlayer = player
         self.playerAudioFileStatus = fileStatus
         player.delegate = self
         self.playVoiceMessagePlayer()
+
+        return true
     }
 
     func playVoiceMessagePlayer() {
@@ -2454,22 +2843,23 @@ import Toast
 
             // 'Pop' feedback (strong boom)
             AudioServicesPlaySystemSound(1520)
-            self.checkPermissionAndRecordVoiceMessage()
+            self.startRecordingForGesture()
             self.shouldLockInterfaceOrientation(lock: true)
             self.recordCancelled = false
             self.longPressStartingPoint = point
             self.voiceRecordingLockButton.alpha = 1
-            self.setInputbarImage(UIImage(systemName: "mic"), for: self.rightButton)
         } else if gestureRecognizer.state == .ended {
             self.shouldLockInterfaceOrientation(lock: false)
             self.resetVoiceRecordingLockButton()
 
             if !isVoiceRecordingLocked {
-                if let recordingTime = self.recorder?.currentTime {
+                if let recordingTime = self.recorder?.currentTime, !self.isVideoGestureActive {
                     // Mark record as cancelled if audio message is no longer than one second
                     self.recordCancelled = recordingTime < 1
                 }
-                self.stopRecordingVoiceMessage()
+
+                // Too short videos are dropped while finishing, like short voice messages
+                self.stopRecordingForGesture(send: !self.recordCancelled)
                 print("Stop recording audio message")
             }
         } else if gestureRecognizer.state == .changed {
@@ -2496,7 +2886,7 @@ import Toast
                     // 'Cancelled' feedback (three sequential weak booms)
                     AudioServicesPlaySystemSound(1521)
                     self.recordCancelled = true
-                    self.stopRecordingVoiceMessage()
+                    self.stopRecordingForGesture(send: false)
                     self.resetVoiceRecordingLockButton()
                 }
             }
@@ -2506,9 +2896,14 @@ import Toast
                 if slideY > maxSlideY, !self.recordCancelled {
                     if !isVoiceRecordingLocked {
                         self.voiceRecordingLockButton.setImage(UIImage(systemName: "lock"), for: .normal)
-                        let offset = self.voiceMessageRecordingView?.getTimeCounted()
-                        let intOffset = Int(offset!.magnitude)
-                        showExpandedVoiceMessageRecordingView(offset: intOffset)
+                        if self.isVideoGestureActive {
+                            // A video keeps the row of the inputbar, so the preview gets the height of a panel
+                            self.showLockedVideoMessageActions()
+                        } else {
+                            let offset = self.voiceMessageRecordingView?.getTimeCounted()
+                            let intOffset = Int(offset!.magnitude)
+                            showExpandedVoiceMessageRecordingView(offset: intOffset)
+                        }
                         print("LOCKED")
                         isVoiceRecordingLocked = true
                     }
@@ -2519,7 +2914,7 @@ import Toast
             self.shouldLockInterfaceOrientation(lock: false)
             self.recordCancelled = false
             self.resetVoiceRecordingLockButton()
-            self.stopRecordingVoiceMessage()
+            self.stopRecordingForGesture(send: false)
         }
     }
 
@@ -2637,8 +3032,12 @@ import Toast
                 }
             }
 
+            self.regroupFileMessages()
+
             return lastHistoryMessageIP
         }
+
+        self.regroupFileMessages()
 
         return nil
     }
@@ -2685,6 +3084,7 @@ import Toast
         }
 
         self.sortDateSections()
+        self.regroupFileMessages()
     }
 
     func appendMessages(messages: [NCChatMessage]) {
@@ -2692,6 +3092,7 @@ import Toast
         // Therefore we wrap it in this append function
         self.internalAppendMessages(messages: messages, inDictionary: &self.messages)
         self.sortDateSections()
+        self.regroupFileMessages()
     }
 
     private func internalAppendMessages(messages: [NCChatMessage], inDictionary dictionary: inout [Date: [NCChatMessage]]) {
@@ -2781,11 +3182,110 @@ import Toast
                     self.tableView?.endUpdates()
                 }
             }
+
+            self.regroupFileMessages()
         }
     }
 
     func sortDateSections() {
         self.dateSections = self.messages.keys.sorted()
+    }
+
+    // MARK: - Grouping of files shared as one upload
+
+    /// Takes the row width rather than asking the table view, which has already changed during a
+    /// rotation while rows are still measured against the old one.
+    internal func availableBodyWidth(forRowWidth rowWidth: CGFloat, isOwnMessage: Bool) -> CGFloat {
+        let bubbleWidth = BaseChatTableViewCell.bubbleWidth(forRowWidth: rowWidth, isOwnMessage: isOwnMessage)
+
+        return max(0, bubbleWidth - BaseChatTableViewCell.bodyHorizontalInset)
+    }
+
+    /// The same, for the width the rows of the chat currently have.
+    internal func availableBodyWidth(forOwnMessage isOwnMessage: Bool) -> CGFloat {
+        guard let tableView = self.tableView else { return 0 }
+
+        var rowWidth = tableView.frame.width - chatMessageCellAvatarHeight
+        rowWidth -= tableView.safeAreaInsets.left + tableView.safeAreaInsets.right
+
+        return self.availableBodyWidth(forRowWidth: rowWidth, isOwnMessage: isOwnMessage)
+    }
+
+    internal func fileMessageGroup(showing message: NCChatMessage) -> FileMessageGroup? {
+        if message.messageId > 0, let group = self.fileMessageGroups[message.messageId] {
+            return group
+        }
+
+        // A file the server has no preview of is drawn on a card, like the files of a group
+        if let file = message.plainFileShare, !file.previewAvailable {
+            return FileMessageGroup(messages: [message])
+        }
+
+        return nil
+    }
+
+    internal func isHiddenInFileMessageGroup(_ message: NCChatMessage) -> Bool {
+        guard message.messageId > 0 else { return false }
+
+        return self.messageIdsHiddenInFileGroups[message.messageId] != nil
+    }
+
+    /// Runs after every change to the data source rather than while messages are added: files of
+    /// one upload can arrive in separate batches, history can be prepended in front of a group, and
+    /// removing a message can join or split one.
+    internal func regroupFileMessages() {
+        var groups: [Int: FileMessageGroup] = [:]
+        var hiddenMessageIds: [Int: Int] = [:]
+
+        for dateSection in self.dateSections {
+            guard let messagesForDate = self.messages[dateSection] else { continue }
+
+            for group in FileMessageGroup.groups(in: messagesForDate) {
+                groups[group.anchor.messageId] = group
+
+                for message in group.messages where message.messageId != group.anchor.messageId {
+                    hiddenMessageIds[message.messageId] = group.anchor.messageId
+                }
+            }
+
+            // A deleted upload is shown as its first deleted file
+            for (previous, message) in zip(messagesForDate, messagesForDate.dropFirst()) where message.isDeletedFileShare(ofTheSameUploadAs: previous) {
+                hiddenMessageIds[message.messageId] = hiddenMessageIds[previous.messageId] ?? previous.messageId
+            }
+        }
+
+        self.invalidateHeights(previousGroups: self.fileMessageGroups,
+                               groups: groups,
+                               previousHiddenMessageIds: Set(self.messageIdsHiddenInFileGroups.keys),
+                               hiddenMessageIds: Set(hiddenMessageIds.keys))
+
+        self.fileMessageGroups = groups
+        self.messageIdsHiddenInFileGroups = hiddenMessageIds
+    }
+
+    /// A message that joined or left a group is a different height than it was measured at.
+    private func invalidateHeights(previousGroups: [Int: FileMessageGroup],
+                                   groups: [Int: FileMessageGroup],
+                                   previousHiddenMessageIds: Set<Int>,
+                                   hiddenMessageIds: Set<Int>) {
+        var changedMessages: [NCChatMessage] = []
+
+        for anchorId in Set(previousGroups.keys).union(groups.keys)
+        where previousGroups[anchorId]?.messages.count != groups[anchorId]?.messages.count {
+            if let message = groups[anchorId]?.anchor ?? previousGroups[anchorId]?.anchor {
+                changedMessages.append(message)
+            }
+        }
+
+        for messageId in previousHiddenMessageIds.symmetricDifference(hiddenMessageIds) {
+            if let message = self.indexPathAndMessage(forMessageId: messageId)?.message {
+                changedMessages.append(message)
+            }
+        }
+
+        for message in changedMessages {
+            self.messageHeightCache.removeHeight(forMessage: message)
+        }
     }
 
     // MARK: - Message grouping
@@ -3297,7 +3797,13 @@ import Toast
     public override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         if tableView != self.autoCompletionView,
            let message = self.message(for: indexPath) {
-            return self.getCell(for: message)
+            let cell = self.getCell(for: message)
+
+            if let messageCell = cell as? BaseChatTableViewCell {
+                messageCell.setSelectionMode(self.messageSelection.isActive, selected: self.isSelected(message))
+            }
+
+            return cell
         }
 
         return super.tableView(tableView, cellForRowAt: indexPath)
@@ -3355,6 +3861,18 @@ import Toast
                 } else {
                     cell.audioPlayerView?.resetPlayer()
                 }
+
+                return cell
+            }
+        }
+
+        if let fileGroup = self.fileMessageGroup(showing: message) {
+            let cellIdentifier = fileGroup.continuesAuthorBlock ? fileGroupGroupedMessageCellIdentifier : fileGroupMessageCellIdentifier
+
+            if let cell = self.tableView?.dequeueReusableCell(withIdentifier: cellIdentifier) as? BaseChatTableViewCell {
+                cell.delegate = self
+                cell.fileGroup = fileGroup
+                cell.setup(for: message, inRoom: self.room, forThread: self.thread, withAccount: self.account)
 
                 return cell
             }
@@ -3457,28 +3975,22 @@ import Toast
             return 0.0
         }
 
+        // Shown as part of the group of its upload, not on its own
+        if self.isHiddenInFileMessageGroup(message) {
+            return 0.0
+        }
+
         // Chat messages
         let isOwnMessage = message.isMessage(from: self.account.userId)
-        let messageString = message.parsedMarkdownForChat() ?? NSMutableAttributedString()
+        let messageString = message.parsedMarkdownForChatWithForwardedNote() ?? NSMutableAttributedString()
         var width = originalWidth
 
         if message.isSystemMessage {
             // 4 * right(10) + dateLabel(40)
             width -= 80.0
         } else {
-            // Avatar is already subtracted, but we need to take padding of left(10) into account
-            width -= 10.0
-
-            // MessageTextView has padding of 2*10
-            width -= 20.0
-
-            if isOwnMessage {
-                // For own messages we have a padding of 40 to the avatar view and 10 to the right superview
-                width -= 50.0
-            } else {
-                // For others messages, we have a padding of 10 to the avatar view und 64 to the right superview
-                width -= 74.0
-            }
+            width = BaseChatTableViewCell.bubbleWidth(forRowWidth: width, isOwnMessage: isOwnMessage)
+            width -= BaseChatTableViewCell.bodyHorizontalInset
         }
 
         self.textViewForSizing.attributedText = messageString
@@ -3492,7 +4004,9 @@ import Toast
 
         height += 15.0 // MessageTextTop(10) + MessageTextBottom(5)
 
-        if (message.isGroupMessage && !message.willShowParentMessageInThread(self.thread)) || message.isSystemMessage || isOwnMessage {
+        let continuesAuthorBlock = self.fileMessageGroup(showing: message)?.continuesAuthorBlock ?? message.isGroupMessage
+
+        if (continuesAuthorBlock && !message.willShowParentMessageInThread(self.thread)) || message.isSystemMessage || isOwnMessage {
             if height < chatGroupedMessageCellMinimumHeight {
                 height = chatGroupedMessageCellMinimumHeight
             }
@@ -3527,8 +4041,23 @@ import Toast
             height += 70 // quoteView(70)
         }
 
+        if let fileGroup = self.fileMessageGroup(showing: message) {
+            let files = fileGroup.messagesInUploadOrder.compactMap { $0.file() }
+
+            height += GroupedFilePreviewView.Layout(files: files, availableWidth: self.availableBodyWidth(forRowWidth: originalWidth, isOwnMessage: isOwnMessage)).height
+
+            if message.sharesFileWithoutCaption {
+                // A group shows its caption, never a file name. An empty text was subtracted above.
+                if !messageString.string.isEmpty {
+                    height -= ceil(bodyBounds.height)
+                }
+            } else {
+                // Only a caption is separated from the previews; without one there is no text view
+                height += 10
+            }
+
         // Voice message should be before message.file check since it contains a file
-        if message.isVoiceMessage {
+        } else if message.isVoiceMessage {
             height -= ceil(bodyBounds.height)
             height += voiceMessageCellPlayerHeight
 
@@ -3586,6 +4115,11 @@ import Toast
             return nil
         }
 
+        // In the selection mode a touch on a row only picks the message
+        if self.messageSelection.isActive {
+            return nil
+        }
+
         let cell = tableView.cellForRow(at: indexPath)
 
         if let cell = cell as? BaseChatTableViewCell {
@@ -3596,18 +4130,29 @@ import Toast
                 self.showReactionsSummary(of: message)
                 return nil
             }
+
+            // Next to the bubble a long press starts the selection mode instead, see handleRowLongPress
+            if self.supportsMessageSelection, ChatRowZone.zone(at: pointInCell, interactiveFrames: cell.interactiveFrames()) == .empty {
+                return nil
+            }
         }
 
-        guard let message = self.message(for: indexPath) else { return nil }
+        guard let message = self.message(for: indexPath), self.hasMenu(message) else { return nil }
 
-        if message.isSystemMessage || message.isDeletedMessage ||
-            message.messageId == MessageSeparatorTableViewCell.unreadMessagesSeparatorId ||
-            message.messageId == MessageSeparatorTableViewCell.unreadMessagesWithSummarySeparatorId ||
-            message.messageId == MessageSeparatorTableViewCell.chatBlockSeparatorId {
+        let menu = self.messageMenu(for: message, at: indexPath)
 
-            return nil
+        let configuration = UIContextMenuConfiguration(identifier: indexPath as NSIndexPath) { [weak self] in
+            return self?.getContextMenuPreviewController(forRowAt: indexPath)
+        } actionProvider: { _ in
+            return menu
         }
 
+        return configuration
+    }
+
+    /// The menu of a message, shown by a long press on the bubble and by a tap next to it.
+    /// A message with no menu doesn't get here, see `hasMenu`.
+    func messageMenu(for message: NCChatMessage, at indexPath: IndexPath) -> UIMenu {
         var actions: [UIMenuElement] = []
 
         // Copy option
@@ -3625,15 +4170,17 @@ import Toast
             self.didPressCopyLink(for: message)
         })
 
-        let menu = UIMenu(children: actions)
+        return UIMenu(children: actions)
+    }
 
-        let configuration = UIContextMenuConfiguration(identifier: indexPath as NSIndexPath) { [weak self] in
-            return self?.getContextMenuPreviewController(forRowAt: indexPath)
-        } actionProvider: { _ in
-            return menu
-        }
+    /// Whether a message has a menu: not for system and deleted messages and separators
+    func hasMenu(_ message: NCChatMessage) -> Bool {
+        return MessageSelection.hasMenu(messageId: message.messageId, isSystemMessage: message.isSystemMessage, isDeletedMessage: message.isDeletedMessage)
+    }
 
-        return configuration
+    /// Whether the chat has the multi-selection mode and the menu by a tap next to the bubble
+    var supportsMessageSelection: Bool {
+        return false
     }
 
     public override func tableView(_ tableView: UITableView, willDisplayContextMenu configuration: UIContextMenuConfiguration, animator: UIContextMenuInteractionAnimating?) {
@@ -3660,6 +4207,7 @@ import Toast
         else { return nil }
 
         previewCell.frame = .init(origin: .zero, size: tableView.rectForRow(at: indexPath).size)
+        previewCell.fileGroup = self.fileMessageGroup(showing: message)
         previewCell.setup(for: message, inRoom: self.room, forThread: self.thread, withAccount: self.account)
         previewCell.layoutIfNeeded()
 
@@ -3932,6 +4480,9 @@ import Toast
     }
 
     internal func highlightMessageWithContentOffset(messageId: Int) {
+        // A message hidden in a file group is highlighted on the row that shows it
+        let messageId = self.messageIdsHiddenInFileGroups[messageId] ?? messageId
+
         guard messageId > 0,
               let tableView = self.tableView,
               let (indexPath, _) = self.indexPathAndMessage(forMessageId: messageId)
@@ -3974,8 +4525,12 @@ import Toast
     // MARK: - FileMessageTableViewCellDelegate
 
     public func cellWants(toDownloadFile fileParameter: NCMessageFileParameter, for message: NCChatMessage) {
+        // The file of a message that is still sent is not on the server (yet)
+        guard !message.isTemporary else { return }
+
         if NCUtils.isImage(fileType: fileParameter.mimetype ?? "") {
-            let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account)
+            let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account, thread: self.thread)
+            mediaViewController.delegate = self
             let navController = CustomPresentableNavigationController(rootViewController: mediaViewController)
 
             // Hiding the keyboard due to a UIKit issue where the reported keyboard height
@@ -3994,7 +4549,8 @@ import Toast
         if NCUtils.isVideo(fileType: fileParameter.mimetype ?? "") {
             // Skip unsupported formats here ("webm" and "mkv") and use VLC later
             if !fileExtension.isEmpty, !VLCKitVideoViewController.supportedFileExtensions.contains(fileExtension) {
-                let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account)
+                let mediaViewController = NCMediaViewerViewController(initialMessage: message, room: self.room, account: self.account, thread: self.thread)
+                mediaViewController.delegate = self
                 let navController = CustomPresentableNavigationController(rootViewController: mediaViewController)
 
                 // Hiding the keyboard due to a UIKit issue where the reported keyboard height
@@ -4054,29 +4610,46 @@ import Toast
             return
         }
 
+        let fileId = fileParameter.parameterId
+
         // Resume an already loaded voice message
         if let voiceMessagesPlayer = self.voiceMessagesPlayer,
            let playerAudioFileStatus = self.playerAudioFileStatus,
            !voiceMessagesPlayer.isPlaying,
-           fileParameter.parameterId == playerAudioFileStatus.fileId,
+           fileId == playerAudioFileStatus.fileId,
            fileParameter.path == playerAudioFileStatus.filePath {
 
+            self.selectVoiceMessage()
+            self.pendingVoiceMessageDownload = nil
             self.playVoiceMessagePlayer()
             return
         }
+
+        if self.isVoiceMessageDownloadPending(forFileId: fileId, downloadStatus: ChatFileDownloader.shared.downloadStatus(forFileId: fileId)) {
+            // Playback starts when the download of the previous tap finishes
+            return
+        }
+
+        let selection = self.selectVoiceMessage()
+        self.pendingVoiceMessageDownload = nil
 
         // Temporary voice messages are played from their local file
         if let fileStatus = fileParameter.fileStatus,
            let fileLocalPath = fileStatus.fileLocalPath,
            FileManager.default.fileExists(atPath: fileLocalPath) {
 
-            self.setupVoiceMessagePlayer(with: fileStatus)
+            self.setupVoiceMessagePlayer(with: fileStatus, selection: selection)
             return
         }
 
-        self.downloadFile(for: message) { [weak self] fileStatus in
-            self?.setupVoiceMessagePlayer(with: fileStatus)
-        }
+        self.pendingVoiceMessageDownload = (fileId, selection)
+
+        self.downloadFile(for: message, completionHandler: { [weak self] fileStatus in
+            self?.finishVoiceMessageDownload(selection: selection)
+            self?.setupVoiceMessagePlayer(with: fileStatus, selection: selection)
+        }, failureHandler: { [weak self] in
+            self?.finishVoiceMessageDownload(selection: selection)
+        })
     }
 
     public func cellWants(toPauseAudioFile fileParameter: NCMessageFileParameter) {
@@ -4239,10 +4812,10 @@ import Toast
     /// Downloads the file of a message and hands it to `completionHandler`, or shows why it failed.
     ///
     /// Downloads are deduplicated by file id, so requesting the same file twice downloads it once
-    /// and calls both handlers.
+    /// and calls both handlers. `failureHandler` is called if the file could not be loaded or the download was cancelled.
     ///
     @MainActor
-    private func downloadFile(for message: NCChatMessage, completionHandler: @escaping (_ fileStatus: NCChatFileStatus) -> Void) {
+    private func downloadFile(for message: NCChatMessage, completionHandler: @escaping (_ fileStatus: NCChatFileStatus) -> Void, failureHandler: (() -> Void)? = nil) {
         guard let fileParameter = message.file() else { return }
 
         ChatFileDownloader.shared.downloadFile(withFileId: fileParameter.parameterId, fromAccount: self.account) { [weak self] result in
@@ -4252,9 +4825,10 @@ import Toast
             case .success(let fileStatus):
                 completionHandler(fileStatus)
             case .failure(.fileUnavailable(let errorDescription)), .failure(.downloadFailed(let errorDescription)):
+                failureHandler?()
                 self.showUnableToLoadFileAlert(with: errorDescription)
             case .failure(.cancelled):
-                break
+                failureHandler?()
             }
         }
     }

@@ -266,7 +266,7 @@ public extension Notification.Name {
             activeAccount?.active = true
         }
 
-        NCLog.log("Set active account to \(accountId)")
+        NCLog.log("Set active account")
     }
 
     public func accountId(forUser user: String, inServer server: String) -> String {
@@ -390,6 +390,15 @@ public extension Notification.Name {
             return NCRoom(value: managedRoom)
         }
         return nil
+    }
+
+    /// Ids of all accounts that have a conversation with the given token
+    public func accountIds(withRoomToken token: String) -> [String] {
+        var accountIds: [String] = []
+        for case let managedRoom as NCRoom in NCRoom.objects(with: NSPredicate(format: "token = %@", token)) {
+            accountIds.append(managedRoom.accountId)
+        }
+        return accountIds
     }
 
     public func room(withInternalId internalId: String) -> NCRoom? {

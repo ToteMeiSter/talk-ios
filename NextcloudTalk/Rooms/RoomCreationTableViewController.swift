@@ -251,7 +251,7 @@ enum RoomVisibilityOption: Int {
             self.roomCreationGroup.enter()
             NCAPIController.sharedInstance().setAvatar(forRoom: token, withImage: selectedAvatarImage, forAccount: self.account) { error in
                 if let error {
-                    NCLog.log(String(format: "Failed to set room avatar. Error: %@", error.localizedDescription))
+                    NCLog.log("Failed to set room avatar. Error: \(NCLog.errorCode(error))")
                     self.roomCreationErrors.append(error.localizedDescription)
                 }
 
@@ -288,7 +288,7 @@ enum RoomVisibilityOption: Int {
 
             Task {
                 do {
-                    try await NCAPIController.sharedInstance().addParticipant(participant.userId, ofType: participant.source as String?, toRoom: token, forAccount: account)
+                    try await NCAPIController.sharedInstance().addParticipant(participant.userId, ofType: participant.source, toRoom: token, forAccount: account)
                 } catch {
                     NCLog.log(String(format: "Failed to add participant. Error: %@", error.localizedDescription))
                     self.roomCreationErrors.append(error.localizedDescription)
@@ -468,7 +468,7 @@ enum RoomVisibilityOption: Int {
 
                 participantCell.labelTitle.text = participant.name
 
-                let participantType = participant.source as String
+                let participantType = participant.source
                 let activeAccount = NCDatabaseManager.sharedInstance().activeAccount()
                 participantCell.avatarView.setActorAvatar(forId: participant.userId, withType: participantType, withDisplayName: participant.name, withRoomToken: nil, using: activeAccount)
 

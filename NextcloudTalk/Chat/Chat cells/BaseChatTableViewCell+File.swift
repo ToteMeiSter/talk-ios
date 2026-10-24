@@ -87,7 +87,7 @@ extension BaseChatTableViewCell {
               let messageTextView = self.messageTextView
         else { return }
 
-        messageTextView.attributedText = message.parsedMarkdownForChat()
+        messageTextView.attributedText = message.parsedMarkdownForChatWithForwardedNote()
 
         if message.message == "{file}" {
             messageTextView.dataDetectorTypes = []

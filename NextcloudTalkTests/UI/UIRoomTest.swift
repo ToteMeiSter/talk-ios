@@ -72,12 +72,9 @@ final class UIRoomTest: XCTestCase {
             conversationStaticText.press(forDuration: 2.0)
             let leaveConversation = app.buttons["Leave conversation"]
             XCTAssert(conversationStaticText.waitForExistence(timeout: TestConstants.timeoutShort))
-
             leaveConversation.tap()
-            let alert = app.alerts.element.staticTexts["Leave conversation"]
-            XCTAssert(alert.waitForExistence(timeout: TestConstants.timeoutShort))
 
-            app.buttons["Leave"].tap()
+            waitForReady(object: app.buttons["Leave"]).tap()
         }
 
         waitForReady(object: app.buttons["Create or join a conversation"]).tap()
@@ -100,15 +97,19 @@ final class UIRoomTest: XCTestCase {
         // Open conversation settings
         chatTitleView.tap()
 
-        // Wait for admin participant to be visible (so participant list is loaded)
-        app.swipeUp()
-        XCTAssert(app.staticTexts["admin"].waitForExistence(timeout: TestConstants.timeoutShort))
-
-        // Leave open conversation
+        // The list is lazy, so the indicator is only rendered when the leave button below it is on screen
         let leaveButton = app.buttons["Leave conversation"]
         app.scrollTo(leaveButton)
+        let participantsLoadingIndicator = app.descendants(matching: .any)["ParticipantsLoadingIndicator"]
+        XCTAssert(participantsLoadingIndicator.waitForNonExistence(timeout: TestConstants.timeoutShort))
+
+        // Loaded participants push the button almost off screen, where it still counts as hittable
+        app.swipeUp()
+        app.scrollTo(leaveButton)
+
+        // Leave open conversation
         leaveButton.tap()
-        waitForReady(object: app.buttons["Leave"]).tap()
+        waitForReady(object: app.alerts.buttons["Leave"]).tap()
         waitForReady(object: app.buttons["Create or join a conversation"])
 
         // Check that the conversation is no longer in conversations list
@@ -149,8 +150,9 @@ final class UIRoomTest: XCTestCase {
         let messageSentCell = app.cells["CellMessageSent"]
         XCTAssert(messageSentCell.waitForExistence(timeout: TestConstants.timeoutShort))
 
-        // Open context menu
-        messageSentCell.press(forDuration: 2.0)
+        // Open context menu. An own message sits at the right edge of the row, a long press on the empty
+        // part of the row (e.g. the center of the cell) starts the selection mode instead.
+        messageSentCell.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).press(forDuration: 2.0)
 
         // Add a reaction to close the context menu
         // In case we are testing against a nextcloud version that does not support reactions (<= NC 23)
@@ -247,8 +249,9 @@ final class UIRoomTest: XCTestCase {
         let messageSentCell = app.cells["CellMessageSent"]
         XCTAssert(messageSentCell.waitForExistence(timeout: TestConstants.timeoutShort))
 
-        // Open context menu
-        messageSentCell.press(forDuration: 2.0)
+        // Open context menu. An own message sits at the right edge of the row, a long press on the empty
+        // part of the row (e.g. the center of the cell) starts the selection mode instead.
+        messageSentCell.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).press(forDuration: 2.0)
 
         // Start a reply
         XCTAssert(messageSentCell.waitForExistence(timeout: TestConstants.timeoutShort))

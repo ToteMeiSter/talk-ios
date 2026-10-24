@@ -29,6 +29,9 @@ import WebRTC
     /// Called when a peer connection creates a session description.
     func peerConnection(_ peerConnection: NCPeerConnection, needsToSend sessionDescription: RTCSessionDescription)
 
+    /// Called when a peer without a MCU did not recover from a failed ICE connection in time.
+    func peerConnectionIceRecoveryTimedOut(_ peerConnection: NCPeerConnection)
+
     /// Called when the first video packet of the remote peer was received.
     func peerConnectionDidReceiveFirstVideoPacket(_ peerConnection: NCPeerConnection)
 }
@@ -54,6 +57,12 @@ public class NCPeerConnection: NSObject {
     var selectedSimulcastVideoQuality: SimulcastVideoQuality?
     var isRemoteVideoBlockedInMCU = false
 
+    // Keys of the remote participant, set for end-to-end encrypted calls before any media is received
+    var receiverKeyRing: RTCTalkKeyRing?
+
+    // The encrypted frame format only works with VP8
+    var preferredVideoCodec = "H264"
+
     /// "peerId-sid"
     var peerIdentifier: String {
         if let sid {
@@ -68,6 +77,14 @@ public class NCPeerConnection: NSObject {
     private var localDataChannel: RTCDataChannel?
     private var remoteDataChannel: RTCDataChannel?
     private var remoteStream: RTCMediaStream?
+    private var iceRestartTracker = NCIceRestartTracker()
+    private var disconnectedRestartWorkItem: DispatchWorkItem?
+    private var recoveryWatchdogWorkItem: DispatchWorkItem?
+    private var lastOfferWasPublisherOffer = false
+
+    // Checks the certificate of TURNS servers against the system trust store. The property keeps the verifier
+    // to make its ownership explicit.
+    private var turnCertificateVerifier: NCTurnCertificateVerifier?
 
     init(sessionId: String, sid: String?, andICEServers iceServers: [Any]?, forAudioOnlyCall audioOnly: Bool) {
         WebRTCCommon.shared.assertQueue()
@@ -78,6 +95,10 @@ public class NCPeerConnection: NSObject {
         config.iceServers = (iceServers ?? []).compactMap { $0 as? RTCIceServer }
         config.sdpSemantics = .unifiedPlan
 
+        if CallDebugSettings.relayOnlyIceCandidates {
+            config.iceTransportPolicy = .relay
+        }
+
         self.peerId = sessionId
         self.sid = sid ?? String(format: "%.0f", Date().timeIntervalSince1970 * 1000)
         self.isAudioOnly = audioOnly
@@ -87,7 +108,13 @@ public class NCPeerConnection: NSObject {
         super.init()
 
         let peerConnectionFactory = WebRTCCommon.shared.peerConnectionFactory
-        self.peerConnection = peerConnectionFactory.peerConnection(with: config, constraints: constraints, delegate: self)
+
+        if let verifier = NCTurnCertificateVerifier(iceServers: config.iceServers) {
+            self.turnCertificateVerifier = verifier
+            self.peerConnection = peerConnectionFactory.peerConnection(with: config, constraints: constraints, certificateVerifier: verifier, delegate: self)
+        } else {
+            self.peerConnection = peerConnectionFactory.peerConnection(with: config, constraints: constraints, delegate: self)
+        }
     }
 
     convenience init?(forPublisherWithSessionId sessionId: String, andICEServers iceServers: [Any]?, forAudioOnlyCall audioOnly: Bool) {
@@ -96,7 +123,7 @@ public class NCPeerConnection: NSObject {
     }
 
     deinit {
-        NSLog("NCPeerConnection deinit")
+        NCLog.log("NCPeerConnection deinit")
     }
 
     // MARK: - NSObject
@@ -135,7 +162,7 @@ public class NCPeerConnection: NSObject {
         NSLog("Adding a remote ICE candidate.")
         peerConnection?.add(candidate) { error in
             if error != nil {
-                NSLog("Error while adding a remote ICE candidate.")
+                NCLog.log("Error while adding a remote ICE candidate.")
             }
         }
     }
@@ -143,12 +170,12 @@ public class NCPeerConnection: NSObject {
     func drainRemoteCandidates() {
         WebRTCCommon.shared.assertQueue()
 
-        NSLog("Drain %lu remote ICE candidates.", queuedRemoteCandidates?.count ?? 0)
+        NCLog.log("Drain \(queuedRemoteCandidates?.count ?? 0) remote ICE candidates.")
 
         for candidate in queuedRemoteCandidates ?? [] {
             peerConnection?.add(candidate) { error in
                 if error != nil {
-                    NSLog("Error while adding a remote ICE candidate.")
+                    NCLog.log("Error while adding a remote ICE candidate.")
                 }
             }
         }
@@ -159,7 +186,7 @@ public class NCPeerConnection: NSObject {
     func setRemoteDescription(_ sessionDescription: RTCSessionDescription?) {
         WebRTCCommon.shared.assertQueue()
 
-        guard let sessionDescription, let sdpPreferringCodec = ARDSDPUtils.description(for: sessionDescription, preferredVideoCodec: "H264") else {
+        guard let sessionDescription, let sdpPreferringCodec = ARDSDPUtils.description(for: sessionDescription, preferredVideoCodec: preferredVideoCodec) else {
             return
         }
         peerConnection?.setRemoteDescription(sdpPreferringCodec) { [weak self] error in
@@ -170,10 +197,12 @@ public class NCPeerConnection: NSObject {
     }
 
     func sendOffer() {
+        lastOfferWasPublisherOffer = false
         sendOffer(with: defaultOfferConstraints())
     }
 
     func sendPublisherOffer() {
+        lastOfferWasPublisherOffer = true
         sendOffer(with: publisherOfferConstraints())
     }
 
@@ -195,6 +224,97 @@ public class NCPeerConnection: NSObject {
                 self?.peerConnectionDidCreateLocalSessionDescription(sdp, error: error)
             }
         }
+    }
+
+    /// Restarts ICE without a MCU: right away when the connection failed and after a short delay when it stays disconnected.
+    /// Only the side that sent the offer restarts, the other side answers the new offer.
+    func handleIceConnectionStateChange(_ newState: RTCIceConnectionState, hasMCU: Bool) {
+        WebRTCCommon.shared.assertQueue()
+
+        disconnectedRestartWorkItem?.cancel()
+        disconnectedRestartWorkItem = nil
+
+        switch newState {
+        case .connected, .completed:
+            iceRestartTracker.reset()
+            cancelRecoveryWatchdog()
+        case .failed:
+            armRecoveryWatchdogIfNeeded(hasMCU: hasMCU)
+            restartIceIfNeeded(hasMCU: hasMCU)
+        case .disconnected:
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self, self.peerConnection?.iceConnectionState == .disconnected else { return }
+
+                self.restartIceIfNeeded(hasMCU: hasMCU)
+            }
+
+            disconnectedRestartWorkItem = workItem
+            WebRTCCommon.shared.dispatch(after: NCIceRestartTracker.disconnectedDelay, workItem)
+        default:
+            break
+        }
+    }
+
+    // Safety net, if the ICE restart does not bring the connection back: Fall back to joining the call again
+    private func armRecoveryWatchdogIfNeeded(hasMCU: Bool) {
+        guard NCIceRestartTracker.shouldArmRecoveryWatchdog(hasMCU: hasMCU, isFailed: true, isAlreadyArmed: recoveryWatchdogWorkItem != nil) else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, let peerConnection = self.peerConnection else { return }
+
+            self.recoveryWatchdogWorkItem = nil
+
+            let isConnected = peerConnection.iceConnectionState == .connected || peerConnection.iceConnectionState == .completed
+            guard NCIceRestartTracker.shouldFallBackToRejoin(hasMCU: hasMCU, isConnected: isConnected) else { return }
+
+            NCLog.log("Peer \(self.peerId) did not recover from a failed ICE connection")
+            self.delegate?.peerConnectionIceRecoveryTimedOut(self)
+        }
+
+        recoveryWatchdogWorkItem = workItem
+        WebRTCCommon.shared.dispatch(after: NCIceRestartTracker.recoveryTimeout, workItem)
+    }
+
+    private func cancelRecoveryWatchdog() {
+        recoveryWatchdogWorkItem?.cancel()
+        recoveryWatchdogWorkItem = nil
+    }
+
+    /// The device changed its network (e.g. Wi-Fi to cellular): the connection is bound to the address of the old
+    /// network, so ICE is restarted at once instead of waiting for the connection to fail. Not used with a MCU, there
+    /// the call is joined again if the connection does not come back. Only the side that sent the offer restarts,
+    /// the other side recovers when the offerer restarts or through the recovery watchdog after ICE failed.
+    func restartIceAfterNetworkChange(hasMCU: Bool) {
+        WebRTCCommon.shared.assertQueue()
+
+        disconnectedRestartWorkItem?.cancel()
+        disconnectedRestartWorkItem = nil
+
+        restartIceIfNeeded(hasMCU: hasMCU, afterNetworkChange: true)
+    }
+
+    private func restartIceIfNeeded(hasMCU: Bool, afterNetworkChange: Bool = false) {
+        WebRTCCommon.shared.assertQueue()
+
+        guard let peerConnection else { return }
+
+        let isOfferer = peerConnection.localDescription?.type == .offer
+        let isSignalingStable = peerConnection.signalingState == .stable
+
+        let didStart = afterNetworkChange
+            ? iceRestartTracker.startRestartAfterNetworkChange(hasMCU: hasMCU, isOfferer: isOfferer, isSignalingStable: isSignalingStable)
+            : iceRestartTracker.startRestart(hasMCU: hasMCU, isOfferer: isOfferer, isSignalingStable: isSignalingStable)
+
+        guard didStart else {
+            if iceRestartTracker.isExhausted, !hasMCU {
+                NCLog.log("ICE restart limit reached for peer \(peerId)")
+            }
+
+            return
+        }
+
+        NCLog.log("Restarting ICE for peer \(peerId), attempt \(iceRestartTracker.attempts)")
+        sendOffer(with: iceRestartOfferConstraints())
     }
 
     func setStatusForDataChannelMessageType(_ type: String, withPayload payload: Any?) {
@@ -236,6 +356,10 @@ public class NCPeerConnection: NSObject {
 
     func close() {
         WebRTCCommon.shared.assertQueue()
+
+        disconnectedRestartWorkItem?.cancel()
+        disconnectedRestartWorkItem = nil
+        cancelRecoveryWatchdog()
 
         if let localStream = peerConnection?.localStreams.first {
             peerConnection?.remove(localStream)
@@ -311,7 +435,7 @@ public class NCPeerConnection: NSObject {
         do {
             return try JSONSerialization.jsonObject(with: jsonData) as? [AnyHashable: Any]
         } catch {
-            NSLog("Error parsing data channel message: %@", error.localizedDescription)
+            NCLog.log("Error parsing data channel message: \(error.localizedDescription)")
             return nil
         }
     }
@@ -320,7 +444,7 @@ public class NCPeerConnection: NSObject {
         do {
             return try JSONSerialization.data(withJSONObject: message)
         } catch {
-            NSLog("Error creating data channel message: %@", error.localizedDescription)
+            NCLog.log("Error creating data channel message: \(error.localizedDescription)")
             return nil
         }
     }
@@ -330,7 +454,7 @@ public class NCPeerConnection: NSObject {
 
     private func peerConnectionDidCreateLocalSessionDescription(_ sdp: RTCSessionDescription?, error: Error?) {
         if let error {
-            NSLog("Failed to create local session description for peer %@. Error: %@", peerId, error.localizedDescription)
+            NCLog.log("Failed to create local session description for peer \(peerId). Error: \(error.localizedDescription)")
             return
         }
 
@@ -340,14 +464,13 @@ public class NCPeerConnection: NSObject {
             return
         }
 
-        // Set H264 as preferred codec.
-        guard let sdpPreferringCodec = ARDSDPUtils.description(for: sdp, preferredVideoCodec: "H264") else {
+        guard let sdpPreferringCodec = ARDSDPUtils.description(for: sdp, preferredVideoCodec: preferredVideoCodec) else {
             return
         }
 
         peerConnection?.setLocalDescription(sdpPreferringCodec) { [weak self] error in
             if let error {
-                NSLog("Failed to set local session description: %@", error.localizedDescription)
+                NCLog.log("Failed to set local session description: \(error.localizedDescription)")
                 return
             }
 
@@ -366,7 +489,7 @@ public class NCPeerConnection: NSObject {
 
     private func peerConnectionDidSetRemoteSessionDescription(_ sessionDescription: RTCSessionDescription, error: Error?) {
         if let error {
-            NSLog("Failed to set remote session description for peer %@. Error: %@", peerId, error.localizedDescription)
+            NCLog.log("Failed to set remote session description for peer \(peerId). Error: \(error.localizedDescription)")
             return
         }
 
@@ -393,10 +516,10 @@ public class NCPeerConnection: NSObject {
                 transceiver.receiver.delegate = self
 
                 if isAudioOnly, transceiver.direction != .inactive {
-                    NSLog("Set video transceiver to inactive in audio only peer connection.")
+                    NCLog.log("Set video transceiver to inactive in audio only peer connection.")
                     transceiver.setDirection(.inactive, error: nil)
                 } else if !isAudioOnly, transceiver.direction == .inactive {
-                    NSLog("Reactivate inactive video transceiver to receive video again.")
+                    NCLog.log("Reactivate inactive video transceiver to receive video again.")
                     transceiver.setDirection(.recvOnly, error: nil)
                 }
             }
@@ -463,34 +586,43 @@ public class NCPeerConnection: NSObject {
     }
 
     private func defaultOfferConstraints() -> RTCMediaConstraints {
-        let mandatoryConstraints = [
-            "OfferToReceiveAudio": "true",
-            "OfferToReceiveVideo": isAudioOnly ? "false" : "true"
-        ]
-
-        let optionalConstraints = [
-            "internalSctpDataChannels": "true",
-            "DtlsSrtpKeyAgreement": "true"
-        ]
-
-        return RTCMediaConstraints(mandatoryConstraints: mandatoryConstraints, optionalConstraints: optionalConstraints)
+        return RTCMediaConstraints(mandatoryConstraints: offerMandatoryConstraints(forPublisher: false), optionalConstraints: offerOptionalConstraints)
     }
 
     private func publisherOfferConstraints() -> RTCMediaConstraints {
-        let mandatoryConstraints = [
-            "OfferToReceiveAudio": "false",
-            "OfferToReceiveVideo": "false"
-        ]
+        return RTCMediaConstraints(mandatoryConstraints: offerMandatoryConstraints(forPublisher: true), optionalConstraints: offerOptionalConstraints)
+    }
 
-        let optionalConstraints = [
+    // Use the constraints of the original offer of this peer (publisher or not), but ask for new ICE credentials
+    private func iceRestartOfferConstraints() -> RTCMediaConstraints {
+        var mandatoryConstraints = offerMandatoryConstraints(forPublisher: lastOfferWasPublisherOffer)
+        mandatoryConstraints["IceRestart"] = "true"
+
+        return RTCMediaConstraints(mandatoryConstraints: mandatoryConstraints, optionalConstraints: offerOptionalConstraints)
+    }
+
+    private func offerMandatoryConstraints(forPublisher publisher: Bool) -> [String: String] {
+        if publisher {
+            return [
+                "OfferToReceiveAudio": "false",
+                "OfferToReceiveVideo": "false"
+            ]
+        }
+
+        return [
+            "OfferToReceiveAudio": "true",
+            "OfferToReceiveVideo": isAudioOnly ? "false" : "true"
+        ]
+    }
+
+    private var offerOptionalConstraints: [String: String] {
+        return [
             "internalSctpDataChannels": "true",
             "DtlsSrtpKeyAgreement": "true"
         ]
-
-        return RTCMediaConstraints(mandatoryConstraints: mandatoryConstraints, optionalConstraints: optionalConstraints)
     }
 
-    private func stringForSignalingState(_ state: RTCSignalingState) -> String {
+    func stringForSignalingState(_ state: RTCSignalingState) -> String {
         switch state {
         case .stable:
             return "Stable"
@@ -505,7 +637,7 @@ public class NCPeerConnection: NSObject {
         }
     }
 
-    private func stringForConnectionState(_ state: RTCIceConnectionState) -> String {
+    func stringForConnectionState(_ state: RTCIceConnectionState) -> String {
         switch state {
         case .new:
             return "New"
@@ -546,12 +678,12 @@ public class NCPeerConnection: NSObject {
 extension NCPeerConnection: RTCPeerConnectionDelegate {
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
-        NSLog("Signaling state with '%@' changed to: %@", peerId, stringForSignalingState(stateChanged))
+        NCLog.log("Signaling state with '\(peerId)' changed to: \(stringForSignalingState(stateChanged))")
     }
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
         WebRTCCommon.shared.dispatch {
-            NSLog("Received %lu video tracks and %lu audio tracks from %@", stream.videoTracks.count, stream.audioTracks.count, self.peerId)
+            NCLog.log("Received \(stream.videoTracks.count) video tracks and \(stream.audioTracks.count) audio tracks from \(self.peerId)")
 
             self.remoteStream = stream
 
@@ -565,19 +697,24 @@ extension NCPeerConnection: RTCPeerConnectionDelegate {
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {
         WebRTCCommon.shared.dispatch {
-            NSLog("Stream was removed from %@", self.peerId)
+            NCLog.log("Stream was removed from \(self.peerId)")
             self.remoteStream = nil
             self.delegate?.peerConnection(self, didRemove: stream)
         }
     }
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didAdd rtpReceiver: RTCRtpReceiver, streams mediaStreams: [RTCMediaStream]) {
+        // Attached right away on the signaling thread, frames arriving before would reach the decoder encrypted
+        if let receiverKeyRing {
+            rtpReceiver.setTalkKeyRing(receiverKeyRing)
+        }
+
         WebRTCCommon.shared.dispatch {
             guard let stream = mediaStreams.first else {
                 return
             }
 
-            NSLog("Received %lu video tracks and %lu audio tracks from %@", stream.videoTracks.count, stream.audioTracks.count, self.peerId)
+            NCLog.log("Received \(stream.videoTracks.count) video tracks and \(stream.audioTracks.count) audio tracks from \(self.peerId)")
 
             self.remoteStream = stream
             self.delegate?.peerConnection(self, didAdd: stream)
@@ -586,7 +723,7 @@ extension NCPeerConnection: RTCPeerConnectionDelegate {
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove rtpReceiver: RTCRtpReceiver) {
         WebRTCCommon.shared.dispatch {
-            NSLog("Receiver was removed from %@", self.peerId)
+            NCLog.log("Receiver was removed from \(self.peerId)")
             self.remoteStream = nil
             self.delegate?.peerConnection(self, didRemove: nil)
         }
@@ -596,18 +733,18 @@ extension NCPeerConnection: RTCPeerConnectionDelegate {
         // Client initiated renegotiation is not supported. Offers are created explicitly and
         // tracks are only added to or removed from already negotiated m-lines (replaceTrack),
         // which does not require a renegotiation.
-        NSLog("Negotiation needed for peer '%@' -> ignoring", peerId)
+        NCLog.log("Negotiation needed for peer '\(peerId)' -> ignoring")
     }
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         WebRTCCommon.shared.dispatch {
-            NSLog("ICE state with '%@' changed to: %@", self.peerId, self.stringForConnectionState(newState))
+            NCLog.log("ICE state with '\(self.peerId)' changed to: \(self.stringForConnectionState(newState))")
             self.delegate?.peerConnection(self, didChange: newState)
         }
     }
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
-        NSLog("ICE gathering state with '%@' changed to : %@", peerId, stringForGatheringState(newState))
+        NCLog.log("ICE gathering state with '\(peerId)' changed to: \(stringForGatheringState(newState))")
     }
 
     public func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
@@ -624,12 +761,12 @@ extension NCPeerConnection: RTCPeerConnectionDelegate {
     public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         WebRTCCommon.shared.dispatch {
             if let remoteDataChannel = self.remoteDataChannel {
-                NSLog("Remote data channel with label '%@' exists, but received open event for data channel with label '%@'", remoteDataChannel.label, dataChannel.label)
+                NCLog.log("Remote data channel with label '\(remoteDataChannel.label)' exists, but received open event for data channel with label '\(dataChannel.label)'")
             }
 
             self.remoteDataChannel = dataChannel
             self.remoteDataChannel?.delegate = self
-            NSLog("Remote data channel '%@' was opened.", dataChannel.label)
+            NCLog.log("Remote data channel '\(dataChannel.label)' was opened.")
         }
     }
 }
@@ -641,7 +778,7 @@ extension NCPeerConnection: RTCDataChannelDelegate {
 
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         WebRTCCommon.shared.dispatch {
-            NSLog("Data channel '%@' did change state: %ld", dataChannel.label, dataChannel.readyState.rawValue)
+            NCLog.log("Data channel '\(dataChannel.label)' did change state: \(dataChannel.readyState.rawValue)")
         }
     }
 

@@ -179,12 +179,18 @@ class MessageBodyTextView: UITextView, UITextViewDelegate, UIGestureRecognizerDe
     // MARK: - UITextView delegate
 
     func textView(_ textView: UITextView, shouldInteractWith URL: URL, in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
-        if NCUtils.isInstanceRoomLink(link: URL.absoluteString) {
+        if shouldOpenChat(forLink: URL.absoluteString, interaction: interaction) {
             NCRoomsManager.shared.startChat(withRoomToken: URL.lastPathComponent)
             return false
         }
 
         return true
+    }
+
+    // Only a plain tap on a room link of this server opens the chat. A long press (.presentActions)
+    // or a preview must keep the system behavior, otherwise the context menu of the link is never shown.
+    func shouldOpenChat(forLink link: String, interaction: UITextItemInteraction) -> Bool {
+        return interaction == .invokeDefaultAction && NCUtils.isInstanceRoomLink(link: link)
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {

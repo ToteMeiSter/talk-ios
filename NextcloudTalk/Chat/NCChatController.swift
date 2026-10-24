@@ -29,10 +29,16 @@ public class NCChatController: NSObject {
     public var threadId: Int = 0
     public var hasReceivedMessagesFromServer = false
 
+    // Reference ids of the messages this process started to send. Ids are never removed: after a successful request the temporary
+    // message lives until its server copy arrives, after a failed one it becomes an offline or failed message.
+    private static let referenceIdsSentByThisProcessLock = NSLock()
+    private static var referenceIdsSentByThisProcess = Set<String>()
+
     private let account: TalkAccount
     private var stopChatMessagesPoll = false
     private var getHistoryTask: URLSessionDataTask?
     private var pullMessagesTask: URLSessionDataTask?
+    private var hasCheckedForLostTemporaryMessages = false
 
     enum ChatRelayState {
         case inactive, active, catchingUp
@@ -49,6 +55,11 @@ public class NCChatController: NSObject {
 
     // Debounces the read-marker requests we issue while receiving messages over the chat relay. Only accessed on the main queue.
     private var setReadMarkerWorkItem: DispatchWorkItem?
+
+    // Highest message id we know the server read marker of this conversation to be at (at least). It is raised when we send a
+    // read marker request and when we send a message, because the server moves the marker to our own message then. Only accessed on the main queue.
+    private var knownReadMarker = 0
+    private var pendingRelayReadMarker = 0
 
     public init!(for room: NCRoom) {
         guard let account = NCDatabaseManager.sharedInstance().talkAccount(forAccountId: room.accountId) else { return nil }
@@ -221,11 +232,7 @@ public class NCChatController: NSObject {
             // messageWithDictionary takes care of setting a potential available parentId
             guard let message = NCChatMessage(dictionary: messageDict, andAccountId: account.accountId) else { continue }
 
-            if let referenceId = message.referenceId, !referenceId.isEmpty {
-                if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage {
-                    realm.delete(managedTemporaryMessage)
-                }
-            }
+            deleteTemporaryMessage(withReferenceId: message.referenceId, with: realm)
 
             if let managedMessage = NCChatMessage.objects(where: "internalId = %@", message.internalId ?? "").firstObject() as? NCChatMessage {
                 NCChatMessage.update(managedMessage, with: message, isRoomLastMessage: false)
@@ -243,6 +250,10 @@ public class NCChatController: NSObject {
 
             let parentDict = messageDict["parent"] as? [AnyHashable: Any]
             if let parent = NCChatMessage(dictionary: parentDict, andAccountId: account.accountId) {
+                // The server copy of a message can reach us only as the parent of another message (e.g. a reply),
+                // in that case its temporary counterpart would otherwise stay in the "sending" state
+                deleteTemporaryMessage(withReferenceId: parent.referenceId, with: realm)
+
                 if let managedParentMessage = NCChatMessage.objects(where: "internalId = %@", parent.internalId ?? "").firstObject() as? NCChatMessage {
                     // updateChatMessage takes care of not setting a parentId to nil if there was one before
                     NCChatMessage.update(managedParentMessage, with: parent, isRoomLastMessage: false)
@@ -250,6 +261,14 @@ public class NCChatController: NSObject {
                     realm.add(parent)
                 }
             }
+        }
+    }
+
+    private func deleteTemporaryMessage(withReferenceId referenceId: String?, with realm: RLMRealm) {
+        guard let referenceId, !referenceId.isEmpty else { return }
+
+        if let managedTemporaryMessage = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() as? NCChatMessage {
+            realm.delete(managedTemporaryMessage)
         }
     }
 
@@ -283,18 +302,29 @@ public class NCChatController: NSObject {
         }
     }
 
-    private func updateLastChatBlock(withNewestKnown newestKnown: Int) {
-        guard newestKnown > 0 else { return }
+    /// Stores `messages` and updates the chat blocks in ONE realm transaction. The blocks claim which messages are
+    /// stored, so a process killed between two separate transactions would leave a block covering messages that were
+    /// never saved, and they would never be requested again.
+    private func storeMessages(_ messages: [[String: Any]]?, updatingChatBlocksWith updateChatBlocks: (RLMRealm) -> Void) {
+        RLMRealm.writeTransaction { realm in
+            updateChatBlocks(realm)
 
-        RLMRealm.writeTransaction { _ in
-            let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
-            if let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock, newestKnown > lastBlock.newestMessageId {
-                lastBlock.newestMessageId = newestKnown
+            if let messages, !messages.isEmpty {
+                self.storeMessages(messages.map { $0 as [AnyHashable: Any] }, with: realm)
             }
         }
     }
 
-    private func updateChatBlocks(withLastKnown lastKnown: Int) {
+    private func updateLastChatBlock(withNewestKnown newestKnown: Int) {
+        guard newestKnown > 0 else { return }
+
+        let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
+        if let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock, newestKnown > lastBlock.newestMessageId {
+            lastBlock.newestMessageId = newestKnown
+        }
+    }
+
+    private func updateChatBlocks(withLastKnown lastKnown: Int, with realm: RLMRealm) {
         if lastKnown <= 0 {
             return
         }
@@ -302,96 +332,92 @@ public class NCChatController: NSObject {
         // Safety check: prevent storing a messageId older than the thread's first message as block's oldestMessageId when in a thread controller
         let oldestMessageKnown = (isThreadController && lastKnown < threadId) ? threadId : lastKnown
 
-        RLMRealm.writeTransaction { realm in
-            let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
-            guard let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock else { return }
+        let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
+        guard let lastBlock = managedSortedBlocks.lastObject() as? NCChatBlock else { return }
 
-            let count = Int(managedSortedBlocks.count)
-            // There is more than one chat block stored
-            if count > 1 {
-                var index = count - 2
-                while index >= 0 {
-                    guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
-                        index -= 1
-                        continue
-                    }
-
-                    // Merge blocks if the lastKnown message is inside the current block
-                    if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
-                        lastBlock.oldestMessageId = block.oldestMessageId
-                        realm.delete(block)
-                        break
-                    // Update lastBlock if the lastKnown message is between the 2 blocks
-                    } else if lastKnown > block.newestMessageId {
-                        lastBlock.oldestMessageId = oldestMessageKnown
-                        break
-                    // The current block is completely included in the retrieved history
-                    // This could happen if we vary the message limit when fetching messages
-                    // Delete included block
-                    } else if lastKnown < block.oldestMessageId {
-                        realm.delete(block)
-                    }
-
+        let count = Int(managedSortedBlocks.count)
+        // There is more than one chat block stored
+        if count > 1 {
+            var index = count - 2
+            while index >= 0 {
+                guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
                     index -= 1
+                    continue
                 }
-            // There is just one chat block stored
-            } else {
-                lastBlock.oldestMessageId = oldestMessageKnown
+
+                // Merge blocks if the lastKnown message is inside the current block
+                if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
+                    lastBlock.oldestMessageId = block.oldestMessageId
+                    realm.delete(block)
+                    break
+                // Update lastBlock if the lastKnown message is between the 2 blocks
+                } else if lastKnown > block.newestMessageId {
+                    lastBlock.oldestMessageId = oldestMessageKnown
+                    break
+                // The current block is completely included in the retrieved history
+                // This could happen if we vary the message limit when fetching messages
+                // Delete included block
+                } else if lastKnown < block.oldestMessageId {
+                    realm.delete(block)
+                }
+
+                index -= 1
             }
+        // There is just one chat block stored
+        } else {
+            lastBlock.oldestMessageId = oldestMessageKnown
         }
     }
 
-    private func updateChatBlocks(withReceivedMessages messages: [[String: Any]]?, newestKnown: Int, andLastKnown lastKnown: Int) {
+    private func updateChatBlocks(withReceivedMessages messages: [[String: Any]]?, newestKnown: Int, andLastKnown lastKnown: Int, with realm: RLMRealm) {
         let sortedMessages = sortedMessages(fromMessageArray: messages)
         let newestMessageReceived = sortedMessages.last
         let newestMessageKnown = newestKnown > 0 ? newestKnown : (newestMessageReceived?.messageId ?? 0)
         // Safety check: prevent storing a messageId older than the thread's first message as block's oldestMessageId when in a thread controller
         let oldestMessageKnown = (isThreadController && lastKnown < threadId) ? threadId : lastKnown
 
-        RLMRealm.writeTransaction { realm in
-            let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
+        let managedSortedBlocks = self.managedSortedBlocksForRoomOrThread()
 
-            // Create new chat block
-            let newBlock = NCChatBlock()
-            newBlock.internalId = self.room.internalId
-            newBlock.accountId = self.room.accountId
-            newBlock.token = self.room.token
-            newBlock.threadId = self.threadId
-            newBlock.oldestMessageId = oldestMessageKnown
-            newBlock.newestMessageId = newestMessageKnown
-            newBlock.hasHistory = true
+        // Create new chat block
+        let newBlock = NCChatBlock()
+        newBlock.internalId = self.room.internalId
+        newBlock.accountId = self.room.accountId
+        newBlock.token = self.room.token
+        newBlock.threadId = self.threadId
+        newBlock.oldestMessageId = oldestMessageKnown
+        newBlock.newestMessageId = newestMessageKnown
+        newBlock.hasHistory = true
 
-            let count = Int(managedSortedBlocks.count)
-            // There is at least one chat block stored
-            if count > 0 {
-                var index = count - 1
-                while index >= 0 {
-                    guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
-                        index -= 1
-                        continue
-                    }
-
-                    // Merge blocks if the lastKnown message is inside the current block
-                    if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
-                        block.newestMessageId = newestMessageKnown
-                        break
-                    // Add new block if it didn't reach the previous block
-                    } else if lastKnown > block.newestMessageId {
-                        realm.add(newBlock)
-                        break
-                    // The current block is completely included in the retrieved history
-                    // This could happen if we vary the message limit when fetching messages
-                    // Delete included block
-                    } else if lastKnown < block.oldestMessageId {
-                        realm.delete(block)
-                    }
-
+        let count = Int(managedSortedBlocks.count)
+        // There is at least one chat block stored
+        if count > 0 {
+            var index = count - 1
+            while index >= 0 {
+                guard let block = managedSortedBlocks.object(at: UInt(index)) as? NCChatBlock else {
                     index -= 1
+                    continue
                 }
-            // No chat blocks stored yet, add new chat block
-            } else {
-                realm.add(newBlock)
+
+                // Merge blocks if the lastKnown message is inside the current block
+                if lastKnown >= block.oldestMessageId, lastKnown <= block.newestMessageId {
+                    block.newestMessageId = newestMessageKnown
+                    break
+                // Add new block if it didn't reach the previous block
+                } else if lastKnown > block.newestMessageId {
+                    realm.add(newBlock)
+                    break
+                // The current block is completely included in the retrieved history
+                // This could happen if we vary the message limit when fetching messages
+                // Delete included block
+                } else if lastKnown < block.oldestMessageId {
+                    realm.delete(block)
+                }
+
+                index -= 1
             }
+        // No chat blocks stored yet, add new chat block
+        } else {
+            realm.add(newBlock)
         }
     }
 
@@ -593,7 +619,7 @@ public class NCChatController: NSObject {
         }
 
         if message.systemMessage == "reaction" || message.systemMessage == "reaction_revoked" || message.systemMessage == "reaction_deleted" {
-            handleReactionRelayMessage(message, withDict: messageDict, lastNewestMessageId: lastNewestMessageId)
+            storeRelayMessage(message, storableDict: messageDict, lastNewestMessageId: lastNewestMessageId)
             return
         }
 
@@ -648,15 +674,25 @@ public class NCChatController: NSObject {
     // the reaction relay paths funnel through here so the chat block, the stored message, the new-message
     // notification and the read marker stay in sync.
     private func storeRelayMessage(_ message: NCChatMessage, storableDict: [String: Any], lastNewestMessageId: Int) {
-        updateLastChatBlock(withNewestKnown: message.messageId)
-        storeMessages([storableDict])
+        storeMessages([keepingStoredReactionsSelf(in: storableDict, for: message)], updatingChatBlocksWith: { _ in
+            self.updateLastChatBlock(withNewestKnown: message.messageId)
+        })
         checkForNewMessages(fromMessageId: lastNewestMessageId)
 
         // We only reach this point while the chat relay is active (these methods are only called in the
         // `.active` state), which is the relay equivalent of polling the chat API with setReadMarker
         // enabled. Since relay messages are not fetched over the chat API, the read marker is no longer
         // advanced as a side effect, so we have to set it explicitly to keep the same behaviour.
-        setChatRelayReadMarker(toMessageId: message.messageId)
+        // The relay delivers messages out of order too, so the marker must be derived from the newest known message and not
+        // from the one that just arrived, otherwise it could be set below messages that were already read or sent by us
+        let newestKnownMessageId = chatBlocksForRoomOrThread().last?.newestMessageId ?? 0
+        setChatRelayReadMarker(toMessageId: max(message.messageId, newestKnownMessageId))
+    }
+
+    // Returns the message id to send as read marker, or nil if the server marker is already at or above the candidate.
+    // The read marker must never be lowered: the server also moves it by itself, e.g. to our own message when we send one.
+    static func relayReadMarkerToSend(candidate: Int, knownReadMarker: Int) -> Int? {
+        return candidate > knownReadMarker ? candidate : nil
     }
 
     // Marks the newest message received over the chat relay as read on the server. Requests are
@@ -664,16 +700,36 @@ public class NCChatController: NSObject {
     // results in a single /read request for the newest message.
     private func setChatRelayReadMarker(toMessageId messageId: Int) {
         DispatchQueue.main.async {
+            self.pendingRelayReadMarker = max(self.pendingRelayReadMarker, messageId)
+
+            guard NCChatController.relayReadMarkerToSend(candidate: self.pendingRelayReadMarker, knownReadMarker: self.knownReadMarker) != nil else { return }
+
             self.setReadMarkerWorkItem?.cancel()
 
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
 
-                NCAPIController.sharedInstance().setChatReadMarker(messageId, inRoom: self.room.token, forAccount: self.account) { error in
-                    guard error == nil else { return }
+                // Evaluate again, the marker could have been raised by sending a message in the meantime
+                guard let messageId = NCChatController.relayReadMarkerToSend(candidate: self.pendingRelayReadMarker, knownReadMarker: self.knownReadMarker) else { return }
+
+                let previousKnownReadMarker = self.knownReadMarker
+                self.knownReadMarker = messageId
+
+                NCAPIController.sharedInstance().setChatReadMarker(messageId, inRoom: self.room.token, forAccount: self.account) { error, lastCommonReadMessage in
+                    guard error == nil else {
+                        DispatchQueue.main.async {
+                            // The request failed, so the server marker was not moved. Allow to send it again with the next message
+                            if self.knownReadMarker == messageId {
+                                self.knownReadMarker = previousKnownReadMarker
+                            }
+                        }
+
+                        return
+                    }
 
                     // Keep our local room in sync so the unread indicators stay correct
                     NCRoomsManager.shared.updateLastReadMessage(messageId, forRoom: self.room)
+                    self.checkLastCommonReadMessage(lastCommonReadMessage)
                 }
             }
 
@@ -719,36 +775,54 @@ public class NCChatController: NSObject {
         return messageDict
     }
 
-    // Handles reaction system messages received via the chat relay. The relay broadcasts reactionsSelf
-    // from the actor's perspective (not per-user), so we replace it with the correct value computed
-    // from the current DB state plus the self-actor delta before passing to storeMessages — mirroring
-    // the web's fromRealtime reactionsSelf computation in messagesStore.js (PR #16349).
-    private func handleReactionRelayMessage(_ message: NCChatMessage, withDict messageDict: [String: Any], lastNewestMessageId: Int) {
-        var storableDict = messageDict
+    // The relay never carries reactionsSelf, as it differs per attendee, so storing a relayed message or its
+    // parent as-is would drop our own reactions. Keep the stored ones, and add or remove the emoji of our own
+    // reaction events.
+    private func keepingStoredReactionsSelf(in messageDict: [String: Any], for message: NCChatMessage) -> [String: Any] {
+        var messageDict = messageDict
 
-        if var parentDict = messageDict["parent"] as? [String: Any] {
-            var selfReactions: [String] = []
-            if let parentId = message.parentId,
-               let parentInDB = NCChatMessage.objects(where: "internalId = %@", parentId).firstObject() as? NCChatMessage,
-               let jsonString = parentInDB.reactionsSelfJSONString, !jsonString.isEmpty,
-               let data = jsonString.data(using: .utf8),
-               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String] {
-                selfReactions = parsed
-            }
+        if let reactionsSelf = storedReactionsSelf(ofMessageWithInternalId: message.internalId) {
+            messageDict["reactionsSelf"] = reactionsSelf
+        }
+
+        guard var parentDict = messageDict["parent"] as? [String: Any] else { return messageDict }
+
+        var parentReactionsSelf = storedReactionsSelf(ofMessageWithInternalId: message.parentId)
+
+        if message.systemMessage == "reaction" || message.systemMessage == "reaction_revoked" || message.systemMessage == "reaction_deleted" {
+            // Also when the parent isn't stored yet, so our own reaction is still marked on it
+            var ownReactions = parentReactionsSelf ?? []
 
             if message.isMessage(from: account.userId), let emoji = message.message, !emoji.isEmpty {
-                if message.systemMessage == "reaction" && !selfReactions.contains(emoji) {
-                    selfReactions.append(emoji)
+                if message.systemMessage == "reaction", !ownReactions.contains(emoji) {
+                    ownReactions.append(emoji)
                 } else if message.systemMessage == "reaction_revoked" {
-                    selfReactions.removeAll { $0 == emoji }
+                    ownReactions.removeAll { $0 == emoji }
                 }
             }
 
-            parentDict["reactionsSelf"] = selfReactions
-            storableDict["parent"] = parentDict
+            parentReactionsSelf = ownReactions
         }
 
-        storeRelayMessage(message, storableDict: storableDict, lastNewestMessageId: lastNewestMessageId)
+        if let parentReactionsSelf {
+            parentDict["reactionsSelf"] = parentReactionsSelf
+            messageDict["parent"] = parentDict
+        }
+
+        return messageDict
+    }
+
+    /// nil when the message isn't stored, empty when it is but has none of our reactions
+    private func storedReactionsSelf(ofMessageWithInternalId internalId: String?) -> [String]? {
+        guard let internalId,
+              let storedMessage = NCChatMessage.objects(where: "internalId = %@", internalId).firstObject() as? NCChatMessage
+        else { return nil }
+
+        guard let data = storedMessage.reactionsSelfJSONString?.data(using: .utf8),
+              let reactionsSelf = try? JSONSerialization.jsonObject(with: data) as? [String]
+        else { return [] }
+
+        return reactionsSelf
     }
 
     @objc private func didReconnectExternalSignaling(_ notification: Notification) {
@@ -790,6 +864,93 @@ public class NCChatController: NSObject {
         return sortedMessages
     }
 
+    /// `sendChatMessage` resets `isOfflineMessage` before the request to prevent duplicates. If the process is killed during the request,
+    /// the text message is neither offline nor failed and nothing would send or fail it. We can't resend it automatically
+    /// as the request might have reached the server, so the user is asked to decide.
+    ///
+    /// This must only run once we caught up with the server: by then `storeMessages` removed every temporary message whose
+    /// server copy (same referenceId) was received, so what is left and was not started by this process was really lost.
+    /// Before that, a message whose request did arrive can't be told apart from a lost one.
+    ///
+    /// Messages with a file (file or voice message placeholders) are not touched, they are no text request.
+    /// Only messages created before `createdBefore` are considered, a message created later might not be sent yet.
+    ///
+    /// A lost message of a thread is only marked while the chat controller of this thread pulls, so when that thread is opened.
+    func failTemporaryMessagesLostByKilledProcess(createdBefore: Int) {
+        // Without a referenceId the server copy doesn't remove the temporary message, so we couldn't tell lost from sent
+        guard NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: room) else { return }
+
+        let query = NSPredicate(format: "accountId = %@ AND token = %@ AND threadId = %ld AND isTemporary = true AND isOfflineMessage = false AND sendingFailed = false AND timestamp < %ld", account.accountId, room.token, threadId, createdBefore)
+        // The results are live and shrink while we mark messages as failed, so iterate over a copy
+        var lostMessages: [NCChatMessage] = []
+        for case let candidate as NCChatMessage in NCChatMessage.objects(with: query) {
+            guard !candidate.hasFileParameter, !candidate.isVoiceMessage,
+                  let referenceId = candidate.referenceId, !referenceId.isEmpty,
+                  !NCChatController.wasSendStartedByThisProcess(referenceId: referenceId)
+            else { continue }
+
+            lostMessages.append(candidate)
+        }
+
+        guard !lostMessages.isEmpty else { return }
+
+        // The messages are modified in a single transaction. Another thread might have removed or changed a message since we read it,
+        // so the state is checked again and only the messages really modified are reported.
+        var notifications: [(referenceId: String, message: String)] = []
+
+        RLMRealm.writeTransaction { _ in
+            for lostMessage in lostMessages {
+                guard !lostMessage.isInvalidated, !lostMessage.sendingFailed, !lostMessage.isOfflineMessage else { continue }
+
+                notifications.append((referenceId: lostMessage.referenceId ?? "", message: lostMessage.message ?? ""))
+                lostMessage.isOfflineMessage = false
+                lostMessage.sendingFailed = true
+            }
+        }
+
+        guard !notifications.isEmpty else { return }
+
+        NCLog.log("Marked \(notifications.count) temporary messages as failed, their request was lost with a killed process")
+
+        // Inform the chatViewController, the same way as a failed request does it
+        for lostMessage in notifications {
+            let userInfo: [AnyHashable: Any] = [
+                "message": lostMessage.message,
+                "referenceId": lostMessage.referenceId,
+                "isOfflineMessage": false,
+                "error": OcsError(withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost), withTask: nil)
+            ]
+
+            NotificationCenter.default.post(name: .NCChatControllerDidSendChatMessage, object: self, userInfo: userInfo)
+        }
+    }
+
+    /// We caught up with the server only when it had nothing new (304). A 200 answer never proves it, even with less than a full page:
+    /// the server drops invisible messages after applying the limit, so more messages might follow, including the server copy
+    /// of a temporary message. A 200 answer is always followed by a next pull, which ends with a 304.
+    /// This is decided once per controller: everything this process sends afterwards is in the set of started sends,
+    /// so there are no new candidates later.
+    func failLostTemporaryMessagesIfCaughtUp(statusCode: Int, requestTimestamp: Int) {
+        guard !hasCheckedForLostTemporaryMessages, statusCode == 304 else { return }
+
+        hasCheckedForLostTemporaryMessages = true
+        failTemporaryMessagesLostByKilledProcess(createdBefore: requestTimestamp)
+    }
+
+    private static func wasSendStartedByThisProcess(referenceId: String) -> Bool {
+        referenceIdsSentByThisProcessLock.lock()
+        defer { referenceIdsSentByThisProcessLock.unlock() }
+
+        return referenceIdsSentByThisProcess.contains(referenceId)
+    }
+
+    static func markAsSentByThisProcess(referenceId: String) {
+        referenceIdsSentByThisProcessLock.lock()
+        defer { referenceIdsSentByThisProcessLock.unlock() }
+
+        referenceIdsSentByThisProcess.insert(referenceId)
+    }
+
     public func updateHistoryInBackground(completion: ((_ error: OcsError?) -> Void)?) {
         // If there's a pull task running right now, we should not interfere with that
         if let pullMessagesTask, pullMessagesTask.state == .running {
@@ -818,10 +979,7 @@ public class NCChatController: NSObject {
             if let error {
                 NSLog("Could not get background chat history. Error: \(error.description)")
             } else {
-                // Update chat blocks
-                self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
-
-                // Store new messages
+                // Update chat blocks and store new messages in one transaction
                 if let messages, !messages.isEmpty {
                     // In case we finish after the app already got active again, notify any potential view controller
                     var userInfo: [AnyHashable: Any] = [:]
@@ -839,10 +997,16 @@ public class NCChatController: NSObject {
                         }
                     }
 
-                    self.storeMessages(messages)
+                    self.storeMessages(messages, updatingChatBlocksWith: { _ in
+                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+                    })
                     self.checkLastCommonReadMessage(lastCommonReadMessage)
 
                     NotificationCenter.default.post(name: .NCChatControllerDidReceiveMessagesInBackground, object: self, userInfo: userInfo)
+                } else {
+                    self.storeMessages(nil, updatingChatBlocksWith: { _ in
+                        self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+                    })
                 }
             }
 
@@ -1088,16 +1252,16 @@ public class NCChatController: NSObject {
             // Update chat blocks
             // Only store a new block when getting initial history and we are in the first iteration.
             // Otherwise, only update the chat blocks with history messages ("backwards").
-            if forInitialChatHistory, isFirstIteration {
-                self.updateChatBlocks(withReceivedMessages: messages, newestKnown: messageId, andLastKnown: lastKnownMessage)
-            } else {
-                self.updateChatBlocks(withLastKnown: lastKnownMessage)
-            }
+            // The blocks and the new messages are written in one transaction
+            self.storeMessages(messages, updatingChatBlocksWith: { realm in
+                if forInitialChatHistory, isFirstIteration {
+                    self.updateChatBlocks(withReceivedMessages: messages, newestKnown: messageId, andLastKnown: lastKnownMessage, with: realm)
+                } else {
+                    self.updateChatBlocks(withLastKnown: lastKnownMessage, with: realm)
+                }
+            })
 
-            // Store new messages
             if let messages, !messages.isEmpty {
-                self.storeMessages(messages)
-
                 let lastChatBlock = self.chatBlocksForRoomOrThread().last
                 // For initial chat history: always get batch from last chat block's newest message, even if it's not the first iteration.
                 // For history batch: get batch from the passed messageId. If it's not the first iteration, we will just skip invisible messages
@@ -1180,71 +1344,79 @@ public class NCChatController: NSObject {
         // sticks, regardless of the queue interleaving.
         guard !stopChatMessagesPoll else { return }
         pullMessagesTask?.cancel()
+        let requestTimestamp = Int(Date().timeIntervalSince1970)
         pullMessagesTask = NCAPIController.sharedInstance().receiveChatMessages(ofRoom: room.token, fromLastMessageId: messageId, inThread: threadId, history: false, includeLastMessage: false, timeout: timeout, limit: NCAPIController.shared.kReceivedChatMessagesLimit, lastCommonReadMessage: room.lastCommonReadMessage, setReadMarker: true, markNotificationsAsRead: true, forAccount: account) { messages, lastKnownMessage, lastCommonReadMessage, error, statusCode in
             if self.stopChatMessagesPoll {
                 return
             }
 
-            if let error {
-                if self.isChatBeingBlocked(statusCode) {
-                    self.resetChatRelayState()
-                    self.notifyChatIsBlocked()
-                    return
-                }
+            self.handlePullResponse(messages: messages, lastKnownMessage: lastKnownMessage, lastCommonReadMessage: lastCommonReadMessage, error: error, statusCode: statusCode, fromMessageId: messageId, requestTimestamp: requestTimestamp)
+        }
+    }
 
-                if statusCode == 404 {
-                    NCLog.log("Thread not found error: \(error.description)")
-                    self.resetChatRelayState()
-                    NotificationCenter.default.post(name: .NCChatControllerDidReceiveThreadNotFound, object: self, userInfo: nil)
-                    return
-                }
+    /// The handling of an answer of the pull request, in an own method so it can be tested
+    func handlePullResponse(messages: [[String: Any]]?, lastKnownMessage: Int, lastCommonReadMessage: Int, error: OcsError?, statusCode: Int, fromMessageId messageId: Int, requestTimestamp: Int) {
+        if let error {
+            if self.isChatBeingBlocked(statusCode) {
+                self.resetChatRelayState()
+                self.notifyChatIsBlocked()
+                return
+            }
 
-                if statusCode == 429 {
-                    NCLog.log("Brute-force protected, received 429 while receiving messages. No further polling.")
-                    self.resetChatRelayState()
-                    return
-                }
+            if statusCode == 404 {
+                NCLog.log("Thread not found error: \(NCLog.errorCode(error))")
+                self.resetChatRelayState()
+                NotificationCenter.default.post(name: .NCChatControllerDidReceiveThreadNotFound, object: self, userInfo: nil)
+                return
+            }
 
-                if statusCode != 304, error.underlyingError.code != NSURLErrorCancelled  {
-                    NCLog.log("Could not get new chat messages. Error: \(error.description)")
-                }
-            } else {
-                // Update last chat block
+            if statusCode == 429 {
+                NCLog.log("Brute-force protected, received 429 while receiving messages. No further polling.")
+                self.resetChatRelayState()
+                return
+            }
+
+            if statusCode != 304, error.underlyingError.code != NSURLErrorCancelled  {
+                NCLog.log("Could not get new chat messages. Error: \(NCLog.errorCode(error))")
+            }
+        } else {
+            // Update last chat block and store new messages in one transaction
+            self.storeMessages(messages, updatingChatBlocksWith: { _ in
                 self.updateLastChatBlock(withNewestKnown: lastKnownMessage)
+            })
 
-                // Store new messages
-                if let messages, !messages.isEmpty {
-                    self.storeMessages(messages)
-                    self.checkForNewMessages(fromMessageId: messageId)
+            if let messages, !messages.isEmpty {
+                self.checkForNewMessages(fromMessageId: messageId)
 
-                    for messageDict in messages {
-                        let message = NCChatMessage(dictionary: messageDict as [AnyHashable: Any], andAccountId: self.account.accountId)
+                for messageDict in messages {
+                    let message = NCChatMessage(dictionary: messageDict as [AnyHashable: Any], andAccountId: self.account.accountId)
 
-                        // When we receive a "history_cleared" message, we don't continue here, as otherwise
-                        // we would request new messages, but instead, we need to request the initial history again
-                        if message?.systemMessage == "history_cleared" {
-                            self.resetChatRelayState()
-                            return
-                        }
+                    // When we receive a "history_cleared" message, we don't continue here, as otherwise
+                    // we would request new messages, but instead, we need to request the initial history again
+                    if message?.systemMessage == "history_cleared" {
+                        self.resetChatRelayState()
+                        return
                     }
                 }
             }
+        }
 
-            self.hasReceivedMessagesFromServer = true
+        self.hasReceivedMessagesFromServer = true
 
-            self.checkLastCommonReadMessage(lastCommonReadMessage)
+        self.failLostTemporaryMessagesIfCaughtUp(statusCode: statusCode, requestTimestamp: requestTimestamp)
 
-            if error?.underlyingError.code != NSURLErrorCancelled {
-                let chatIsUpToDate = statusCode == 304
-                let lastChatBlock = self.chatBlocksForRoomOrThread().last
+        self.checkLastCommonReadMessage(lastCommonReadMessage)
 
-                if chatIsUpToDate, self.externalSignalingController?.hasChatRelay == true {
-                    self.handOverPollingToChatRelay(fromMessagesId: lastChatBlock?.newestMessageId ?? 0)
-                    return
-                }
+        if error?.underlyingError.code != NSURLErrorCancelled {
+            let chatIsUpToDate = statusCode == 304
+            let lastChatBlock = self.chatBlocksForRoomOrThread().last
 
-                self.startReceivingChatMessages(fromMessagesId: lastChatBlock?.newestMessageId ?? 0, withTimeout: chatIsUpToDate)
+            if chatIsUpToDate, self.externalSignalingController?.hasChatRelay == true {
+                self.handOverPollingToChatRelay(fromMessagesId: lastChatBlock?.newestMessageId ?? 0)
+                return
             }
+
+            self.startReceivingChatMessages(fromMessagesId: lastChatBlock?.newestMessageId ?? 0, withTimeout: chatIsUpToDate)
         }
     }
 
@@ -1277,6 +1449,9 @@ public class NCChatController: NSObject {
         var retryCount = 0
 
         if let referenceId {
+            // Before the offline flag is reset, so failTemporaryMessagesLostByKilledProcess can't see the message in between as lost
+            NCChatController.markAsSentByThisProcess(referenceId: referenceId)
+
             // Reset offline message flag before retrying to send to prevent race conditions and
             // possible ending up with multiple identical messages sent
             transactionForMessage(withReferenceId: referenceId) { message in
@@ -1285,7 +1460,15 @@ public class NCChatController: NSObject {
             }
         }
 
-        NCAPIController.sharedInstance().sendChatMessage(message, toRoom: room.token, threadTitle: nil, replyTo: replyTo, replyToToken: replyToToken, referenceId: referenceId, silently: silently, forAccount: account) { error in
+        NCAPIController.sharedInstance().sendChatMessageReturningId(message, toRoom: room.token, threadTitle: nil, replyTo: replyTo, replyToToken: replyToToken, referenceId: referenceId, silently: silently, forAccount: account) { sentMessageId, error in
+            if error == nil, let sentMessageId {
+                // The server moves the read marker to our own message ("replied = read"). A marker request for an
+                // older message, that is still pending or arrives afterwards, would lower it again.
+                DispatchQueue.main.async {
+                    self.knownReadMarker = max(self.knownReadMarker, sentMessageId)
+                }
+            }
+
             if let referenceId {
                 userInfo["referenceId"] = referenceId
             }
@@ -1312,7 +1495,7 @@ public class NCChatController: NSObject {
                     }
                 }
 
-                NCLog.log("Could not send chat message. Error: \(error.description)")
+                NCLog.log("Could not send chat message. Error: \(NCLog.errorCode(error))")
             } else {
                 NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
             }
@@ -1362,7 +1545,7 @@ public class NCChatController: NSObject {
                 try await ChatFileUploader.upload(upload)
                 NCLog.log("Successfully uploaded and shared voice message.")
             } catch {
-                NCLog.log("Failed to upload voice message. Error: \(error.localizedDescription)")
+                NCLog.log("Failed to upload voice message. Error: \(NCLog.errorCode(error))")
             }
         }
     }

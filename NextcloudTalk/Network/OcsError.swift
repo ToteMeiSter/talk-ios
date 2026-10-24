@@ -5,7 +5,7 @@
 
 import Foundation
 
-@objcMembers public class OcsError: NSObject, CustomNSError {
+@objcMembers public class OcsError: NSObject, CustomNSError, LocalizedError {
 
     let underlyingError: NSError
     let task: URLSessionDataTask?
@@ -47,6 +47,11 @@ import Foundation
         return [ "ocsError": self ]
     }
 
+    // Without this, localizedDescription is the generic "(NextcloudTalk.OcsError error 1.)"
+    public var errorDescription: String? {
+        return underlyingError.localizedDescription
+    }
+
     public override var description: String {
         return underlyingError.description
     }
@@ -59,5 +64,12 @@ import Foundation
     // Convenience factory for a generic error without an underlying network request
     public static func genericError() -> OcsError {
         return OcsError(withError: NSError(domain: NSCocoaErrorDomain, code: 0, userInfo: nil), withTask: nil)
+    }
+}
+
+extension OcsError: NCLogDescribable {
+    // The description of the underlying error holds the URL of the request and the headers of the answer
+    public var logDescription: String {
+        return "OcsError http \(responseStatusCode), \(underlyingError.domain) \(underlyingError.code)"
     }
 }

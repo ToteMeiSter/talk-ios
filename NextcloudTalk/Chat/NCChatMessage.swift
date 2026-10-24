@@ -49,6 +49,11 @@ import SwiftyAttributes
         return self.messageType == kMessageTypeVoiceMessage
     }
 
+    /// True if at least one message parameter is a file. `file()` can't be used for this, it returns nil if there is more than one.
+    public var hasFileParameter: Bool {
+        return self.messageParameters.values.contains { ($0 as? [String: Any])?["type"] as? String == "file" }
+    }
+
     public var isCommandMessage: Bool {
         return self.messageType == kMessageTypeCommand
     }
@@ -83,7 +88,7 @@ import SwiftyAttributes
         commentDeletion = commentDeletion && !self.isObjectShare
 
         // Check server capability for files or shared objects
-        var objectDeletion = NCDatabaseManager.sharedInstance().serverHasTalkCapability(.richObjectDelete)
+        var objectDeletion = NCDatabaseManager.sharedInstance().serverHasTalkCapability(.richObjectDelete, forAccountId: account.accountId)
         objectDeletion = objectDeletion && (self.file() != nil || self.isVoiceMessage || self.isObjectShare)
 
         // Check if user is allowed to delete a message
@@ -97,6 +102,22 @@ import SwiftyAttributes
         let deletionAllowedByTime = noTimeLimitForMessageDeletion || (self.timestamp >= sixHoursAgoTimestamp)
 
         return serverCanDeleteMessage && userCanDeleteMessage && deletionAllowedByTime
+    }
+
+    /// Whether a reply can be started for the message, regardless of the room it is in.
+    public var canBeRepliedTo: Bool {
+        return self.isReplyable && !self.isDeleting
+    }
+
+    /// Condition for the "Reply" entry of the message menu, shared with the media viewer.
+    public func canReply(in room: NCRoom) -> Bool {
+        return self.canBeRepliedTo && room.canChat
+    }
+
+    /// Condition for the "Delete" entry of the message menu, shared with the media viewer.
+    /// A message that failed to send or was never sent can always be discarded.
+    public func canDelete(for account: TalkAccount, in room: NCRoom) -> Bool {
+        return self.sendingFailed || self.isOfflineMessage || (self.isDeletable(for: account, in: room) && room.canChat)
     }
 
     public func isEditable(for account: TalkAccount, in room: NCRoom) -> Bool {

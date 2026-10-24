@@ -75,6 +75,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
         // Init rooms manager to start receiving NSNotificationCenter notifications
         _ = NCRoomsManager.shared
 
+        // Pick up the uploads of files that carried on, or ended, while the app was not running
+        ChatBackgroundUploader.shared.start()
+
         self.registerBackgroundFetchTask()
         self.registerBackgroundProcessingTask()
 
@@ -92,6 +95,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
 
         return true
+    }
+
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        ChatBackgroundUploader.shared.handleEventsForBackgroundSession(identifier: identifier, completionHandler: completionHandler)
     }
 
     func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
@@ -276,6 +283,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
         let signature = userInfo["signature"] as? String
 
         guard let message, let signature else {
+            // Not a push we can handle, but iOS still expects the completion handler to be called
+            completionHandler(.noData)
             return
         }
 
