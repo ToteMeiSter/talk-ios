@@ -499,4 +499,36 @@ final class UIRoomTest: XCTestCase {
         let menuShown = app.descendants(matching: .any)["Add reaction"].waitForExistence(timeout: TestConstants.timeoutShort) || app.buttons["Reply"].exists
         XCTAssert(menuShown)
     }
+
+    func testMessageSelectionLastRowNotUnderToolbar() {
+        let app = launchAndLogin()
+
+        self.createConversation(for: app, with: "SelectionLayout")
+
+        for index in 0..<14 {
+            self.sendSelectionTestMessage("Row\(index)", in: app)
+            sleep(2)
+        }
+
+        sleep(3)
+
+        let sentCells = app.cells.matching(identifier: "CellMessageSent").allElementsBoundByIndex.filter { $0.frame.maxY < app.frame.maxY && $0.frame.height > 0 }
+        let lowest = sentCells.max { $0.frame.maxY < $1.frame.maxY }
+        let lowestCell = lowest ?? app.cells["CellMessageSent"]
+
+        lowestCell.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).press(forDuration: 1.5)
+        XCTAssert(app.staticTexts["1 selected"].waitForExistence(timeout: TestConstants.timeoutShort))
+
+        let toolbar = app.toolbars.firstMatch
+        XCTAssert(toolbar.exists)
+        sleep(1)
+
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        // The newest message must stay above the action bar
+        let newest = app.cells.matching(identifier: "CellMessageSent").allElementsBoundByIndex.filter { $0.frame.height > 0 }.max { $0.frame.maxY < $1.frame.maxY }
+        XCTAssertLessThanOrEqual(newest?.frame.maxY ?? 0, toolbar.frame.minY + 1, "The newest row is under the action bar: row bottom \(newest?.frame.maxY ?? 0), toolbar top \(toolbar.frame.minY)")
+    }
 }
