@@ -476,13 +476,11 @@ final class UIRoomTest: XCTestCase {
         // Copy leaves the mode, too
         first.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).press(forDuration: 1.5)
         XCTAssert(app.staticTexts["1 selected"].waitForExistence(timeout: TestConstants.timeoutShort))
+        // The buttons of the toolbar are reported as not enabled by XCUITest since iOS 26 although they work, so the
+        // button is tapped without waiting for "enabled"
         let copyButton = app.toolbars.buttons["Copy"]
-        XCTContext.runActivity(named: "DIAG2 copy exists=\(copyButton.exists) enabled=\(copyButton.isEnabled) hittable=\(copyButton.isHittable) frame=\(copyButton.frame) count=\(app.toolbars.buttons.matching(identifier: "Copy").count) keyboards=\(app.keyboards.count) inputbar=\(app.otherElements["SLKTextInputbar"].exists)") { activity in
-            let shot = XCTAttachment(screenshot: app.screenshot())
-            shot.lifetime = .keepAlways
-            activity.add(shot)
-        }
-        waitForReady(object: app.toolbars.buttons["Copy"]).tap()
+        XCTAssert(copyButton.waitForExistence(timeout: TestConstants.timeoutShort))
+        copyButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertFalse(app.toolbars.buttons["Copy"].waitForExistence(timeout: TestConstants.timeoutShort))
     }
 
@@ -497,6 +495,8 @@ final class UIRoomTest: XCTestCase {
 
         // The menu opens at the touch point; its first page holds the reactions, "Reply" is on the next page
         cell.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
-        XCTAssert(app.descendants(matching: .any)["Add reaction"].waitForExistence(timeout: TestConstants.timeoutShort))
+        // Servers without reactions (stable23) start the menu with "Reply"
+        let menuShown = app.descendants(matching: .any)["Add reaction"].waitForExistence(timeout: TestConstants.timeoutShort) || app.buttons["Reply"].exists
+        XCTAssert(menuShown)
     }
 }
