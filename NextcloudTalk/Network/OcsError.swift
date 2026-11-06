@@ -8,10 +8,11 @@ import Foundation
 @objcMembers public class OcsError: NSObject, CustomNSError, LocalizedError {
 
     let underlyingError: NSError
+    private let responseError: NCHTTPResponseError?
     let task: URLSessionDataTask?
 
     lazy var responseDict: [String: AnyObject]? = {
-        guard let errorData = underlyingError.userInfo[AFNetworkingOperationFailingURLResponseDataErrorKey] as? Data,
+        guard let errorData = responseError?.data,
               let errorDict = try? JSONSerialization.jsonObject(with: errorData) as? [AnyHashable: Any]
         else { return nil }
 
@@ -19,6 +20,9 @@ import Foundation
     }()
 
     lazy var responseStatusCode: Int = {
+        if let responseError {
+            return responseError.response.statusCode
+        }
         guard let response = task?.response,
               let httpResponse = response as? HTTPURLResponse
         else { return 0 }
@@ -56,8 +60,9 @@ import Foundation
         return underlyingError.description
     }
 
-    init(withError error: NSError, withTask task: URLSessionDataTask?) {
-        self.underlyingError = error
+    init(withError error: Error, withTask task: URLSessionDataTask?) {
+        self.underlyingError = error as NSError
+        self.responseError = error as? NCHTTPResponseError
         self.task = task
     }
 

@@ -550,6 +550,7 @@
 				"Chat cells/AutoCompletionTableViewCell.swift",
 				"Chat cells/EmojiUtils.swift",
 				"Chat cells/SwiftMarkdownObjCBridge.swift",
+				"Chat upload/ChatBackgroundUploader.swift",
 				"Chat upload/ChatFileUpload.swift",
 				"Chat upload/ChatFileUploadDestination.swift",
 				"Chat upload/ChatFileUploader.swift",
@@ -907,6 +908,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				NCConnectionController.swift,
+				NCNetworkReachability.swift,
 			);
 			target = 2CC0014E24A1F0E900A20167 /* NotificationServiceExtension */;
 		};
@@ -914,6 +916,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				NCConnectionController.swift,
+				NCNetworkReachability.swift,
 			);
 			target = 2C62AFA224C08845007E460A /* ShareExtension */;
 		};
@@ -921,6 +924,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				NCConnectionController.swift,
+				NCNetworkReachability.swift,
 			);
 			target = 1FF2FD5A2AB99CCB000C9905 /* BroadcastUploadExtension */;
 		};
@@ -928,6 +932,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				NCConnectionController.swift,
+				NCNetworkReachability.swift,
 			);
 			target = 1FA93D9B2D70FCC200DF6CDF /* TalkIntents */;
 		};
@@ -2469,12 +2474,6 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleToolboxForMac\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleWebRTC\"",
-					"\"${PODS_ROOT}/Headers/Public/Protobuf\"",
-					"\"${PODS_ROOT}/Headers/Public/nanopb\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
@@ -2513,12 +2512,6 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleToolboxForMac\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleWebRTC\"",
-					"\"${PODS_ROOT}/Headers/Public/Protobuf\"",
-					"\"${PODS_ROOT}/Headers/Public/nanopb\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
@@ -2561,7 +2554,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.TalkIntents;
@@ -2603,7 +2596,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.TalkIntents;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -2703,7 +2696,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.BroadcastUploadExtension;
@@ -2748,7 +2741,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.BroadcastUploadExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -2897,12 +2890,6 @@
 				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleToolboxForMac\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleWebRTC\"",
-					"\"${PODS_ROOT}/Headers/Public/Protobuf\"",
-					"\"${PODS_ROOT}/Headers/Public/nanopb\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				INFOPLIST_FILE = NextcloudTalk/Info.plist;
@@ -2912,7 +2899,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -2942,12 +2929,6 @@
 				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleToolboxForMac\"",
-					"\"${PODS_ROOT}/Headers/Public/GoogleWebRTC\"",
-					"\"${PODS_ROOT}/Headers/Public/Protobuf\"",
-					"\"${PODS_ROOT}/Headers/Public/nanopb\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				INFOPLIST_FILE = NextcloudTalk/Info.plist;
@@ -2957,7 +2938,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -3000,21 +2981,6 @@
 				);
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/AFViewShaker\"",
-					"\"${PODS_ROOT}/Headers/Public/BKPasscodeView\"",
-					"\"${PODS_ROOT}/Headers/Public/DBImageColorPicker\"",
-					"\"${PODS_ROOT}/Headers/Public/JDStatusBarNotification\"",
-					"\"${PODS_ROOT}/Headers/Public/MDFInternationalization\"",
-					"\"${PODS_ROOT}/Headers/Public/MaterialComponents\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionAnimator\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionInterchange\"",
-					"\"${PODS_ROOT}/Headers/Public/PulsingHalo\"",
-					"\"${PODS_ROOT}/Headers/Public/Realm\"",
-					"\"${PODS_ROOT}/Headers/Public/SocketRocket\"",
-					"\"${PODS_ROOT}/Headers/Public/Toast\"",
-					"\"${PODS_ROOT}/Headers/Public/UICKeyChainStore\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				INFOPLIST_FILE = ShareExtension/Info.plist;
@@ -3024,25 +2990,8 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/AFNetworking\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/AFViewShaker\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/BKPasscodeView\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/DBImageColorPicker\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/JDStatusBarNotification\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MDFInternationalization\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MaterialComponents\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MotionAnimator\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MotionInterchange\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/PulsingHalo\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/Realm\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/SocketRocket\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/Toast\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/UICKeyChainStore\"",
-					"\"${PODS_ROOT}/Realm/core\"",
-				);
-				MARKETING_VERSION = 25.0.2;
+				LIBRARY_SEARCH_PATHS = "$(inherited)";
+				MARKETING_VERSION = 25.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.ShareExtension;
@@ -3091,21 +3040,6 @@
 				);
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/AFViewShaker\"",
-					"\"${PODS_ROOT}/Headers/Public/BKPasscodeView\"",
-					"\"${PODS_ROOT}/Headers/Public/DBImageColorPicker\"",
-					"\"${PODS_ROOT}/Headers/Public/JDStatusBarNotification\"",
-					"\"${PODS_ROOT}/Headers/Public/MDFInternationalization\"",
-					"\"${PODS_ROOT}/Headers/Public/MaterialComponents\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionAnimator\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionInterchange\"",
-					"\"${PODS_ROOT}/Headers/Public/PulsingHalo\"",
-					"\"${PODS_ROOT}/Headers/Public/Realm\"",
-					"\"${PODS_ROOT}/Headers/Public/SocketRocket\"",
-					"\"${PODS_ROOT}/Headers/Public/Toast\"",
-					"\"${PODS_ROOT}/Headers/Public/UICKeyChainStore\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				INFOPLIST_FILE = ShareExtension/Info.plist;
@@ -3115,25 +3049,8 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				LIBRARY_SEARCH_PATHS = (
-					"$(inherited)",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/AFNetworking\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/AFViewShaker\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/BKPasscodeView\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/DBImageColorPicker\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/JDStatusBarNotification\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MDFInternationalization\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MaterialComponents\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MotionAnimator\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/MotionInterchange\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/PulsingHalo\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/Realm\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/SocketRocket\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/Toast\"",
-					"\"${PODS_CONFIGURATION_BUILD_DIR}/UICKeyChainStore\"",
-					"\"${PODS_ROOT}/Realm/core\"",
-				);
-				MARKETING_VERSION = 25.0.2;
+				LIBRARY_SEARCH_PATHS = "$(inherited)";
+				MARKETING_VERSION = 25.1.0;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.ShareExtension;
 				PRODUCT_NAME = ShareExtension;
@@ -3179,21 +3096,6 @@
 				);
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/AFViewShaker\"",
-					"\"${PODS_ROOT}/Headers/Public/BKPasscodeView\"",
-					"\"${PODS_ROOT}/Headers/Public/DBImageColorPicker\"",
-					"\"${PODS_ROOT}/Headers/Public/JDStatusBarNotification\"",
-					"\"${PODS_ROOT}/Headers/Public/MDFInternationalization\"",
-					"\"${PODS_ROOT}/Headers/Public/MaterialComponents\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionAnimator\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionInterchange\"",
-					"\"${PODS_ROOT}/Headers/Public/PulsingHalo\"",
-					"\"${PODS_ROOT}/Headers/Public/Realm\"",
-					"\"${PODS_ROOT}/Headers/Public/SocketRocket\"",
-					"\"${PODS_ROOT}/Headers/Public/Toast\"",
-					"\"${PODS_ROOT}/Headers/Public/UICKeyChainStore\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
@@ -3204,7 +3106,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.NotificationServiceExtension;
@@ -3251,21 +3153,6 @@
 				);
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"${PODS_ROOT}/Headers/Public\"",
-					"\"${PODS_ROOT}/Headers/Public/AFNetworking\"",
-					"\"${PODS_ROOT}/Headers/Public/AFViewShaker\"",
-					"\"${PODS_ROOT}/Headers/Public/BKPasscodeView\"",
-					"\"${PODS_ROOT}/Headers/Public/DBImageColorPicker\"",
-					"\"${PODS_ROOT}/Headers/Public/JDStatusBarNotification\"",
-					"\"${PODS_ROOT}/Headers/Public/MDFInternationalization\"",
-					"\"${PODS_ROOT}/Headers/Public/MaterialComponents\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionAnimator\"",
-					"\"${PODS_ROOT}/Headers/Public/MotionInterchange\"",
-					"\"${PODS_ROOT}/Headers/Public/PulsingHalo\"",
-					"\"${PODS_ROOT}/Headers/Public/Realm\"",
-					"\"${PODS_ROOT}/Headers/Public/SocketRocket\"",
-					"\"${PODS_ROOT}/Headers/Public/Toast\"",
-					"\"${PODS_ROOT}/Headers/Public/UICKeyChainStore\"",
 					"\"$(PROJECT_DIR)/ThirdParty\"/**",
 				);
 				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
@@ -3276,7 +3163,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				MARKETING_VERSION = 25.0.2;
+				MARKETING_VERSION = 25.1.0;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.nextcloud.Talk.NotificationServiceExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";

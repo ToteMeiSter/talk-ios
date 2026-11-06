@@ -143,12 +143,39 @@ import Toast
 
     private var messageHeightCache = NCChatMessageHeightCache()
 
-    /// The files of one upload, shown as a single message, by the id of the message they are shown as
-    internal var fileMessageGroups: [Int: FileMessageGroup] = [:]
+    /// The files of one upload, shown as a single message, by the reference id of the message they are shown as.
+    /// Files of an upload always have one, also while they are still being posted and have no message id yet.
+    private var fileMessageGroups: [String: FileMessageGroup] = [:]
 
-    /// Messages shown as part of the group of their upload instead of on their own, mapped to the
-    /// message whose row shows them
-    internal var messageIdsHiddenInFileGroups: [Int: Int] = [:]
+    /// Messages shown as part of the group of their upload instead of on their own, by reference id, with the
+    /// reference id of the message whose row shows them
+    private var hiddenFileMessages: [String: (message: NCChatMessage, shownBy: String)] = [:]
+
+    /// What a row of an uploaded file shows apart from itself. A changed content needs a reload of the row.
+    fileprivate enum FileRowContent: Equatable {
+        case hidden
+        case group(continuesAuthorBlock: Bool, files: [FileRowFile])
+    }
+
+    fileprivate struct FileRowFile: Equatable {
+        let key: String
+        let isPending: Bool
+    }
+
+    /// What the rows of uploaded files show, by fileRowKey(for:).
+    fileprivate struct FileRows {
+        var contents: [String: (message: NCChatMessage, content: FileRowContent)] = [:]
+
+        func messagesWithChangedRows(since rowsBefore: FileRows) -> [NCChatMessage] {
+            let keys = Set(rowsBefore.contents.keys).union(self.contents.keys)
+
+            return keys.filter { rowsBefore.contents[$0]?.content != self.contents[$0]?.content }
+                .compactMap { self.contents[$0]?.message ?? rowsBefore.contents[$0]?.message }
+        }
+    }
+
+    /// Since the last regrouping
+    private var fileRows = FileRows()
 
     private lazy var inputbarBorderView: UIView = {
         let inputbarBorderView = UIView()
@@ -700,7 +727,8 @@ import Toast
             // interrupt the insert/scroll animation that is started here.
             let separatorIndexPath = self.removeUnreadMessagesSeparatorFromDataSource()
 
-            self.appendMessages(messages: [temporaryMessage])
+            // Without the separator, files of one upload around it can join into one group
+            let changedFileRows = self.messagesWithChangedFileRows { self.appendMessages(messages: [temporaryMessage]) }
 
             if let lastDateSection = self.dateSections.last, let messagesForLastDate = self.messages[lastDateSection] {
                 let lastMessageIndexPath = IndexPath(row: messagesForLastDate.count - 1, section: self.dateSections.count - 1)
@@ -719,6 +747,16 @@ import Toast
                 }
 
                 self.tableView?.endUpdates()
+
+                // Rare, so a second update does not matter for the insert animation
+                let changedFileRowIndexPaths = Set(changedFileRows.compactMap { self.indexPath(for: $0) })
+
+                if !changedFileRowIndexPaths.isEmpty {
+                    self.tableView?.beginUpdates()
+                    self.tableView?.reloadRows(at: Array(changedFileRowIndexPaths), with: .none)
+                    self.tableView?.endUpdates()
+                }
+
                 self.scrollChat(to: lastMessageIndexPath, at: .none, animated: true)
             }
         }
@@ -752,10 +790,14 @@ import Toast
 
         block(message)
 
+        // A failed file leaves its group
+        let changedFileRows = self.messagesWithChangedFileRows { self.regroupFileMessages() }
+        let reloadIndexPaths = Set([indexPath] + changedFileRows.compactMap { self.indexPath(for: $0) })
+
         self.messageHeightCache.removeHeight(forMessage: message)
 
         self.tableView?.beginUpdates()
-        self.tableView?.reloadRows(at: [indexPath], with: .none)
+        self.tableView?.reloadRows(at: Array(reloadIndexPaths), with: .none)
         self.tableView?.endUpdates()
     }
 
@@ -770,7 +812,10 @@ import Toast
             updatedMessage.isGroupMessage = message.isGroupMessage && message.actorType != "bots" && updatedMessage.lastEditTimestamp == 0
             updatedMessage.copyPendingReactions(from: message)
             self.messages[keyDate]?[indexPath.row] = updatedMessage
-            self.regroupFileMessages()
+
+            // A deleted file can split its group, an edit can change its header
+            let changedFileRows = self.messagesWithChangedFileRows { self.regroupFileMessages() }
+            reloadIndexPaths.append(contentsOf: changedFileRows.compactMap { self.indexPath(for: $0) })
 
             // Check if there are any messages that reference our message as a parent -> these need to be reloaded as well
             if let visibleIndexPaths = self.tableView?.indexPathsForVisibleRows {
@@ -787,7 +832,7 @@ import Toast
 
             self.messageHeightCache.removeHeight(forMessage: message)
             self.tableView?.beginUpdates()
-            self.tableView?.reloadRows(at: reloadIndexPaths, with: .none)
+            self.tableView?.reloadRows(at: Array(Set(reloadIndexPaths)), with: .none)
             self.tableView?.endUpdates()
 
             // The row heights are up to date right after endUpdates, so compensate here instead of deferring
@@ -1377,7 +1422,7 @@ import Toast
         let isVoiceMessage = message.isVoiceMessage
 
         // The file was posted, the message of the server is the one to show. Sending it again would post it twice.
-        if let referenceId = message.referenceId, ChatBackgroundUploader.shared.isAnnounced(referenceId: referenceId) {
+        if let referenceId = message.referenceId, LegacyChatBackgroundUploader.shared.isAnnounced(referenceId: referenceId) {
             self.removeFailedMessage(message)
             return
         }
@@ -1406,7 +1451,7 @@ import Toast
             }
 
             // A stored upload goes on where it stopped. A file that is on the server is not uploaded again.
-            if let referenceId = message.referenceId, ChatBackgroundUploader.shared.retry(referenceId: referenceId) {
+            if let referenceId = message.referenceId, LegacyChatBackgroundUploader.shared.retry(referenceId: referenceId) {
                 return
             }
 
@@ -1537,7 +1582,7 @@ import Toast
 
     /// The group of a file, also when the media viewer shows a file older than the loaded part of the chat
     func fileGroup(of message: NCChatMessage) -> FileMessageGroup? {
-        if let fileGroup = FileMessageGroup.containing(messageId: message.messageId, in: self.fileMessageGroups) {
+        if let fileGroup = FileMessageGroup.containing(message, in: self.fileMessageGroups) {
             return fileGroup
         }
 
@@ -1584,7 +1629,7 @@ import Toast
     func didPressDelete(for message: NCChatMessage, showSuccess: Bool = true) {
         if message.sendingFailed || message.isOfflineMessage {
             // Nothing is left to send, so the stored copy of the file is not needed anymore
-            ChatBackgroundUploader.shared.discard(referenceId: message.referenceId)
+            LegacyChatBackgroundUploader.shared.discard(referenceId: message.referenceId)
 
             self.removePermanentlyTemporaryMessage(temporaryMessage: message)
             return
@@ -1881,9 +1926,6 @@ import Toast
         let shareConfirmationVC = ShareConfirmationViewController(room: self.room, thread: self.thread, account: self.account, serverCapabilities: serverCapabilities!)!
         shareConfirmationVC.delegate = self
         shareConfirmationVC.isModal = true
-        shareConfirmationVC.uploadHandler = { [weak self] uploads in
-            self?.sendFiles(uploads)
-        }
         let navigationController = NCNavigationController(rootViewController: shareConfirmationVC)
 
         return (shareConfirmationVC, navigationController)
@@ -2484,7 +2526,21 @@ import Toast
         // temporary message shows how they are doing
         if upload.referenceId != nil {
             Task {
-                await ChatBackgroundUploader.shared.enqueue(upload)
+                do {
+                    try await ChatBackgroundUploader.shared.enqueue([upload])
+                    // The upstream job now owns the pending message, including after a relaunch.
+                    RLMRealm.writeTransaction { realm in
+                        if let referenceId = upload.referenceId,
+                           let message = NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).firstObject() {
+                            realm.delete(message)
+                        }
+                    }
+                } catch {
+                    if let referenceId = upload.referenceId {
+                        self.markTemporaryMessageAsFailed(referenceId: referenceId)
+                    }
+                    self.presentUploadError(error, for: upload)
+                }
             }
 
             return
@@ -2496,56 +2552,6 @@ import Toast
                 NCLog.log("Successfully uploaded and shared a \(NCLog.fileTraits(fileName: upload.fileName))")
             } catch {
                 self.presentUploadError(error, for: upload)
-            }
-        }
-    }
-
-    /// Sends the files of the share confirmation. Every file gets a temporary message in the chat, which shows
-    /// how its upload is doing, and is uploaded in a way that survives the app being suspended.
-    internal func sendFiles(_ uploads: [ChatFileUpload]) {
-        var stagedUploads: [ChatFileUpload] = []
-
-        for var upload in uploads {
-            let sourceURL = URL(fileURLWithPath: upload.localPath)
-
-            // The message points to the copy of the store: the file of the caller is deleted right after this
-            guard let temporaryMessage = self.createTemporaryMessage(message: upload.fileName,
-                                                                     replyTo: nil,
-                                                                     messageParameters: upload.localPath,
-                                                                     silently: upload.metadata.silent,
-                                                                     isVoiceMessage: false,
-                                                                     isFileMessage: true,
-                                                                     caption: upload.metadata.caption,
-                                                                     referenceId: upload.referenceId,
-                                                                     filePathForReferenceId: { ChatBackgroundUploader.shared.store.plannedFileURL(forId: $0, sourceURL: sourceURL).path })
-            else { continue }
-
-            upload.referenceId = temporaryMessage.referenceId
-
-            // The file is copied here, the caller may delete it right after this returns
-            let isStaged = ChatBackgroundUploader.shared.stage(upload)
-
-            if !isStaged {
-                // `stage` marked the stored message as failed. The notification about it is handled before the
-                // message below is appended, so the copy that is appended has to say it as well.
-                temporaryMessage.sendingFailed = true
-                temporaryMessage.isOfflineMessage = false
-            }
-
-            if NCDatabaseManager.sharedInstance().roomHasTalkCapability(.chatReferenceId, for: self.room) {
-                self.appendTemporaryMessage(temporaryMessage: temporaryMessage)
-            }
-
-            if isStaged {
-                stagedUploads.append(upload)
-            }
-        }
-
-        for upload in stagedUploads {
-            guard let referenceId = upload.referenceId else { continue }
-
-            Task {
-                await ChatBackgroundUploader.shared.begin(referenceId: referenceId, room: upload.room, account: upload.account)
             }
         }
     }
@@ -3146,45 +3152,66 @@ import Toast
     }
 
     func removeMessage(at indexPath: IndexPath) {
-        guard indexPath.section < self.dateSections.count else { return }
+        guard indexPath.section < self.dateSections.count,
+              let messageCount = self.messages[self.dateSections[indexPath.section]]?.count, indexPath.row < messageCount
+        else { return }
 
-        let sectionKey = self.dateSections[indexPath.section]
-        if var messages = self.messages[sectionKey], indexPath.row < messages.count {
-            if messages.count == 1 {
-                // Remove section
-                self.messages.removeValue(forKey: sectionKey)
-                self.sortDateSections()
-                self.tableView?.beginUpdates()
-                self.tableView?.deleteSections([indexPath.section], with: .none)
-                self.tableView?.endUpdates()
-            } else {
-                // Remove message
-                let isLastMessage = indexPath.row == (messages.count - 1)
-                messages.remove(at: indexPath.row)
-                self.messages[sectionKey] = messages
+        let isLastMessage = indexPath.row == messageCount - 1
+        let removedSection = self.removeMessageFromDataSource(at: indexPath)
+        // Removing a message can split or join a group of files
+        let changedFileRows = self.messagesWithChangedFileRows { self.regroupFileMessages() }
 
-                self.tableView?.beginUpdates()
-                self.tableView?.deleteRows(at: [indexPath], with: .none)
-                self.tableView?.endUpdates()
+        self.tableView?.beginUpdates()
 
-                if !isLastMessage {
-                    // Update the message next to removed message
-                    let nextMessage = messages[indexPath.row]
-                    nextMessage.isGroupMessage = false
-
-                    if indexPath.row > 0 {
-                        let previousMessage = messages[indexPath.row - 1]
-                        nextMessage.isGroupMessage = self.shouldGroupMessage(newMessage: nextMessage, withMessage: previousMessage)
-                    }
-
-                    self.tableView?.beginUpdates()
-                    self.tableView?.reloadRows(at: [indexPath], with: .none)
-                    self.tableView?.endUpdates()
-                }
-            }
-
-            self.regroupFileMessages()
+        if removedSection {
+            self.tableView?.deleteSections([indexPath.section], with: .none)
+        } else {
+            self.tableView?.deleteRows(at: [indexPath], with: .none)
         }
+
+        self.tableView?.endUpdates()
+
+        var reloadIndexPaths = Set(changedFileRows.compactMap { self.indexPath(for: $0) })
+
+        // The message next to the removed one may have changed its author grouping
+        if !removedSection, !isLastMessage {
+            reloadIndexPaths.insert(indexPath)
+        }
+
+        if !reloadIndexPaths.isEmpty {
+            self.tableView?.beginUpdates()
+            self.tableView?.reloadRows(at: Array(reloadIndexPaths), with: .none)
+            self.tableView?.endUpdates()
+        }
+    }
+
+    /// Leaves the table view and the file groups to the caller. Returns whether the section was removed as well.
+    @discardableResult
+    internal func removeMessageFromDataSource(at indexPath: IndexPath) -> Bool {
+        let sectionKey = self.dateSections[indexPath.section]
+
+        guard var messages = self.messages[sectionKey], indexPath.row < messages.count else { return false }
+
+        messages.remove(at: indexPath.row)
+
+        if messages.isEmpty {
+            self.messages.removeValue(forKey: sectionKey)
+            self.sortDateSections()
+            return true
+        }
+
+        if indexPath.row < messages.count {
+            let nextMessage = messages[indexPath.row]
+            nextMessage.isGroupMessage = false
+
+            if indexPath.row > 0 {
+                nextMessage.isGroupMessage = self.shouldGroupMessage(newMessage: nextMessage, withMessage: messages[indexPath.row - 1])
+            }
+        }
+
+        self.messages[sectionKey] = messages
+
+        return false
     }
 
     func sortDateSections() {
@@ -3211,8 +3238,17 @@ import Toast
         return self.availableBodyWidth(forRowWidth: rowWidth, isOwnMessage: isOwnMessage)
     }
 
+    /// The group of files of an upload this message is shown as, nil for a single file.
+    ///
+    /// A posted file and its pending one share their reference id, so the stored message has to be this one.
+    internal func fileGroup(anchoredAt message: NCChatMessage) -> FileMessageGroup? {
+        guard let referenceId = message.referenceId, let group = self.fileMessageGroups[referenceId], group.anchor === message else { return nil }
+
+        return group
+    }
+
     internal func fileMessageGroup(showing message: NCChatMessage) -> FileMessageGroup? {
-        if message.messageId > 0, let group = self.fileMessageGroups[message.messageId] {
+        if let group = self.fileGroup(anchoredAt: message) {
             return group
         }
 
@@ -3225,67 +3261,86 @@ import Toast
     }
 
     internal func isHiddenInFileMessageGroup(_ message: NCChatMessage) -> Bool {
-        guard message.messageId > 0 else { return false }
+        guard let referenceId = message.referenceId else { return false }
 
-        return self.messageIdsHiddenInFileGroups[message.messageId] != nil
+        return self.hiddenFileMessages[referenceId]?.message === message
     }
 
     /// Runs after every change to the data source rather than while messages are added: files of
     /// one upload can arrive in separate batches, history can be prepended in front of a group, and
     /// removing a message can join or split one.
+    ///
+    /// Rows whose files change need a reload, callers that do not reload all rows use messagesWithChangedFileRows(updating:).
     internal func regroupFileMessages() {
-        var groups: [Int: FileMessageGroup] = [:]
-        var hiddenMessageIds: [Int: Int] = [:]
+        var groups: [String: FileMessageGroup] = [:]
+        var hiddenMessages: [String: (message: NCChatMessage, shownBy: String)] = [:]
+        var fileRows = FileRows()
 
         for dateSection in self.dateSections {
             guard let messagesForDate = self.messages[dateSection] else { continue }
 
+            // Only files of an upload are grouped, and they all have a reference id
             for group in FileMessageGroup.groups(in: messagesForDate) {
-                groups[group.anchor.messageId] = group
+                guard let anchorReferenceId = group.anchor.referenceId else { continue }
 
-                for message in group.messages where message.messageId != group.anchor.messageId {
-                    hiddenMessageIds[message.messageId] = group.anchor.messageId
+                groups[anchorReferenceId] = group
+
+                for message in group.messages.dropLast() {
+                    if let referenceId = message.referenceId {
+                        hiddenMessages[referenceId] = (message, anchorReferenceId)
+                    }
+
+                    fileRows.contents[Self.fileRowKey(for: message)] = (message, .hidden)
                 }
+
+                fileRows.contents[Self.fileRowKey(for: group.anchor)] = (group.anchor, Self.fileRowContent(of: group))
             }
 
             // A deleted upload is shown as its first deleted file
             for (previous, message) in zip(messagesForDate, messagesForDate.dropFirst()) where message.isDeletedFileShare(ofTheSameUploadAs: previous) {
-                hiddenMessageIds[message.messageId] = hiddenMessageIds[previous.messageId] ?? previous.messageId
+                guard let referenceId = message.referenceId, let previousReferenceId = previous.referenceId else { continue }
+
+                hiddenMessages[referenceId] = (message, hiddenMessages[previousReferenceId]?.shownBy ?? previousReferenceId)
+                fileRows.contents[Self.fileRowKey(for: message)] = (message, .hidden)
             }
         }
-
-        self.invalidateHeights(previousGroups: self.fileMessageGroups,
-                               groups: groups,
-                               previousHiddenMessageIds: Set(self.messageIdsHiddenInFileGroups.keys),
-                               hiddenMessageIds: Set(hiddenMessageIds.keys))
 
         self.fileMessageGroups = groups
-        self.messageIdsHiddenInFileGroups = hiddenMessageIds
-    }
+        self.hiddenFileMessages = hiddenMessages
 
-    /// A message that joined or left a group is a different height than it was measured at.
-    private func invalidateHeights(previousGroups: [Int: FileMessageGroup],
-                                   groups: [Int: FileMessageGroup],
-                                   previousHiddenMessageIds: Set<Int>,
-                                   hiddenMessageIds: Set<Int>) {
-        var changedMessages: [NCChatMessage] = []
+        let fileRowsBefore = self.fileRows
+        self.fileRows = fileRows
 
-        for anchorId in Set(previousGroups.keys).union(groups.keys)
-        where previousGroups[anchorId]?.messages.count != groups[anchorId]?.messages.count {
-            if let message = groups[anchorId]?.anchor ?? previousGroups[anchorId]?.anchor {
-                changedMessages.append(message)
-            }
-        }
-
-        for messageId in previousHiddenMessageIds.symmetricDifference(hiddenMessageIds) {
-            if let message = self.indexPathAndMessage(forMessageId: messageId)?.message {
-                changedMessages.append(message)
-            }
-        }
-
-        for message in changedMessages {
+        // Measured for what they showed before
+        for message in fileRows.messagesWithChangedRows(since: fileRowsBefore) {
             self.messageHeightCache.removeHeight(forMessage: message)
         }
+    }
+
+    /// Runs the update, which has to regroup like appendMessages does, and returns the messages whose rows show
+    /// something else now. Their rows need a reload.
+    internal func messagesWithChangedFileRows(updating update: () -> Void) -> [NCChatMessage] {
+        let fileRowsBefore = self.fileRows
+        update()
+
+        return self.fileRows.messagesWithChangedRows(since: fileRowsBefore)
+    }
+
+    /// A posted file keeps the row of its pending one. Both on different days collide until the sync reloads all rows.
+    private static func fileRowKey(for message: NCChatMessage) -> String {
+        if let referenceId = message.referenceId, !referenceId.isEmpty {
+            return referenceId
+        }
+
+        return "id\(message.messageId)"
+    }
+
+    private static func fileRowContent(of group: FileMessageGroup) -> FileRowContent {
+        let otherFiles = group.messages.dropLast().map { FileRowFile(key: self.fileRowKey(for: $0), isPending: $0.isTemporary) }
+        // The anchor's own pending state is left out so its replacement can be swapped in place
+        let anchorFile = FileRowFile(key: self.fileRowKey(for: group.anchor), isPending: false)
+
+        return .group(continuesAuthorBlock: group.continuesAuthorBlock, files: otherFiles + [anchorFile])
     }
 
     // MARK: - Message grouping
@@ -3809,8 +3864,20 @@ import Toast
         return super.tableView(tableView, cellForRowAt: indexPath)
     }
 
+    private static let hiddenFileGroupMemberCellIdentifier = "HiddenFileGroupMemberCell"
+
     // swiftlint:disable:next cyclomatic_complexity
     func getCell(for message: NCChatMessage) -> UITableViewCell {
+        // Shown as part of its group. Its row has no height, but a cell with content would still draw over its neighbours.
+        if self.isHiddenInFileMessageGroup(message) {
+            let cell = self.tableView?.dequeueReusableCell(withIdentifier: Self.hiddenFileGroupMemberCellIdentifier)
+                ?? UITableViewCell(style: .default, reuseIdentifier: Self.hiddenFileGroupMemberCellIdentifier)
+            cell.backgroundColor = .clear
+            cell.selectionStyle = .none
+
+            return cell
+        }
+
         if message.messageId == MessageSeparatorTableViewCell.unreadMessagesSeparatorId || message.messageId == MessageSeparatorTableViewCell.unreadMessagesWithSummarySeparatorId,
            let cell = self.tableView?.dequeueReusableCell(withIdentifier: MessageSeparatorTableViewCell.identifier) as? MessageSeparatorTableViewCell {
 
@@ -4479,13 +4546,25 @@ import Toast
         }
     }
 
-    internal func highlightMessageWithContentOffset(messageId: Int) {
-        // A message hidden in a file group is highlighted on the row that shows it
-        let messageId = self.messageIdsHiddenInFileGroups[messageId] ?? messageId
+    /// A message hidden in a file group is shown by the row of its group.
+    private func indexPathShowing(messageId: Int) -> IndexPath? {
+        guard let (indexPath, message) = self.indexPathAndMessage(forMessageId: messageId) else { return nil }
 
+        guard let referenceId = message.referenceId, let hiddenMessage = self.hiddenFileMessages[referenceId], hiddenMessage.message === message
+        else { return indexPath }
+
+        if let anchor = self.fileMessageGroups[hiddenMessage.shownBy]?.anchor {
+            return self.indexPath(for: anchor)
+        }
+
+        // A deleted upload is shown by its first deleted file, which is no group
+        return self.indexPathAndMessage(forReferenceId: hiddenMessage.shownBy)?.indexPath
+    }
+
+    internal func highlightMessageWithContentOffset(messageId: Int) {
         guard messageId > 0,
               let tableView = self.tableView,
-              let (indexPath, _) = self.indexPathAndMessage(forMessageId: messageId)
+              let indexPath = self.indexPathShowing(messageId: messageId)
         else { return }
 
         self.highlightMessage(at: indexPath, with: .none)
@@ -4705,7 +4784,20 @@ import Toast
         }
     }
 
+    // MARK: - Files
+
+    /// Sets up a visible cell for a changed message without reloading its row. The row may show another
+    /// group of files by now, which a reload would get from cellForRowAt.
+    internal func setUpInPlace(_ cell: BaseChatTableViewCell, for message: NCChatMessage) {
+        cell.fileGroup = self.fileMessageGroup(showing: message)
+        cell.setup(for: message, inRoom: self.room, forThread: self.thread, withAccount: self.account)
+    }
+
+    // Only the conversation shows files shared in the background
+    public func cellWants(toOpenBackgroundUpload message: NCChatMessage) {}
+
     // MARK: - Thread messages
+
     public func cellWants(toShowThread message: NCChatMessage) {
         // Hiding the keyboard due to a UIKit issue where the reported keyboard height
         // may be incorrect after dismissing a modal/context menu on iOS 26.
@@ -4842,7 +4934,7 @@ import Toast
         NCUserInterfaceController.sharedInstance().presentAlertViewController(alert)
     }
 
-    private func previewFile(with fileStatus: NCChatFileStatus) {
+    internal func previewFile(with fileStatus: NCChatFileStatus) {
         if self.isPreviewControllerShown {
             // We are showing a file already, no need to open another one
             return

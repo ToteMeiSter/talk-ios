@@ -71,7 +71,7 @@ enum ChatFileUploader {
 
         let destinations = await self.put(uploads, inDraftFolder: draftFolder, maxNetworkWait: maxNetworkWait, progress: progress)
 
-        return await self.announce(uploads, at: destinations, maxNetworkWait: maxNetworkWait)
+        return await self.share(uploads, at: destinations, maxNetworkWait: maxNetworkWait)
     }
 
     /// Uploads the files without posting anything into the conversation yet.
@@ -190,7 +190,7 @@ enum ChatFileUploader {
         // swiftlint:disable:next redundant_void_return
         try await self.retrying(maxNetworkWait: maxNetworkWait) { () async throws -> Void in
             do {
-                try await self.announce(upload, at: destination)
+                try await self.share(upload, at: destination)
             } catch {
                 let failure = self.failure(for: error)
 
@@ -210,7 +210,7 @@ enum ChatFileUploader {
     }
 
     /// Posts the files in the order they were given in, so that they end up next to each other.
-    private static func announce(_ uploads: [ChatFileUpload],
+    private static func share(_ uploads: [ChatFileUpload],
                                  at destinations: [Result<ChatFileUploadDestination, Error>],
                                  maxNetworkWait: TimeInterval) async -> [Result<Void, Error>] {
         var results = [Result<Void, Error>](repeating: .success(()), count: uploads.count)
@@ -240,8 +240,8 @@ enum ChatFileUploader {
     }
 
     /// Like `resolveDestination(for:)`, waiting for the network as long as the retry policy says so.
-    static func resolveDestinationWithRetries(in room: NCRoom, account: TalkAccount, fileName: String, allowUpdate: Bool) async throws -> ChatFileUploadDestination {
-        return try await self.retrying {
+    static func resolveDestinationWithRetries(in room: NCRoom, account: TalkAccount, fileName: String, allowUpdate: Bool, maxNetworkWait: TimeInterval = ChatFileUploadRetryPolicy.maxNetworkWait) async throws -> ChatFileUploadDestination {
+        return try await self.retrying(maxNetworkWait: maxNetworkWait) {
             let destination = try await self.resolveDestination(in: room, account: account, fileName: fileName, allowUpdate: allowUpdate)
 
             // Nobody is there to create the folder when the transfer runs without the app, so it has to exist
@@ -289,7 +289,7 @@ enum ChatFileUploader {
     }
 
     /// Makes sure the conversation subfolder exists and returns the draft folder to upload into.
-    private static func probeDraftFolder(for room: NCRoom, account: TalkAccount, fileNames: [String], allowUpdate: Bool) async throws -> String {
+    static func probeDraftFolder(for room: NCRoom, account: TalkAccount, fileNames: [String], allowUpdate: Bool) async throws -> String {
         do {
             return try await NCAPIController.sharedInstance().probeConversationAttachmentFolder(inRoom: room.token, withFileNames: fileNames, allowUpdate: allowUpdate, forAccount: account).folder
         } catch {
@@ -297,7 +297,7 @@ enum ChatFileUploader {
         }
     }
 
-    private static func draftFolderDestination(in draftFolder: String, for upload: ChatFileUpload) async throws -> ChatFileUploadDestination {
+    static func draftFolderDestination(in draftFolder: String, for upload: ChatFileUpload) async throws -> ChatFileUploadDestination {
         return try await self.draftFolderDestination(in: draftFolder, fileName: upload.fileName, account: upload.account)
     }
 
@@ -366,11 +366,11 @@ enum ChatFileUploader {
         }
     }
 
-    // MARK: - Announce
+    // MARK: - Share
 
     /// Posts the already uploaded file as a message into the conversation.
-    private static func announce(_ upload: ChatFileUpload, at destination: ChatFileUploadDestination) async throws {
-        try await self.announce(inRoom: upload.room.token,
+    private static func share(_ upload: ChatFileUpload, at destination: ChatFileUploadDestination) async throws {
+        try await self.share(inRoom: upload.room.token,
                                 account: upload.account,
                                 fileName: upload.fileName,
                                 referenceId: upload.referenceId,
@@ -380,7 +380,7 @@ enum ChatFileUploader {
     }
 
     // swiftlint:disable:next function_parameter_count
-    static func announce(inRoom token: String,
+    static func share(inRoom token: String,
                          account: TalkAccount,
                          fileName: String,
                          referenceId: String?,
