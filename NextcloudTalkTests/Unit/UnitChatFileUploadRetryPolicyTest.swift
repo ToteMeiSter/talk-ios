@@ -8,6 +8,17 @@ import XCTest
 
 final class UnitChatFileUploadRetryPolicyTest: XCTestCase {
 
+    func testNativeHTTPErrorAndWrappedErrorKeepTheirStatus() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.invalid/upload"))
+        for status in [404, 429, 500] {
+            let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            let error = NCHTTPResponseError(reason: .unacceptableStatusCode, response: response, data: nil)
+            XCTAssertEqual(ChatFileUploadFailure(error: error).httpStatusCode, status)
+            let wrapped = OcsError(withError: error, withTask: nil)
+            XCTAssertEqual(ChatFileUploadFailure(error: wrapped).httpStatusCode, status)
+        }
+    }
+
     func testNetworkErrorsAreRetried() {
         let codes = [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet,
                      NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed,

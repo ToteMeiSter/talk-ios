@@ -310,6 +310,11 @@ enum ChatFileUploadRetryPolicy {
                 continue
             }
 
+            if let responseError = error as? NCHTTPResponseError {
+                result.append(ChainLink(nsError: nil, httpStatusCode: responseError.response.statusCode))
+                break
+            }
+
             let nsError = error as NSError
             let response = nsError.userInfo[self.afNetworkingResponseKey] as? HTTPURLResponse
             result.append(ChainLink(nsError: nsError, httpStatusCode: response?.statusCode))

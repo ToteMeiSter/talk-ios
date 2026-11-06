@@ -12,8 +12,7 @@ extension NCChatMessage {
     }
 
     var isGroupableFileMessage: Bool {
-        // A temporary message has no message id yet, so it cannot be told apart from the others of its group
-        return !self.isTemporary && self.plainFileShare != nil && self.fileUploadReference != nil
+        return self.plainFileShare != nil && self.fileUploadReference != nil
     }
 
     /// Whether both are deleted files of one upload. The server keeps the reference id of a deleted message.

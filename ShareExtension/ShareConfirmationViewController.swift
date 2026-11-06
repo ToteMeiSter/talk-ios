@@ -53,7 +53,6 @@ let kShareConfirmationMaxItems = 10
     /// the progress itself and uploads while it is open.
     ///
     /// Must be done with the files when it returns, the temporary copies are deleted right after.
-    var uploadHandler: (([ChatFileUpload]) -> Void)?
 
     /// How long the progress is shown while waiting for the network. The share extension is not carried on by
     /// the system and the HUD cannot be cancelled, so it reports a missing network soon.
@@ -1167,10 +1166,13 @@ let kShareConfirmationMaxItems = 10
 
         NCIntentController.sharedInstance().donateSendMessageIntent(for: self.room)
 
+        let uploadingText = String.localizedStringWithFormat(NSLocalizedString("Uploading %ld elements", comment: ""), self.shareItemController.shareItems.count)
+
         self.hud = MBProgressHUD.showAdded(to: self.view, animated: true)
         // Compressing the images happens before there is any progress to report
         self.hud?.mode = .indeterminate
-        self.hud?.label.text = String.localizedStringWithFormat(NSLocalizedString("Uploading %ld elements", comment: ""), self.shareItemController.shareItems.count)
+        // In the background, the upload itself happens after the sheet closed
+        self.hud?.label.text = self.room.supportsConversationSubfolders ? NSLocalizedString("Preparing upload", comment: "Files are prepared for being uploaded in the background") : uploadingText
 
         // Add caption to last shareItem
         if let shareItem = self.shareItemController.shareItems.last {
@@ -1181,6 +1183,8 @@ let kShareConfirmationMaxItems = 10
                 message.messageParametersJSONString = messageParameters
 
                 shareItem.caption = message.sendingMessage
+                shareItem.captionMessage = message.message
+                shareItem.captionMessageParameters = messageParameters
             }
         }
 
@@ -1191,12 +1195,16 @@ let kShareConfirmationMaxItems = 10
 
             let uploads = await self.uploads(for: shareItems, quality: self.imageQuality)
 
-            if let uploadHandler = self.uploadHandler {
-                uploadHandler(uploads)
+            // The chat shows pending uploads, so the app does not wait for them either
+            do {
+                try await ChatBackgroundUploader.shared.enqueue(uploads, maxNetworkWait: Self.maxNetworkWait)
                 self.finishUploads(withErrors: [], succeededItems: shareItems)
                 return
+            } catch {
+                NCLog.log("Could not start the background upload, uploading right away. Error: \(NCLog.errorCode(error))")
             }
 
+            self.hud?.label.text = uploadingText
             self.hud?.mode = .annularDeterminate
 
             let results: [Result<Void, Error>]
@@ -1295,6 +1303,8 @@ let kShareConfirmationMaxItems = 10
         upload.metadata = metaData
         upload.allowUpdate = self.allowUpdate
         upload.referenceId = ChatFileUpload.referenceId(uploadId: uploadId, index: index)
+        upload.captionMessage = shareItem.captionMessage
+        upload.captionMessageParameters = shareItem.captionMessageParameters
 
         return upload
     }

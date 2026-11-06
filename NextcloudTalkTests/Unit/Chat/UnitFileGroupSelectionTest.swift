@@ -33,12 +33,12 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
     }
 
     /// The lookups of the chat, built the way `regroupFileMessages` builds them
-    private func lookups(for messages: [NCChatMessage]) -> (groups: [Int: FileMessageGroup], hidden: [Int: Int]) {
-        var groups: [Int: FileMessageGroup] = [:]
+    private func lookups(for messages: [NCChatMessage]) -> (groups: [String: FileMessageGroup], hidden: [Int: Int]) {
+        var groups: [String: FileMessageGroup] = [:]
         var hidden: [Int: Int] = [:]
 
         for group in FileMessageGroup.groups(in: messages) {
-            groups[group.anchor.messageId] = group
+            groups[group.anchor.referenceId!] = group
 
             for message in group.messages where message.messageId != group.anchor.messageId {
                 hidden[message.messageId] = group.anchor.messageId
@@ -59,7 +59,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try file(id: 10, position: 1), try file(id: 11, position: 2), try file(id: 12, position: 3)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[2]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[2]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
 
         XCTAssertEqual(self.ids(expanded), [10, 11, 12])
     }
@@ -69,7 +69,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try file(id: 10, position: 1), try file(id: 11, position: 2), try file(id: 12, position: 3)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[0]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[0]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
 
         XCTAssertEqual(self.ids(expanded), [10, 11, 12])
     }
@@ -78,7 +78,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try file(id: 10, position: 1), try file(id: 11, position: 2), try file(id: 12, position: 3)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[0], chat[2]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[0], chat[2]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
 
         XCTAssertEqual(self.ids(expanded), [10, 11, 12])
     }
@@ -90,7 +90,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try file(id: 10, position: 2), try file(id: 11, position: 1), try file(id: 12, position: 3)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[2]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[2]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
 
         XCTAssertEqual(self.ids(expanded), [11, 10, 12])
     }
@@ -101,7 +101,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try text(id: 9), try file(id: 10, position: 1), try file(id: 11, position: 2), try text(id: 12)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[0], chat[2], chat[3]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[0], chat[2], chat[3]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
 
         XCTAssertEqual(self.ids(expanded), [9, 10, 11, 12])
     }
@@ -112,7 +112,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
                     try file(id: 12, position: 1, hash: other), try file(id: 13, position: 2, hash: other)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[1], chat[3]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[1], chat[3]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
 
         XCTAssertEqual(self.ids(expanded), [10, 11, 12, 13])
     }
@@ -123,7 +123,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try text(id: 9), try file(id: 10, position: 1)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection(chat, in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection(chat, groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
 
         XCTAssertEqual(self.ids(expanded), [9, 10])
     }
@@ -135,7 +135,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try file(id: 10, position: 1), try file(id: 11, position: 2), try file(id: 12, position: 3)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[2]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[2]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
         let plan = try XCTUnwrap(ForwardPlan.make(candidates: expanded.map { ForwardPlan.Entry(id: $0.messageId, kind: .file) }, isClassified: false, supportsFiles: true))
 
         XCTAssertEqual(plan.entries.map { $0.id }, [10, 11, 12])
@@ -147,7 +147,7 @@ final class UnitFileGroupSelectionTest: TestBaseRealm {
         let chat = [try file(id: 10, position: 1), try file(id: 11, position: 2), try file(id: 12, position: 3)]
         let lookup = self.lookups(for: chat)
 
-        let expanded = FileMessageGroup.expandingSelection([chat[2]], in: lookup.groups, hiddenMessageIds: lookup.hidden)
+        let expanded = FileMessageGroup.expandingSelection([chat[2]], groupForMessage: { FileMessageGroup.containing($0, in: lookup.groups) })
         let copied = MessageSelection.joinedText(of: expanded.map { $0.parsedMessage().string })
 
         XCTAssertEqual(copied.components(separatedBy: MessageSelection.textSeparator).count, 3)
