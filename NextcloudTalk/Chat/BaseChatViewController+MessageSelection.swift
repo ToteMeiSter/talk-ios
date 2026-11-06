@@ -154,6 +154,7 @@ extension BaseChatViewController: UIEditMenuInteractionDelegate {
 extension BaseChatViewController {
 
     func canSelect(_ message: NCChatMessage) -> Bool {
+        guard !message.isTemporary, self.fileGroup(of: message)?.messages.contains(where: { $0.isTemporary }) != true else { return false }
         return MessageSelection.isSelectable(messageId: message.messageId, isSystemMessage: message.isSystemMessage, isDeletedMessage: message.isDeletedMessage)
     }
 
@@ -183,7 +184,7 @@ extension BaseChatViewController {
     }
 
     private func fileMessageGroup(of message: NCChatMessage) -> FileMessageGroup? {
-        return FileMessageGroup.containing(messageId: message.messageId, in: self.fileMessageGroups, hiddenMessageIds: self.messageIdsHiddenInFileGroups)
+        return self.fileGroup(of: message)
     }
 
     /// Whether the row of the message is picked: for a group, when any file of it is
@@ -199,7 +200,7 @@ extension BaseChatViewController {
 
     /// The selected messages with all files of the groups among them: a group is one row, picked by one message.
     func selectedMessagesWithFileGroups() -> [NCChatMessage] {
-        return FileMessageGroup.expandingSelection(self.selectedMessages(), in: self.fileMessageGroups, hiddenMessageIds: self.messageIdsHiddenInFileGroups)
+        return FileMessageGroup.expandingSelection(self.selectedMessages(), groupForMessage: { self.fileGroup(of: $0) })
     }
 
     /// The selected messages that are still in the chat, from the oldest
@@ -230,7 +231,7 @@ extension BaseChatViewController {
         self.selectionTitleLabel?.text = String.localizedStringWithFormat(NSLocalizedString("%ld selected", comment: "Number of messages selected in a chat, e.g. '3 selected'"), selectedMessages.count)
         self.selectionTitleLabel?.sizeToFit()
 
-        let canForward = self.forwardPlan(for: FileMessageGroup.expandingSelection(selectedMessages, in: self.fileMessageGroups, hiddenMessageIds: self.messageIdsHiddenInFileGroups)) != nil
+        let canForward = self.forwardPlan(for: FileMessageGroup.expandingSelection(selectedMessages, groupForMessage: { self.fileGroup(of: $0) })) != nil
 
         for item in self.selectionToolbar?.items ?? [] {
             item.isEnabled = item.tag == selectionForwardItemTag ? canForward : true

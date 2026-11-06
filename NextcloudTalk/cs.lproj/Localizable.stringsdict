@@ -38,6 +38,22 @@
 			<string>%d hlasy</string>
 		</dict>
 	</dict>
+	<key>%ld files failed to send</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@files@</string>
+		<key>files</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%ld file failed to send</string>
+			<key>other</key>
+			<string>%ld files failed to send</string>
+		</dict>
+	</dict>
 	<key>%ld participants</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
@@ -301,9 +317,13 @@
 			<key>NSStringFormatValueTypeKey</key>
 			<string>ld</string>
 			<key>one</key>
-			<string>%ld day</string>
+			<string>%ld den</string>
+			<key>few</key>
+			<string>%ld dny</string>
+			<key>many</key>
+			<string>%ld dnů</string>
 			<key>other</key>
-			<string>%ld days</string>
+			<string>%ld dny</string>
 		</dict>
 	</dict>
 	<key>%ld hours</key>
@@ -317,9 +337,13 @@
 			<key>NSStringFormatValueTypeKey</key>
 			<string>ld</string>
 			<key>one</key>
-			<string>%ld hour</string>
+			<string>%ld hodina</string>
+			<key>few</key>
+			<string>%ld hodiny</string>
+			<key>many</key>
+			<string>%ld hodin</string>
 			<key>other</key>
-			<string>%ld hours</string>
+			<string>%ld hodiny</string>
 		</dict>
 	</dict>
 	<key>%ld minutes</key>
@@ -333,9 +357,13 @@
 			<key>NSStringFormatValueTypeKey</key>
 			<string>ld</string>
 			<key>one</key>
-			<string>%ld minute</string>
+			<string>%ld minuta</string>
+			<key>few</key>
+			<string>%ld minuty</string>
+			<key>many</key>
+			<string>%ld minut</string>
 			<key>other</key>
-			<string>%ld minutes</string>
+			<string>%ld minuty</string>
 		</dict>
 	</dict>
 	<key>%1$@, %2$@, %3$@ and %4$ld others will receive invitations</key>
