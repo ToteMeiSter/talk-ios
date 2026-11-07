@@ -105,7 +105,7 @@ enum ChatImageCompressor {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
-            NCLog.log("Could not create the directory for compressed images: \(error.localizedDescription)")
+            NCLog.log("Could not create the directory for compressed images: \(NCLog.errorCode(error))")
             return nil
         }
 

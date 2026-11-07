@@ -15,7 +15,7 @@
 			<key>one</key>
 			<string>%ld aktívny bot</string>
 			<key>few</key>
-			<string>%ld aktívnych botov</string>
+			<string>%ld aktívni boti</string>
 			<key>many</key>
 			<string>%ld aktívnych botov</string>
 			<key>other</key>
@@ -40,6 +40,26 @@
 			<string>%d hlasov</string>
 			<key>other</key>
 			<string>%d hlasy</string>
+		</dict>
+	</dict>
+	<key>%ld files failed to send</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@files@</string>
+		<key>files</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%ld súbor sa nepodarilo odoslať</string>
+			<key>few</key>
+			<string>%ld súbory sa nepodarilo odoslať</string>
+			<key>many</key>
+			<string>%ld súborov sa nepodarilo odoslať</string>
+			<key>other</key>
+			<string>%ld súborov sa nepodarilo odoslať</string>
 		</dict>
 	</dict>
 	<key>%ld participants</key>
@@ -235,7 +255,7 @@
 			<key>one</key>
 			<string>%ld odpoveď</string>
 			<key>few</key>
-			<string>%ld odpovedí</string>
+			<string>%ld odpovede</string>
 			<key>many</key>
 			<string>%ld odpovedí</string>
 			<key>other</key>
@@ -295,9 +315,9 @@
 			<key>one</key>
 			<string>%ld konverzácia s neprečítanými správami</string>
 			<key>few</key>
-			<string>%ld konverzácií s neprečítanými správami</string>
+			<string>%ld konverzácie s neprečítanými správami</string>
 			<key>many</key>
-			<string>%ld konverzácií s neprečítanými správami</string>
+			<string>%ld konverzácie s neprečítanými správami</string>
 			<key>other</key>
 			<string>%ld konverzácií s neprečítanými správami</string>
 		</dict>
@@ -475,7 +495,7 @@
 			<key>one</key>
 			<string>{actor0} vás pridal(a) a %ld ďalšieho účastníka</string>
 			<key>few</key>
-			<string>{actor0} vás pridal(a) a %ld ďalší účastníci</string>
+			<string>{actor0} vás pridal(a) a %ld ďalších účastníkov</string>
 			<key>many</key>
 			<string>{actor0} vás pridal(a) a %ld ďalších účastníkov</string>
 			<key>other</key>

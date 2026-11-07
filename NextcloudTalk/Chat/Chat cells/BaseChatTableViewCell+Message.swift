@@ -24,6 +24,6 @@ extension BaseChatTableViewCell {
 
         guard let messageTextView = self.messageTextView else { return }
 
-        messageTextView.attributedText = message.parsedMarkdownForChat()
+        messageTextView.attributedText = message.parsedMarkdownForChatWithForwardedNote()
     }
 }

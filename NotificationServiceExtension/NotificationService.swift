@@ -5,6 +5,7 @@
 
 import UIKit
 import UserNotifications
+import Intents
 import SDWebImage
 
 class NotificationService: UNNotificationServiceExtension {
@@ -12,6 +13,19 @@ class NotificationService: UNNotificationServiceExtension {
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var bestAttemptContent: UNMutableNotificationContent?
     private var sendMessageIntent: INSendMessageIntent?
+
+    // The system gives the extension roughly 30s, but passes the content to the contentHandler only once.
+    // So there is no way to show the notification from the push data first and enrich it later without a second
+    // alert/sound. Instead the notification is shown at the latest after this deadline with the content that is
+    // already available from the push data. 10s is enough for the notification request, the avatar and the
+    // preview on a normal connection, leaves a big reserve to the 30s limit and shows the pushed subject
+    // (the same text the server would send) instead of waiting for a stalled connection.
+    static let networkDeadline: TimeInterval = 10
+
+    // The notification can be requested to be shown from several places (network callbacks, deadline, system expiration)
+    private let deliveryLock = NSLock()
+    private var hasDeliveredContent = false
+    private var deadlineWorkItem: DispatchWorkItem?
 
     // TODO: We should share this for all extensions
     private func configureDatabase() -> Bool {
@@ -151,7 +165,14 @@ class NotificationService: UNNotificationServiceExtension {
             self.bestAttemptContent?.body = components.dropFirst().joined(separator: "\n")
         }
 
-        NCAPIController.shared.getServerNotification(withId: pushNotification.notificationId, forAccount: account) { serverNotification, dataDict, error in
+        let deadlineWorkItem = DispatchWorkItem { [weak self] in
+            self?.showBestAttemptNotification()
+        }
+
+        self.deadlineWorkItem = deadlineWorkItem
+        DispatchQueue.global().asyncAfter(deadline: .now() + NotificationService.networkDeadline, execute: deadlineWorkItem)
+
+        let serverNotificationTask = NCAPIController.shared.getServerNotification(withId: pushNotification.notificationId, forAccount: account) { serverNotification, dataDict, error in
             guard let serverNotification, let dataDict, error == nil else {
                 // Even if the server request fails, we should try to create a conversation notifications
                 self.createAndShowConversationNotification(withPushNotification: pushNotification)
@@ -172,6 +193,11 @@ class NotificationService: UNNotificationServiceExtension {
             default:
                 self.showBestAttemptNotification()
             }
+        }
+
+        if serverNotificationTask == nil {
+            // No request was started (e.g. no session for the account), so the completion block will never be called
+            self.createAndShowConversationNotification(withPushNotification: pushNotification)
         }
     }
 
@@ -196,7 +222,7 @@ class NotificationService: UNNotificationServiceExtension {
 
         // First try to create the conversation notification, and only afterwards try to retrieve the image preview
         self.createConversationNotification(withPushNotification: pushNotification) {
-            SDWebImageDownloader.shared.config.downloadTimeout = 25.0
+            SDWebImageDownloader.shared.config.downloadTimeout = NotificationService.networkDeadline
             NCAPIController.shared.getPreviewForFile(file.parameterId, width: 0, height: 512, forAccount: account) { image, _ in
                 if let image, let attachment = self.getNotificationAttachment(fromImage: image, forAccountId: account.accountId) {
                     self.bestAttemptContent?.attachments = [attachment]
@@ -243,6 +269,16 @@ class NotificationService: UNNotificationServiceExtension {
 
     private func showBestAttemptNotification() {
         guard let bestAttemptContent = self.bestAttemptContent else { return }
+
+        // The contentHandler must only be called once, a second call is not allowed by the system
+        self.deliveryLock.lock()
+        let alreadyDelivered = self.hasDeliveredContent
+        self.hasDeliveredContent = true
+        self.deliveryLock.unlock()
+
+        guard !alreadyDelivered else { return }
+
+        self.deadlineWorkItem?.cancel()
 
         // When we have a send message intent, we use it, otherwise we fall back to the non-conversation-notification one
         if let sendMessageIntent = self.sendMessageIntent, let updatedContent = try? bestAttemptContent.updating(from: sendMessageIntent) {

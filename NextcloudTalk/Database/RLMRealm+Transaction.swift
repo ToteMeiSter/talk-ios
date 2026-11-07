@@ -27,7 +27,7 @@ extension RLMRealm {
                 result = block(realm)
             }
         } catch {
-            NCLog.log("Realm write transaction failed in \(name): \(error.localizedDescription)")
+            NCLog.log("Realm write transaction failed in \(name): \(NCLog.errorCode(error))")
             return nil
         }
 

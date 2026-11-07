@@ -11,16 +11,17 @@ import SwiftyAttributes
     private class TypingUser {
         var userIdentifier: String
         var displayName: String
-        var lastUpdate: TimeInterval
+        // A user can type with several sessions (e.g. phone and laptop): last update per session
+        var sessionUpdates: [String: TimeInterval] = [:]
 
-        init(userIdentifier: String, displayName: String) {
+        init(userIdentifier: String, displayName: String, sessionId: String) {
             self.userIdentifier = userIdentifier
             self.displayName = displayName
-            self.lastUpdate = Date().timeIntervalSinceReferenceDate
+            self.updateTimestamp(sessionId: sessionId)
         }
 
-        public func updateTimestamp() {
-            self.lastUpdate = Date().timeIntervalSinceReferenceDate
+        public func updateTimestamp(sessionId: String) {
+            self.sessionUpdates[sessionId] = Date().timeIntervalSinceReferenceDate
         }
     }
 
@@ -140,15 +141,15 @@ import SwiftyAttributes
         }
     }
 
-    func checkInactiveTypingUsers() {
-        let currentUpdateTimestamp: TimeInterval = Date().timeIntervalSinceReferenceDate
+    func checkInactiveTypingUsers(currentUpdateTimestamp: TimeInterval = Date().timeIntervalSinceReferenceDate) {
         var usersToRemove: [TypingUser] = []
 
         for typingUser in typingUsers {
-            let timestampDiff = currentUpdateTimestamp - typingUser.lastUpdate
+            // We did not receive an update for that session in the last 15 seconds -> forget the session
+            typingUser.sessionUpdates = typingUser.sessionUpdates.filter { currentUpdateTimestamp - $0.value < 15 }
 
-            if timestampDiff >= 15 {
-                // We did not receive an update for that user in the last 15 seconds -> remove it
+            if typingUser.sessionUpdates.isEmpty {
+                // No session of that user is typing anymore -> remove it
                 usersToRemove.append(typingUser)
             }
         }
@@ -159,25 +160,34 @@ import SwiftyAttributes
         }
     }
 
-    func addTyping(userIdentifier: String, displayName: String) {
+    // Without a sessionId the userIdentifier is used as session
+    func addTyping(userIdentifier: String, displayName: String, sessionId: String? = nil) {
         let existingEntry = self.typingUsers.first(where: { $0.userIdentifier == userIdentifier })
+        let sessionId = sessionId ?? userIdentifier
 
         if existingEntry == nil {
-            let newEntry = TypingUser(userIdentifier: userIdentifier, displayName: displayName)
+            let newEntry = TypingUser(userIdentifier: userIdentifier, displayName: displayName, sessionId: sessionId)
             self.typingUsers.append(newEntry)
         } else {
             // We received another startedTyping message, so we want to restart the remove timer
-            existingEntry?.updateTimestamp()
+            existingEntry?.updateTimestamp(sessionId: sessionId)
         }
 
         self.updateTypingIndicatorDebounced()
     }
 
-    func removeTyping(userIdentifier: String) {
+    // Without a `sessionId` the user is removed completely, otherwise only if no other session of the user types
+    func removeTyping(userIdentifier: String, sessionId: String? = nil) {
         let existingIndex = self.typingUsers.firstIndex(where: { $0.userIdentifier == userIdentifier })
 
         if let existingIndex = existingIndex {
-            self.typingUsers.remove(at: existingIndex)
+            if let sessionId {
+                self.typingUsers[existingIndex].sessionUpdates.removeValue(forKey: sessionId)
+            }
+
+            if sessionId == nil || self.typingUsers[existingIndex].sessionUpdates.isEmpty {
+                self.typingUsers.remove(at: existingIndex)
+            }
         }
 
         self.updateTypingIndicatorDebounced()

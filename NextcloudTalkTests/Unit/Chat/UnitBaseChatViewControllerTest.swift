@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+import AVFoundation
 import XCTest
 @testable import NextcloudTalk
 
@@ -205,6 +206,38 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         XCTAssertEqual(baseController.getCellHeight(for: testMessage, with: 300), 133.0)
     }
 
+    func testMoveRecordingRemovesTemporaryMessageWhenMoveFails() throws {
+        let chatFileController = NCChatFileController(account: baseController.account)
+        let sourcePath = NSTemporaryDirectory() + "missing-recording-\(UUID().uuidString).mp3"
+        let destinationPath = NSTemporaryDirectory() + "moved-recording-\(UUID().uuidString).mp3"
+
+        let temporaryMessage = try XCTUnwrap(baseController.createTemporaryMessage(message: "recording.mp3", replyTo: nil, messageParameters: destinationPath, silently: false, isVoiceMessage: true))
+        let referenceId = try XCTUnwrap(temporaryMessage.referenceId)
+        XCTAssertEqual(NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).count, 1)
+
+        let isMoved = baseController.moveRecording(fromSourcePath: sourcePath, destinationPath: destinationPath, using: chatFileController, for: temporaryMessage)
+
+        XCTAssertFalse(isMoved)
+        XCTAssertEqual(NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).count, 0)
+    }
+
+    func testMoveRecordingKeepsTemporaryMessageWhenMoveSucceeds() throws {
+        let chatFileController = NCChatFileController(account: baseController.account)
+        let sourcePath = NSTemporaryDirectory() + "recording-\(UUID().uuidString).mp3"
+        let destinationPath = NSTemporaryDirectory() + "moved-recording-\(UUID().uuidString).mp3"
+        XCTAssertTrue(FileManager.default.createFile(atPath: sourcePath, contents: Data([1, 2, 3])))
+        defer { try? FileManager.default.removeItem(atPath: destinationPath) }
+
+        let temporaryMessage = try XCTUnwrap(baseController.createTemporaryMessage(message: "recording.mp3", replyTo: nil, messageParameters: destinationPath, silently: false, isVoiceMessage: true))
+        let referenceId = try XCTUnwrap(temporaryMessage.referenceId)
+
+        let isMoved = baseController.moveRecording(fromSourcePath: sourcePath, destinationPath: destinationPath, using: chatFileController, for: temporaryMessage)
+
+        XCTAssertTrue(isMoved)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destinationPath))
+        XCTAssertEqual(NCChatMessage.objects(where: "referenceId = %@ AND isTemporary = true", referenceId).count, 1)
+    }
+
     func testCellWithQuoteHeight() throws {
         // Add an existing message to the database
         let existingMessage = NCChatMessage()
@@ -220,6 +253,286 @@ final class UnitBaseChatViewControllerTest: TestBaseRealm {
         testMessage.message = "test"
         testMessage.parentId = "internal-1"
         XCTAssertEqual(baseController.getCellHeight(for: testMessage, with: 300), 171.0)
+    }
+
+    func testMarkTemporaryMessageAsFailed() throws {
+        let temporaryMessage = NCChatMessage()
+        temporaryMessage.internalId = "temp-1"
+        temporaryMessage.referenceId = "reference-1"
+        temporaryMessage.messageType = "voice-message"
+        temporaryMessage.isTemporary = true
+
+        // A message received from the server with the same reference id
+        let receivedMessage = NCChatMessage()
+        receivedMessage.messageId = 1
+        receivedMessage.internalId = "internal-1"
+        receivedMessage.referenceId = "reference-1"
+
+        try? realm.transaction {
+            realm.add(temporaryMessage)
+            realm.add(receivedMessage)
+        }
+
+        baseController.markTemporaryMessageAsFailed(referenceId: "reference-1")
+
+        XCTAssertTrue(temporaryMessage.sendingFailed)
+        XCTAssertFalse(temporaryMessage.isOfflineMessage)
+        XCTAssertFalse(receivedMessage.sendingFailed)
+    }
+
+    func testMarkTemporaryMessageAsFailedIgnoresReceivedMessage() throws {
+        let receivedMessage = NCChatMessage()
+        receivedMessage.messageId = 1
+        receivedMessage.internalId = "internal-1"
+        receivedMessage.referenceId = "reference-1"
+
+        try? realm.transaction {
+            realm.add(receivedMessage)
+        }
+
+        baseController.markTemporaryMessageAsFailed(referenceId: "reference-1")
+
+        XCTAssertFalse(receivedMessage.sendingFailed)
+    }
+
+    func testPrepareVoiceMessageForResendAssignsNewTimestamp() throws {
+        let message = NCChatMessage()
+        message.sendingFailed = true
+        message.isOfflineMessage = true
+        message.timestamp = Int(Date().timeIntervalSince1970) - (60 * 60 * 13)
+
+        let before = Int(Date().timeIntervalSince1970)
+        baseController.prepareVoiceMessageForResend(message)
+
+        XCTAssertFalse(message.sendingFailed)
+        XCTAssertFalse(message.isOfflineMessage)
+        XCTAssertGreaterThanOrEqual(message.timestamp, before)
+    }
+
+    // MARK: - Voice message playback
+
+    /// One second of silence as 16 bit mono WAV, which AVAudioPlayer can load without any audio hardware
+    private func silentWavData() -> Data {
+        let sampleRate: UInt32 = 8000
+        let dataSize = sampleRate * 2
+
+        func bytes<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
+            withUnsafeBytes(of: value.littleEndian) { Array($0) }
+        }
+
+        var data = Data("RIFF".utf8)
+        data.append(contentsOf: bytes(36 + dataSize))
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        data.append(contentsOf: bytes(UInt32(16)))
+        data.append(contentsOf: bytes(UInt16(1)))
+        data.append(contentsOf: bytes(UInt16(1)))
+        data.append(contentsOf: bytes(sampleRate))
+        data.append(contentsOf: bytes(sampleRate * 2))
+        data.append(contentsOf: bytes(UInt16(2)))
+        data.append(contentsOf: bytes(UInt16(16)))
+        data.append(contentsOf: Array("data".utf8))
+        data.append(contentsOf: bytes(dataSize))
+        data.append(Data(count: Int(dataSize)))
+
+        return data
+    }
+
+    private func makeVoiceMessageFileStatus(fileId: String) throws -> NCChatFileStatus {
+        let fileName = "voice-\(fileId)-\(UUID().uuidString).wav"
+        let fileUrl = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        try silentWavData().write(to: fileUrl)
+        addTeardownBlock { try? FileManager.default.removeItem(at: fileUrl) }
+
+        return NCChatFileStatus(fileId: fileId, fileName: fileName, filePath: "Talk/\(fileName)", fileLocalPath: fileUrl.path)
+    }
+
+    func testVoiceMessageSelectionOutdatedByLaterTap() {
+        let first = baseController.selectVoiceMessage()
+        XCTAssertTrue(baseController.shouldStartVoiceMessage(selection: first))
+
+        let second = baseController.selectVoiceMessage()
+        XCTAssertFalse(baseController.shouldStartVoiceMessage(selection: first))
+        XCTAssertTrue(baseController.shouldStartVoiceMessage(selection: second))
+    }
+
+    func testFinishedDownloadOfOutdatedVoiceMessageKeepsPlayer() throws {
+        // B was tapped last and is playing, while the download of A (tapped earlier) finishes now
+        let playerOfB = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = playerOfB
+
+        let selectionOfA = baseController.selectVoiceMessage()
+        baseController.selectVoiceMessage()
+
+        let fileStatusOfA = try makeVoiceMessageFileStatus(fileId: "1")
+        let finished = expectation(description: "Download of A handled")
+
+        baseController.setupVoiceMessagePlayer(with: fileStatusOfA, selection: selectionOfA) { didStart in
+            XCTAssertFalse(didStart)
+            finished.fulfill()
+        }
+
+        wait(for: [finished], timeout: 5)
+        XCTAssertTrue(baseController.voiceMessagesPlayer === playerOfB)
+    }
+
+    func testVoiceMessagePlayerOfCurrentSelectionIsStarted() throws {
+        let previousPlayer = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = previousPlayer
+        addTeardownBlock { [baseController] in baseController?.stopVoiceMessagePlayer() }
+
+        let selection = baseController.selectVoiceMessage()
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+        let finished = expectation(description: "Player handled")
+
+        baseController.setupVoiceMessagePlayer(with: fileStatus, selection: selection) { didStart in
+            XCTAssertTrue(didStart)
+            finished.fulfill()
+        }
+
+        wait(for: [finished], timeout: 5)
+        XCTAssertNotNil(baseController.voiceMessagesPlayer)
+        XCTAssertFalse(baseController.voiceMessagesPlayer === previousPlayer)
+    }
+
+    func testTapOnVoiceMessageWithLocalFilePlaysItWithoutDownload() throws {
+        addTeardownBlock { [baseController] in baseController?.stopVoiceMessagePlayer() }
+
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+        let fileLocalPath = try XCTUnwrap(fileStatus.fileLocalPath)
+        let fileParameters = """
+        {
+            "file": {
+                "type": "file",
+                "id": "1",
+                "name": "\(fileStatus.fileName)",
+                "path": "\(fileStatus.filePath)",
+                "mimetype": "audio/wav",
+                "fileId": "1",
+                "fileName": "\(fileStatus.fileName)",
+                "filePath": "\(fileStatus.filePath)",
+                "fileLocalPath": "\(fileLocalPath)"
+            }
+        }
+        """
+        testMessage.messageParametersJSONString = fileParameters
+        testMessage.message = "{file}"
+        testMessage.messageType = "voice-message"
+        XCTAssertNotNil(testMessage.file()?.fileStatus)
+
+        let previousPlayer = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = previousPlayer
+
+        baseController.cellWants(toPlayAudioFile: testMessage)
+
+        // The local file is played directly, no download is requested
+        XCTAssertNil(baseController.pendingVoiceMessageDownload)
+
+        // The player is built off the main thread and set on the main thread. Waiting for an expectation fulfilled
+        // on the main queue lets the main queue run, so wait like that until the player replaces the previous one
+        let deadline = Date().addingTimeInterval(5)
+        while baseController.voiceMessagesPlayer === previousPlayer, Date() < deadline {
+            let mainQueueRan = expectation(description: "Main queue ran")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { mainQueueRan.fulfill() }
+            wait(for: [mainQueueRan], timeout: 1)
+        }
+
+        XCTAssertFalse(baseController.voiceMessagesPlayer === previousPlayer, "The tap did not replace the player")
+        XCTAssertNotNil(baseController.voiceMessagesPlayer)
+        XCTAssertNil(baseController.pendingVoiceMessageDownload)
+    }
+
+    func testTapOnVoiceMessageWaitingForItsDownloadIsPending() {
+        let downloading = NCChatFileStatus(fileId: "1", fileName: "", filePath: "")
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: 1)
+
+        XCTAssertTrue(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: downloading))
+    }
+
+    func testTapOnOtherVoiceMessageWhileDownloadingIsNotPending() {
+        let downloading = NCChatFileStatus(fileId: "1", fileName: "", filePath: "")
+        baseController.pendingVoiceMessageDownload = (fileId: "2", selection: 1)
+
+        XCTAssertFalse(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: downloading))
+    }
+
+    func testTapIsNotPendingWithoutDownloadStatus() {
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: 1)
+
+        XCTAssertFalse(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: nil))
+    }
+
+    func testTapIsNotSwallowedByForeignDownloadAfterOwnDownloadEnded() {
+        // Tap on A, its download ends (success, failure or cancellation all call finishVoiceMessageDownload).
+        // Afterwards the same file is downloaded again for another reason, e.g. the transcription.
+        let selection = baseController.selectVoiceMessage()
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: selection)
+        XCTAssertTrue(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: NCChatFileStatus(fileId: "1", fileName: "", filePath: "")))
+
+        baseController.finishVoiceMessageDownload(selection: selection)
+
+        let foreignDownload = NCChatFileStatus(fileId: "1", fileName: "", filePath: "")
+        XCTAssertFalse(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: foreignDownload))
+    }
+
+    func testEndOfOutdatedVoiceMessageDownloadKeepsNewerPendingDownload() {
+        // Tap on A, tap on B, tap on A again: the first A download is outdated and must not clear the third tap
+        let first = baseController.selectVoiceMessage()
+        baseController.selectVoiceMessage()
+        let third = baseController.selectVoiceMessage()
+        baseController.pendingVoiceMessageDownload = (fileId: "1", selection: third)
+
+        baseController.finishVoiceMessageDownload(selection: first)
+
+        XCTAssertTrue(baseController.isVoiceMessageDownloadPending(forFileId: "1", downloadStatus: NCChatFileStatus(fileId: "1", fileName: "", filePath: "")))
+    }
+
+    func testVoiceMessagePlayerCanBeBuiltOffMainThread() throws {
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+        let fileLocalPath = try XCTUnwrap(fileStatus.fileLocalPath)
+        let built = expectation(description: "Player built")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let player = BaseChatViewController.makeVoiceMessagePlayer(atPath: fileLocalPath)
+
+            XCTAssertFalse(Thread.isMainThread)
+            XCTAssertNotNil(player)
+            built.fulfill()
+        }
+
+        wait(for: [built], timeout: 5)
+    }
+
+    func testVoiceMessagePlayerBuiltForOutdatedSelectionIsDiscarded() throws {
+        // The player of A is built off the main thread, while B is tapped
+        let playerOfB = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = playerOfB
+
+        let selectionOfA = baseController.selectVoiceMessage()
+        let fileStatusOfA = try makeVoiceMessageFileStatus(fileId: "1")
+        let finished = expectation(description: "Player of A handled")
+
+        // The selection of A is still current here, so this passes the first check and continues asynchronously
+        baseController.setupVoiceMessagePlayer(with: fileStatusOfA, selection: selectionOfA) { didStart in
+            XCTAssertFalse(didStart)
+            finished.fulfill()
+        }
+        baseController.selectVoiceMessage()
+
+        wait(for: [finished], timeout: 5)
+        XCTAssertTrue(baseController.voiceMessagesPlayer === playerOfB)
+    }
+
+    func testVoiceMessagePlayerOfLatestSelectionReplacesPlayer() throws {
+        let previousPlayer = try AVAudioPlayer(data: silentWavData())
+        baseController.voiceMessagesPlayer = previousPlayer
+        addTeardownBlock { [baseController] in baseController?.stopVoiceMessagePlayer() }
+
+        let selection = baseController.selectVoiceMessage()
+        let newPlayer = try AVAudioPlayer(data: silentWavData())
+        let fileStatus = try makeVoiceMessageFileStatus(fileId: "1")
+
+        XCTAssertTrue(baseController.startVoiceMessagePlayer(newPlayer, with: fileStatus, selection: selection))
+        XCTAssertTrue(baseController.voiceMessagesPlayer === newPlayer)
     }
 
 }
