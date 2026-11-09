@@ -166,21 +166,8 @@ typedef NS_ENUM(NSInteger, NCLocalNotificationType) {
     kNCLocalNotificationTypeFailedToShareRecording,
     kNCLocalNotificationTypeFailedToAcceptInvitation,
     kNCLocalNotificationTypeRecordingConsentRequired,
-    kNCLocalNotificationTypeEndToEndEncryptionUnsupported
-};
-
-typedef NS_ENUM(NSInteger, NCPushNotificationType) {
-    NCPushNotificationTypeUnknown,
-    NCPushNotificationTypeCall,
-    NCPushNotificationTypeRoom,
-    NCPushNotificationTypeChat,
-    NCPushNotificationTypeDelete,
-    NCPushNotificationTypeDeleteAll,
-    NCPushNotificationTypeDeleteMultiple,
-    NCPushNotificationTypeAdminNotification,
-    NCPushNotificationTypeRecording,
-    NCPushNotificationTypeFederation,
-    NCPushNotificationTypeReminder
+    kNCLocalNotificationTypeEndToEndEncryptionUnsupported,
+    kNCLocalNotificationTypeFailedBackgroundUpload
 };
 
 typedef NS_ENUM(NSInteger, NCPreferredFileSorting) {
@@ -204,11 +191,6 @@ typedef NS_ENUM(NSInteger, NCSignalingMessageType) {
     kNCSignalingMessageTypeStartedTyping,
     kNCSignalingMessageTypeStoppedTyping,
     kNCSignalingMessageTypeSelectStream
-};
-
-typedef NS_ENUM(NSInteger, DetailedOptionsSelectorType) {
-    DetailedOptionsSelectorTypeDefault = 0,
-    DetailedOptionsSelectorTypeAccounts
 };
 
 typedef NS_ENUM(NSInteger, NCRoomSortOrder) {

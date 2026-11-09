@@ -38,6 +38,24 @@
 			<string>%d votos</string>
 		</dict>
 	</dict>
+	<key>%ld files failed to send</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@files@</string>
+		<key>files</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>Falha ao enviar %ld arquivo</string>
+			<key>many</key>
+			<string>Falha ao enviar %ld de arquivos</string>
+			<key>other</key>
+			<string>Falha ao enviar %ld arquivos</string>
+		</dict>
+	</dict>
 	<key>%ld participants</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>

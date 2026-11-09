@@ -266,7 +266,7 @@ public extension Notification.Name {
             activeAccount?.active = true
         }
 
-        NCLog.log("Set active account to \(accountId)")
+        NCLog.log("Set active account")
     }
 
     public func accountId(forUser user: String, inServer server: String) -> String {
@@ -390,6 +390,15 @@ public extension Notification.Name {
             return NCRoom(value: managedRoom)
         }
         return nil
+    }
+
+    /// Ids of all accounts that have a conversation with the given token
+    public func accountIds(withRoomToken token: String) -> [String] {
+        var accountIds: [String] = []
+        for case let managedRoom as NCRoom in NCRoom.objects(with: NSPredicate(format: "token = %@", token)) {
+            accountIds.append(managedRoom.accountId)
+        }
+        return accountIds
     }
 
     public func room(withInternalId internalId: String) -> NCRoom? {
@@ -788,6 +797,11 @@ public extension Notification.Name {
     // MARK: - Rooms
 
     func roomsForAccountId(_ accountId: String, withRealm realm: RLMRealm?) -> [NCRoom] {
+        return self.roomsForAccountId(accountId, withRealm: realm, lastActivityByToken: [:])
+    }
+
+    /// - Parameter lastActivityByToken: Activity the server does not know about yet, used where it is newer.
+    func roomsForAccountId(_ accountId: String, withRealm realm: RLMRealm?, lastActivityByToken: [String: Int]) -> [NCRoom] {
         let query = NSPredicate(format: "accountId = %@", accountId)
         var managedRooms: RLMResults<AnyObject>
 
@@ -818,7 +832,7 @@ public extension Notification.Name {
             sortOrder = NCRoomSortOrder(rawValue: capabilities.roomsSortOrder) ?? sortOrder
         }
 
-        unmanagedRooms.sortRooms(withGroupMode: groupMode, withSortOrder: sortOrder)
+        unmanagedRooms.sortRooms(withGroupMode: groupMode, withSortOrder: sortOrder, lastActivityByToken: lastActivityByToken)
 
         return unmanagedRooms
     }

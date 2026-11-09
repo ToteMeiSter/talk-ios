@@ -7,29 +7,17 @@
 #define NextcloudTalk_Bridging_Header_h
 
 #import "ARDSettingsModel.h"
-#import "AuthenticationViewController.h"
-#import "CallParticipantViewCell.h"
-#import "ContactsTableViewCell.h"
-#import "DetailedOptionsSelectorTableViewController.h"
 #import "NCAppBranding.h"
-#import "NCContactsManager.h"
-#import "NCPushNotification.h"
 #import "NCRoom.h"
 #import "TalkAccount.h"
 #import "TalkCapabilities.h"
 #import "ServerCapabilities.h"
 #import "FederatedCapabilities.h"
-#import "NCSignalingController.h"
-#import "NCUserStatus.h"
-#import "NotificationCenterNotifications.h"
-#import "ResultMultiSelectionTableViewController.h"
 #import "UIBarButtonItem+LegacyBadge.h"
-#import "ShareTableViewCell.h"
 #import "TOCroppedImageAttributes.h"
 #import "TOCropViewController.h"
 #import "TOCropViewControllerTransitioning.h"
 #import "TOActivityCroppedImageProvider.h"
-#import "UIImageView+AFNetworking.h"
 #import "UIImage+CropRotate.h"
 #import "MaterialActivityIndicator.h"
 #import "SLKTextViewController.h"
@@ -45,18 +33,10 @@
 #import "UIResponder+SLKAdditions.h"
 
 #import "ShareViewController.h"
-#import "ShareItemController.h"
-#import "NCKeyChainController.h"
-#import "NCIntentController.h"
 #import "CCCertificate.h"
 
 #import "ScreenCapturer.h"
 #import "ScreenCaptureController.h"
-
-#import "AFNetworking.h"
-
-#import "NCUser.h"
-#import "ContactsTableViewCell.h"
 
 #import "DRCellSlideGestureRecognizer.h"
 #import "NCTypes.h"

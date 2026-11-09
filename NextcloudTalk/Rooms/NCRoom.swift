@@ -9,7 +9,7 @@ import SwiftyAttributes
 
 extension Array where Element == NCRoom {
 
-    mutating func sortRooms(withGroupMode groupMode: NCRoomGroupMode, withSortOrder sortOrder: NCRoomSortOrder) {
+    mutating func sortRooms(withGroupMode groupMode: NCRoomGroupMode, withSortOrder sortOrder: NCRoomSortOrder, lastActivityByToken: [String: Int] = [:]) {
         self.sort { (first: NCRoom, second: NCRoom) in
             // 1. Favorites
             if first.isFavorite != second.isFavorite {
@@ -33,10 +33,20 @@ extension Array where Element == NCRoom {
             }
 
             // Default: Recent activity
-            return first.lastActivity > second.lastActivity
+            return first.lastActivity(including: lastActivityByToken) > second.lastActivity(including: lastActivityByToken)
         }
     }
 
+}
+
+extension NCRoom {
+
+    /// - Parameter lastActivityByToken: Activity the server does not know about yet, used where it is newer.
+    func lastActivity(including lastActivityByToken: [String: Int]) -> Int {
+        guard let token = self.token, let otherActivity = lastActivityByToken[token] else { return self.lastActivity }
+
+        return max(self.lastActivity, otherActivity)
+    }
 }
 
 @objc extension NCRoom {
@@ -242,7 +252,7 @@ extension Array where Element == NCRoom {
     }
 
     public var canAddParticipants: Bool {
-        if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.conversationCreationAll) && self.type == .oneToOne {
+        if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.conversationCreationAll, forAccountId: self.accountId) && self.type == .oneToOne {
             // Don't go through NCSettingsController, as that would bring too many dependencies to the extensions
             guard let capabilities = NCDatabaseManager.sharedInstance().serverCapabilities(forAccountId: accountId) else { return false }
             return capabilities.canCreate
@@ -256,14 +266,14 @@ extension Array where Element == NCRoom {
     }
 
     private var isLockedOneToOne: Bool {
-        let lockedOneToOne = self.type == .oneToOne && NCDatabaseManager.sharedInstance().serverHasTalkCapability(.lockedOneToOneRooms)
+        let lockedOneToOne = self.type == .oneToOne && NCDatabaseManager.sharedInstance().serverHasTalkCapability(.lockedOneToOneRooms, forAccountId: self.accountId)
         let lockedOther = self.type == .formerOneToOne || self.type == .noteToSelf
 
         return lockedOneToOne || lockedOther
     }
 
     public var userCanStartCall: Bool {
-        if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.startCallFlag) && !self.canStartCall {
+        if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.startCallFlag, forAccountId: self.accountId) && !self.canStartCall {
             return false
         }
 
@@ -295,7 +305,7 @@ extension Array where Element == NCRoom {
     }
 
     public var callRecordingIsInActiveState: Bool {
-        if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.recordingV1) {
+        if NCDatabaseManager.sharedInstance().serverHasTalkCapability(.recordingV1, forAccountId: self.accountId) {
             // Starting states and running states are considered active
             if self.callRecording != .stopped && self.callRecording != .failed {
                 return true

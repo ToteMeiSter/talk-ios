@@ -33,10 +33,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
     private var fileDescriptorTimer: Timer?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        #if DEBUG
-        AFNetworkActivityIndicatorManager.shared().isEnabled = true
-        #endif
-        AFNetworkReachabilityManager.shared().startMonitoring()
+        NCNetworkReachability.shared.startMonitoring()
 
         NCNotificationController.sharedInstance().requestAuthorization()
 
@@ -75,8 +72,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
         // Init rooms manager to start receiving NSNotificationCenter notifications
         _ = NCRoomsManager.shared
 
+        // Pick up the uploads of files that carried on, or ended, while the app was not running
+        LegacyChatBackgroundUploader.shared.start()
+
         self.registerBackgroundFetchTask()
         self.registerBackgroundProcessingTask()
+
+        ChatBackgroundUploader.shared.startResumingPendingJobs()
 
         // The root view controller wiring and the -TestEnvironment debug label live in
         // SceneDelegate.scene(_:willConnectTo:options:) - they are per-scene UI setup
@@ -93,6 +95,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
 
         return true
     }
+
+
 
     func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
         let intent = userActivity.interaction?.intent
@@ -123,6 +127,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
 
     // The active/inactive/background/foreground transitions are dispatched per-scene, so they live on SceneDelegate as
     // sceneWillResignActive/sceneDidEnterBackground/sceneWillEnterForeground/sceneDidBecomeActive
+
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        if identifier == LegacyChatBackgroundUploader.sessionIdentifier {
+            LegacyChatBackgroundUploader.shared.handleEventsForBackgroundSession(identifier: identifier, completionHandler: completionHandler)
+        } else if !ChatBackgroundUploader.shared.handleEventsForBackgroundURLSession(identifier: identifier, completionHandler: completionHandler) {
+            completionHandler()
+        }
+    }
 
     func applicationProtectedDataDidBecomeAvailable(_ application: UIApplication) {
         if CallKitManager.sharedInstance().calls.count > 0 {
@@ -276,6 +288,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
         let signature = userInfo["signature"] as? String
 
         guard let message, let signature else {
+            // Not a push we can handle, but iOS still expects the completion handler to be called
+            completionHandler(.noData)
             return
         }
 
@@ -472,6 +486,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate, PKPushRegistryDelegate {
             }
 
             backgroundRefreshGroup.leave()
+        }
+
+        // Post shared files whose posting failed and start overdue upload retries, without waiting until the app is opened
+        backgroundRefreshGroup.enter()
+        DispatchQueue.main.async {
+            ChatBackgroundUploader.shared.resumePendingJobs {
+                NCLog.log("CompletionHandler resumePendingJobs")
+
+                backgroundRefreshGroup.leave()
+            }
         }
 
         backgroundRefreshGroup.enter()
